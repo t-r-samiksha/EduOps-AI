@@ -59,11 +59,18 @@ Team of 3, vertical domain ownership:
 
 ## Current phase
 
-**Phase 0 — Shared Foundation.** All three team members are working in this repo together right now. Scope for this phase only:
+**Phase 0 — Shared Foundation.** Scope for this phase:
 1. Repo/monorepo scaffold (frontend + backend folders above)
 2. PostgreSQL schema: users, roles, school, class, subject
 3. RBAC/auth + role-based routing shell (5 dashboards, empty but routed)
 4. Shared Tailwind/shadcn design tokens + layout shell
 5. `/docs/api-contract.md` skeleton
 
-Do not build Person A/B/C's individual features yet — that starts after Phase 0 is merged.
+Do not build Person A/B/C's individual features until Phase 0 is merged.
+
+**Status as of 2026-08-09: Phase 0 looks functionally complete** (auth router/service,
+5 routed dashboards, users/roles/school/class/subject/enrollment/parent_student models
+all present on `main`) even though it was never formally marked merged. Person A's
+Timetable Engine (models/solver/routes/tests) was started on top of it on this date.
+If you're picking up Person B/C work and this note is still here, confirm with the
+team whether Phase 0 is truly closed out before treating this as settled.

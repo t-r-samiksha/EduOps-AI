@@ -61,31 +61,58 @@ Fetch OCR processing status/result for a previously uploaded document.
 
 ### Timetable optimization
 
-#### `POST /admin/timetable/generate`
-Kick off a timetable optimization run for a school/academic year.
+Backed by a CP-SAT (OR-Tools) constraint solver — hard constraints: no teacher, room,
+or class double-booked in the same period. Solver input (`TeacherSubject` = who's
+qualified to teach what, `ClassSubjectRequirement` = periods/week a class needs of a
+subject, `TeacherUnavailability`, `SubjectRoomRequirement` = e.g. Science -> lab) lives
+in `backend/app/models/timetable.py` and must be populated before `/generate` is
+called. `day_of_week` is 0-indexed (0 = Monday); `period_number` is 0-indexed within
+the day. Generation is synchronous (no run_id/polling) - small enough inputs solve in
+well under the request timeout.
+
+#### `POST /timetable/generate`
+Run the solver for a school/academic year and persist the result. Deactivates
+(`is_active=false`) any previous active slots for the same class(es)/academic_year
+before inserting the new ones - a superseding run, not additive.
 - **Roles:** admin, principal
 - **Request:**
 ```json
-{ "school_id": 1, "academic_year": "2026-27", "constraints": { "max_periods_per_day": 8 } }
+{ "school_id": 1, "academic_year": "2026-27", "class_ids": [2], "days": 5, "periods_per_day": 6 }
 ```
-- **Response:** `{ "run_id": 42, "status": "queued" }`
-
-#### `GET /admin/timetable/runs/{run_id}`
-Poll the status/result of a generation run.
-- **Roles:** admin, principal
+`class_ids` omitted = every class in `school_id`. `days`/`periods_per_day` default to 5/6.
 - **Response:**
 ```json
-{ "run_id": 42, "status": "done", "timetable": [ { "day": "Mon", "period": 1, "subject_id": 3, "teacher_id": 7, "class_id": 2, "room": "204" } ] }
+{
+  "academic_year": "2026-27",
+  "slots_created": 14,
+  "slots": [ { "id": 101, "day_of_week": 0, "period_number": 0, "start_time": "08:00:00", "end_time": "08:45:00", "subject_id": 3, "teacher_id": 7, "class_id": 2, "room_id": 1, "academic_year": "2026-27", "is_active": true } ]
+}
 ```
+- **Errors:** `400` no matching classes/requirements found; `422` solver proved the
+  input infeasible (e.g. no qualified teacher, or over-constrained availability).
 
-#### `GET /admin/timetable`
-Fetch the active timetable for a class or teacher.
+#### `GET /timetable/active`
+Fetch active (`is_active=true`) slots for an academic year, scoped by role: admin/
+principal may filter freely by `class_id`/`teacher_id`; teacher is forced to their own
+`teacher_id`; student is scoped to their primary-enrollment class; parent must pass
+`student_id` for a linked child (`403` if not linked).
 - **Roles:** admin, principal, teacher, student, parent
-- **Query:** `?class_id=` or `?teacher_id=`
-- **Response:**
+- **Query:** `?academic_year=` (required) `&class_id=&teacher_id=&student_id=`
+- **Response:** array of the same slot shape as `/generate`'s `slots`.
+
+#### `PUT /timetable/update`
+Manual slot edit (day/period/teacher/room/subject). Re-checks for teacher/room/class
+conflicts against other active slots before applying - on conflict, the slot is left
+untouched and the conflicts are returned instead (never silently overwritten).
+- **Roles:** admin, principal
+- **Request:** `{ "slot_id": 101, "day_of_week": 1, "period_number": 2, "teacher_id": null, "room_id": null, "subject_id": null }`
+(only `slot_id` is required; other fields are optional partial updates)
+- **Response (applied):** `{ "slot": { ...same slot shape... }, "conflicts": [] }`
+- **Response (conflict, not applied):**
 ```json
-{ "items": [ { "day": "Mon", "period": 1, "subject_id": 3, "teacher_id": 7, "class_id": 2, "room": "204" } ] }
+{ "slot": null, "conflicts": [ { "type": "teacher", "conflicting_slot_id": 55, "message": "Teacher already booked in this period" } ] }
 ```
+- **Errors:** `404` slot not found.
 
 ### Attendance
 

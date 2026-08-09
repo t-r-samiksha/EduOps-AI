@@ -22,6 +22,7 @@ backend/venv/
 backend/.venv/
 *.egg-info/
 .pytest_cache/
+.pip-tmp/
 
 # Editor / OS
 .vscode/
