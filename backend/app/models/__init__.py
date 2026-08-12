@@ -1,3 +1,4 @@
+from app.models.alerts import AlertDismissal
 from app.models.attendance import AttendanceReconciliation, AttendanceRecord, FaceEmbedding
 from app.models.class_ import SchoolClass
 from app.models.document import Document, ExtractedEntity, OcrResult
@@ -19,6 +20,7 @@ from app.models.timetable import (
 from app.models.user import User
 
 __all__ = [
+    "AlertDismissal",
     "AttendanceReconciliation",
     "AttendanceRecord",
     "ClassSubjectRequirement",

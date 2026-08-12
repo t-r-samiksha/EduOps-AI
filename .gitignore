@@ -23,9 +23,13 @@ backend/.venv/
 *.egg-info/
 .pytest_cache/
 .pip-tmp/
+backend/var/
 
 # Editor / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+
+.claude/
+CLAUDE.md

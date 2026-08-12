@@ -55,7 +55,25 @@ Team of 3, vertical domain ownership:
 - Frontend dev: `npm run dev` (in `/frontend`)
 - Backend dev: `uvicorn app.main:app --reload` (in `/backend`)
 - Backend deps: `pip install -r requirements.txt --break-system-packages` (or use a venv)
+- **System dependency (not a pip package):** Document OCR (`backend/app/services/
+  ocr_engine.py`) needs the actual Tesseract OCR engine binary installed separately -
+  `pytesseract` is only a subprocess wrapper around it. Windows: `winget install
+  --id UB-Mannheim.TesseractOCR` (installs to `C:\Program Files\Tesseract-OCR\
+  tesseract.exe` by default, auto-detected; if it's elsewhere or not on PATH, set
+  `TESSERACT_CMD` in `.env` to the full binary path). Linux/CI: `apt-get install
+  tesseract-ocr` (Debian/Ubuntu) or your distro's equivalent. Without it,
+  `POST /admin/ocr/documents` returns `503` rather than failing silently or crashing
+  - see `ocr_engine.py::check_tesseract_available()`.
 - Migrations: `alembic revision --autogenerate -m "message"` then `alembic upgrade head`
+- Seed demo data: `python -m scripts.seed_demo_data` (in `/backend`, venv active) — populates
+  a demo school/classes/subjects/teachers/students/rooms/timetable-solver-input so
+  Timetable + Attendance endpoints have something real to hit instead of empty tables.
+  Safe to re-run any time (checks for existing rows by natural key, never creates
+  duplicates or updates rows it finds); prints ready-to-paste IDs for Postman when
+  done. Does NOT create timetable_slots/attendance_records/face_embeddings - generate
+  those for real by calling POST /timetable/generate and POST /attendance/enroll
+  against the seeded base data. Add `--force` to skip its confirmation prompt when the
+  DB already has non-trivial data.
 
 ## Current phase
 

@@ -472,19 +472,105 @@ was already coding against it.
 
 ### Admin command center
 
+"The single screen admins live in" - a pure AGGREGATION feature over data every other
+Person-A endpoint already owns and writes to. Backed by `backend/app/services/
+alert_aggregator.py`: a registry of pluggable alert-source functions (one per
+integrated feature), each reading its own table live and emitting a common `Alert`
+shape. Nothing here creates or mutates a RiskFlag/LeaveRequest/Substitution/Document
+row - it only reads them. Adding a future alert source (e.g. once Syllabus Tracking
+exists) means writing one new function and registering it - see that module's
+docstring.
+
+**Alert sources wired in today**, with their severity rule (exactly two levels,
+`normal`/`urgent` - not a third tier, so a notification consumer can act on severity
+unambiguously):
+| source | condition | severity |
+| --- | --- | --- |
+| `risk_flag` | RiskFlag open/acknowledged | `urgent` if `risk_level="high"` AND still `open`; `normal` once acknowledged or lower risk |
+| `leave_request` | LeaveRequest `status="pending"` | always `normal` |
+| `substitution` | Substitution `status="suggested"` (unconfirmed) | `urgent` if the covering leave's `start_date` is within 3 days (or past); else `normal` |
+| `document_failed` | Document `status="failed"` | always `urgent` (the source image is never persisted - see `models/document.py` - so a failed document can't simply be retried) |
+| `document_low_confidence` | a Document has an uncorrected `is_low_confidence` field | always `normal`, one alert per document (not per field) |
+| `attendance_reconciliation` | AttendanceReconciliation `status="pending"` | always `normal` - included for completeness but expect this empty today; nothing populates that table yet (no RFID ingestion/reconciliation job exists) |
+
+**A known gap, not silently solved:** `/timetable/update`'s conflict detection
+(`_find_conflicts` in `routers/timetable.py`) is purely transient - conflicts are
+returned in the response and never persisted, so there is no table for a "timetable
+conflict" alert to read from. Not included as a source; retrofitting persistence
+there is a real UX decision that belongs to whoever owns that endpoint.
+
+**Composite alert ids - a new pattern, read before building a notification UI
+against this:** an alert's `id` is `"{source}:{entity_id}"`, e.g. `"risk_flag:43"` -
+`entity_id` alone is not unique across sources, so `id` is the only safe identifier
+to hold onto or pass to resolve.
+
+**Resolve routing is NOT the same mechanism for every source** - see
+`alert_aggregator.py`'s "RESOLVE ROUTING" docstring for the full reasoning:
+- `risk_flag` routes to RiskFlag's own real `status="resolved"` transition (the same
+  one `PUT /risk/{id}/resolve` uses) - there's no separate dismissal state for it.
+- Every other source (`leave_request`, `substitution`, `document_failed`,
+  `document_low_confidence`, `attendance_reconciliation`) records a row in a new,
+  intentionally tiny `alert_dismissals` table instead. These sources' real "next
+  state" is a decision made through their own dedicated endpoint (approve/reject a
+  leave, confirm a substitution with a chosen teacher) that a generic resolve must
+  not fake - dismissing here only hides the alert from the feed, it does not touch
+  the source row. See `models/alerts.py`'s `AlertDismissal` docstring.
+
 #### `GET /admin/alerts`
-Unified alerts feed for the admin command center.
+Unified alerts feed.
 - **Roles:** admin, principal
-- **Query:** `?since=&severity=`
+- **Query:** `?since=&severity=` (`severity` is `normal` or `urgent`)
 - **Response:**
 ```json
-{ "items": [ { "id": 9, "type": "attendance_drop", "severity": "warning", "message": "Class 8B attendance below 80%", "created_at": "2026-08-09T06:00:00Z", "resolved": false } ] }
+{
+  "items": [
+    {
+      "id": "risk_flag:43", "source": "risk_flag", "severity": "urgent",
+      "title": "Student risk flag (high)", "message": "attendance rate 20% is below the 90% threshold",
+      "entity_type": "risk_flags", "entity_id": 43,
+      "created_at": "2026-08-11T14:23:27Z", "resolved": false
+    }
+  ]
+}
+```
+Resolved/dismissed alerts are excluded by default (same convention as `/risk/flagged`) - there is no way to see them through this endpoint today.
+
+#### `GET /admin/alerts/summary`
+Lightweight counts-by-severity/source, for a dashboard header widget. **Not in the
+original stub** - a small, natural addition alongside the feed, flagged here rather
+than silently added.
+- **Roles:** admin, principal
+- **Query:** `?since=`
+- **Response:**
+```json
+{ "total": 5, "by_severity": { "normal": 3, "urgent": 2 }, "by_source": { "risk_flag": 2, "leave_request": 3 } }
 ```
 
 #### `POST /admin/alerts/{id}/resolve`
-Mark an alert as resolved.
+Mark an alert resolved - `{id}` is the composite string above, e.g. `risk_flag:43`.
+See "Resolve routing" above for what actually changes per source.
 - **Roles:** admin, principal
-- **Response:** `{ "id": 9, "resolved": true }`
+- **Response:** `{ "id": "risk_flag:43", "resolved": true }`
+- **Errors:** `400` malformed id (not `"source:entity_id"`), or already resolved; `404` unknown source, or entity_id doesn't exist.
+
+#### `GET /admin/alerts/stream`
+Live alert feed - **SSE, not Socket.io.** Checked first: Socket.io is named in the
+tech stack doc but nothing in this repo wires it up yet (Person C hasn't started
+chat, the only other feature that would plausibly need it). A plain
+`text/event-stream` response needs no new dependency and no server changes; Person C
+can move this onto Socket.io later if unifying makes sense once chat needs it -
+nothing here blocks that. Polls the aggregator every 5 seconds (documented as
+`SSE_POLL_INTERVAL_SECONDS` in `routers/admin_alerts.py`) rather than pushing on
+write - genuine push (DB LISTEN/NOTIFY, a message bus) is real infrastructure this
+session doesn't take on, consistent with every other "no task queue exists yet"
+finding across this project.
+- **Roles:** admin, principal
+- **Response:** `text/event-stream`, one `data: [ ...same array GET /admin/alerts/items would contain... ]\n\n` event every ~5s.
+- **Auth caveat for a real frontend:** like every other endpoint here, this expects
+  `Authorization: Bearer <token>` - browsers' native `EventSource` API can't set
+  custom headers, so a real frontend client will need either a signed/short-lived
+  URL token or a fetch-based SSE polyfill. Not solved here; noted for whoever wires
+  up the frontend.
 
 ### Approval chains
 
