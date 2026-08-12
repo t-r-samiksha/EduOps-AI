@@ -7,7 +7,41 @@ python-dotenv>=1.0.1
 pydantic>=2.10.0
 pydantic-settings>=2.6.0
 python-jose[cryptography]>=3.3.0
+python-multipart>=0.0.12
 ortools>=9.11.0
+pgvector>=0.3.6
+scikit-learn>=1.5.0
+
+# Early-warning: teacher-remark sentiment. vaderSentiment is pure Python (a single
+# universal py2.py3-none-any wheel, no compiled extensions) - picked specifically to
+# avoid a repeat of the dlib/attendance-CV wheel saga. Purpose-built for short,
+# informal text, which fits teacher remarks well; no corpus download required at
+# runtime unlike nltk's VADER (which needs `nltk.download('vader_lexicon')`).
+vaderSentiment>=3.3.2
+
+# Document OCR. pytesseract is a pure-Python subprocess wrapper (py3-none-any wheel,
+# no compiled extensions) - but unlike every other entry in this file, it does NOT
+# bundle the thing it wraps: the actual Tesseract OCR engine is a separate SYSTEM
+# BINARY that must be installed outside pip (see CLAUDE.md's Commands section for the
+# winget/apt-get install step). Flagging loudly since this is exactly the kind of gap
+# that broke dlib before - `pip install -r requirements.txt` alone is not enough for
+# OCR to actually work.
+pytesseract>=0.3.13
+
+# Attendance CV. dlib has no prebuilt PyPI wheel on some platforms/Python versions
+# (would otherwise need a C++ toolchain + cmake to build from source) - dlib-bin is a
+# prebuilt-wheel drop-in (still `import dlib`) covering Windows/Linux/macOS across
+# Python 3.10-3.14. face_recognition itself is installed with --no-deps against it
+# since its declared dependency is the (source-only) `dlib` package name.
+dlib-bin>=20.0.0
+face_recognition==1.3.0
+face_recognition_models>=0.3.0
+opencv-python>=4.10.0
+numpy>=1.26.0
+Pillow>=10.4.0
+# face_recognition_models still imports pkg_resources at import time; pin below the
+# setuptools version that dropped it (removal began ~81).
+setuptools<81
 
 # dev/test
 pytest>=8.3.0

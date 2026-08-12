@@ -36,14 +36,46 @@ Person B/C's sections below.
 
 ### Document OCR
 
+Backed by Tesseract via `pytesseract` (`backend/app/services/ocr_engine.py`) +
+regex-based per-`document_type` field extraction (`backend/app/services/
+ocr_postprocess.py`, honest at this scale per the playbook - not an NLP/NER
+pipeline). **System dependency, not just a pip package:** the actual Tesseract OCR
+engine must be installed separately (`winget install --id UB-Mannheim.TesseractOCR`
+on Windows, `apt-get install tesseract-ocr` on Linux/CI) - `pip install pytesseract`
+alone only gets you the subprocess wrapper. See `ocr_engine.py`'s docstring and
+CLAUDE.md's Commands section.
+
+**Processing is synchronous**, same precedent as `/timetable/generate`: OCR +
+extraction run inside the `POST` request itself, so the response reflects the real
+final `status` (`done`/`failed`), not `queued` as an earlier draft of this doc showed
+- there's no polling step because there's no async gap to poll across. Routing
+extracted entities into other tables ("Async task... to auto-route extracted entities
+to relevant tables" per the playbook) is likewise a plain synchronous function
+(`backend/app/services/ocr_routing.py`) shaped so it could be handed to a real task
+queue later - no Celery/Dramatiq/Huey/APScheduler exists anywhere in this repo yet
+(checked before building this, same finding as Staffing/Early-Warning's scheduler
+checks).
+
+**Which document_types route for real vs. stay extraction-only - checked before
+building, read before assuming otherwise:** `backend/app/models/` has no admissions/
+applications table (Task Group 9, not started) and no grades table (Person B's
+gradebook, not started, same finding as Early-Warning's grades caveat). **Every
+document_type is therefore extraction-only today** - `admission_form`, `marksheet`,
+and `id_proof` all OCR and structure-extract for real, persisted as real
+`ExtractedEntity` rows, but nothing currently auto-routes anywhere beyond this
+feature's own tables. Every `GET`/`reextract` response's `routing` field makes this
+explicit per-document rather than silently omitting it. Wire a real handler into
+`ocr_routing.ROUTING_TARGETS` once a target table exists - no other code changes.
+
 #### `POST /admin/ocr/documents`
 Upload a document (marksheet, admission form, ID proof, ...) for OCR processing.
 - **Roles:** admin, principal
 - **Request:** `multipart/form-data` — `file` (binary) + form field `document_type` (`"marksheet" | "admission_form" | "id_proof" | "other"`)
 - **Response:**
 ```json
-{ "id": 1, "document_type": "admission_form", "status": "queued", "uploaded_at": "2026-08-09T10:00:00Z" }
+{ "id": 1, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z" }
 ```
+- **Errors:** `400` invalid `document_type`; `422` undecodable image; `503` Tesseract binary unavailable on the server.
 
 #### `GET /admin/ocr/documents/{id}`
 Fetch OCR processing status/result for a previously uploaded document.
@@ -54,10 +86,43 @@ Fetch OCR processing status/result for a previously uploaded document.
   "id": 1,
   "document_type": "admission_form",
   "status": "done",
-  "extracted_fields": { "applicant_name": "...", "dob": "2015-04-01" },
+  "uploaded_at": "2026-08-11T10:00:00Z",
+  "processed_at": "2026-08-11T10:00:01Z",
+  "extracted_fields": { "applicant_name": "Priya Sharma", "dob": "2015-04-01", "guardian_name": "Rajesh Sharma", "guardian_phone": "9876543210" },
+  "entities": [
+    { "id": 5, "field_name": "applicant_name", "field_value": "Priya Sharma", "confidence_score": 0.96, "is_low_confidence": false, "corrected_value": null, "corrected_by": null, "corrected_at": null }
+  ],
+  "raw_text": "Applicant Name: Priya Sharma\nDate of Birth: 2015-04-01\n...",
+  "ocr_confidence": 0.96,
+  "routing": { "routed": false, "target_table": null, "reason": "No 'admissions/applications' table exists yet for document_type='admission_form' - extraction is persisted as ExtractedEntity rows, routing is a documented stub" },
   "error": null
 }
 ```
+`extracted_fields` uses each field's `corrected_value` where a manual correction
+exists, else its OCR `field_value` - `entities` carries the full per-field detail
+(confidence, correction state, entity `id` to `PUT` against) the flat dict can't.
+- **Errors:** `404` unknown document id.
+
+#### `PUT /admin/ocr/documents/{id}/entities/{entity_id}`
+Manual correction of an extracted field (the "manual data fix" half of the playbook's
+manual-fix-+-re-extract flow) - sets `corrected_value`/`corrected_by`/`corrected_at`
+without touching the original OCR `field_value`.
+- **Roles:** admin, principal
+- **Request:** `{ "corrected_value": "Priya A. Sharma" }`
+- **Response:** the updated entity, same shape as a `GET` response's `entities[]` item.
+- **Errors:** `400` empty `corrected_value`; `404` unknown document/entity id (or entity belongs to a different document).
+
+#### `POST /admin/ocr/documents/{id}/reextract`
+Re-run postprocessing against the document's already-stored `raw_text` (no
+re-upload) - the "re-extract" half of the manual-fix flow, e.g. after realizing a
+document was mis-classified. Per-field confidence is recomputed from persisted
+word-level OCR data, not just re-copied from the overall score. **Replaces** the
+document's existing entities (and therefore any corrections made against them) -
+old field names may not even apply if `document_type` changed.
+- **Roles:** admin, principal
+- **Request:** `{ "document_type": "marksheet" }` (optional - omit to retry with the existing `document_type`)
+- **Response:** same shape as `GET /admin/ocr/documents/{id}`.
+- **Errors:** `400` invalid `document_type`, or no OCR result exists yet for this document; `404` unknown document id.
 
 ### Timetable optimization
 
@@ -114,59 +179,295 @@ untouched and the conflicts are returned instead (never silently overwritten).
 ```
 - **Errors:** `404` slot not found.
 
-### Attendance
+### Attendance (CV mode)
 
-#### `POST /admin/attendance/mark`
-Mark attendance for a class/date (manual entry, or written by the CV/RFID pipeline).
+Face detection/recognition backed by OpenCV (image decoding) + face_recognition/dlib
+(128-d embeddings, `backend/app/services/attendance_cv.py`), stored via pgvector
+(`face_embeddings.embedding`). RFID mode and CV/RFID reconciliation are a later
+session - the `attendance_reconciliations` table exists in the schema but nothing
+populates it yet. `face_location` below is `[top, right, bottom, left]` pixel
+coordinates. A match's `confidence` is `max(0, 1 - distance)` (not a calibrated
+probability, just a monotonic ranking/threshold signal) - `needs_review: true` means
+it matched but only past a looser distance threshold than the confident-auto-accept
+one, not that it's unmatched.
+
+#### `POST /attendance/enroll`
+Upload one reference photo for a student and store its face embedding. The photo must
+contain exactly one face - `422` if zero or more than one are detected (an ambiguous
+reference photo would silently corrupt later matching).
 - **Roles:** admin, teacher
-- **Request:**
-```json
-{
-  "class_id": 2,
-  "date": "2026-08-09",
-  "records": [ { "student_id": 15, "status": "present", "source": "manual" } ]
-}
-```
-- **Response:** `{ "class_id": 2, "date": "2026-08-09", "marked_count": 30 }`
+- **Request:** `multipart/form-data` - `student_id` (form field) + `file` (image)
+- **Response:** `{ "id": 12, "student_id": 15, "enrolled_at": "2026-08-09T10:00:00Z" }`
+- **Errors:** `404` unknown student; `422` no/multiple faces detected or undecodable image.
 
-#### `GET /admin/attendance`
-Fetch attendance for a class/date.
-- **Roles:** admin, principal, teacher; student (own record only); parent (own child only)
-- **Query:** `?class_id=&date=`
+#### `POST /attendance/mark`
+Run recognition against every enrolled embedding for the slot's class and create
+`AttendanceRecord` rows (`status: "present"`, `source: "cv"`) for each match. Faces
+that don't match any enrolled student are returned but not persisted (no student to
+attach them to). Re-running for the same slot/date is idempotent - already-marked
+students are reported back with `already_marked: true` and no duplicate row.
+- **Roles:** admin, teacher
+- **Request:** `multipart/form-data` - `timetable_slot_id` (form field) + `file`
+  (classroom photo) + optional `date` (form field, `YYYY-MM-DD`, defaults to today)
 - **Response:**
 ```json
-{ "class_id": 2, "date": "2026-08-09", "records": [ { "student_id": 15, "status": "present" } ] }
+{
+  "timetable_slot_id": 5,
+  "class_id": 2,
+  "date": "2026-08-09",
+  "records_created": 2,
+  "matches": [ { "student_id": 15, "confidence": 0.82, "needs_review": false, "face_location": [10, 200, 150, 50], "record_id": 501, "already_marked": false } ],
+  "unmatched_faces": [ { "face_location": [10, 400, 150, 250], "best_confidence": 0.31 } ]
+}
 ```
+- **Errors:** `404` unknown `timetable_slot_id`; `422` undecodable image.
+
+#### `GET /attendance/summary`
+Per-student/class attendance stats over a date range. Role-scoped like
+`/timetable/active`: admin/principal may filter freely; teacher is scoped to classes
+where they're `class_teacher` (`403` if `class_id` isn't theirs); student is forced to
+their own records regardless of any `student_id` passed; parent must pass `student_id`
+for a linked child (`403` if not linked).
+- **Roles:** admin, principal, teacher, student, parent
+- **Query:** `?from_date=&to_date=` (required) `&class_id=&student_id=`
+- **Response:**
+```json
+{
+  "from_date": "2026-08-01",
+  "to_date": "2026-08-09",
+  "items": [ { "student_id": 15, "class_id": 2, "present_count": 6, "absent_count": 1, "late_count": 0, "total_records": 7, "present_pct": 85.7 } ]
+}
+```
+
+#### `PUT /attendance/{record_id}/review`
+Manual correction of a record (low-confidence CV match, or a mismatch caught during
+reconciliation once that lands). Sets `reviewed_by`/`reviewed_at` to the caller.
+- **Roles:** admin, teacher (teacher only for records in a class they're `class_teacher` of - `403` otherwise)
+- **Request:** `{ "status": "present" }` (`present` | `absent` | `late`)
+- **Response:** the updated record, same shape as a `matches[]` entry plus
+  `reviewed_by`/`reviewed_at`:
+```json
+{ "id": 501, "student_id": 15, "class_id": 2, "timetable_slot_id": 5, "date": "2026-08-09", "status": "present", "source": "cv", "marked_at": "2026-08-09T08:05:00Z", "confidence_score": 0.42, "reviewed_by": 7, "reviewed_at": "2026-08-09T09:00:00Z" }
+```
+- **Errors:** `400` invalid `status`; `404` unknown `record_id`.
 
 ### Predictive staffing / substitute suggestion
 
-#### `GET /admin/staffing/substitute-suggestions`
-Suggest substitute teachers for a teacher's absence.
+Completes the flagship demo chain: Attendance -> Predictive Staffing -> Leave Request
+-> Auto-Substitution -> Alert. Backed by `backend/app/services/staffing_forecast.py`
+(scikit-learn `PoissonRegressor` over historical approved `LeaveRequest` rows, with a
+rule-based per-weekday-mean fallback when there isn't enough history to fit anything -
+**a demo-scale model, not production-grade**, see that module's docstring) and
+`backend/app/services/substitute_solver.py` (hard-filters candidates to
+qualified+free+available+not-on-leave, ranks survivors by workload balance). A
+`Substitution` row is one per distinct recurring timetable slot affected by a leave,
+not one per calendar occurrence - the same substitute covers every week of a
+multi-week leave for that slot. `day_of_week`/`period_number` follow the Timetable
+section's conventions (0 = Monday).
+
+**Integration point for later work (not built here):** `PUT /substitution/{id}/confirm`'s
+response includes everything Person C's notification system would need to alert the
+right people - `class_id`, `class_name`, `subject_name`, both teachers' names, and
+`affected_student_ids` (via that class's homeroom `Enrollment` rows) - without an
+extra query. Nothing currently calls out to a notification system; this is just
+making sure the data is there when someone does.
+
+#### `POST /staff/request_leave`
+A teacher requests leave; admin/principal can file on behalf of a teacher.
+- **Roles:** teacher, admin, principal
+- **Request:** `{ "teacher_id": 97, "start_date": "2026-08-14", "end_date": "2026-08-14", "reason": "Feeling unwell" }`
+(`teacher_id` required for admin/principal filing on behalf of someone; ignored - forced to the caller - for the teacher role)
+- **Response:** `{ "id": 12, "teacher_id": 97, "start_date": "2026-08-14", "end_date": "2026-08-14", "reason": "Feeling unwell", "status": "pending", "requested_at": "2026-08-10T10:00:00Z", "decided_by": null, "decided_at": null }`
+- **Errors:** `400` `end_date` before `start_date`, or `teacher_id` missing when admin/principal files on behalf of someone.
+
+#### `PUT /staff/approve_leave`
+Approve or reject a leave request. On approval, resolves every distinct timetable
+slot the teacher has during the leave window and creates a `Substitution` row per
+slot, pre-populated with the solver's top suggestion (if any).
 - **Roles:** admin, principal
-- **Query:** `?teacher_id=&date=`
+- **Request:** `{ "leave_request_id": 12, "decision": "approved", "academic_year": "2026-27" }`
+(`academic_year` required when `decision` is `"approved"` - needed to resolve affected timetable slots; omit for `"rejected"`)
 - **Response:**
 ```json
-{ "absent_teacher_id": 7, "date": "2026-08-09", "suggestions": [ { "teacher_id": 11, "score": 0.87, "reason": "same subject, free that period" } ] }
+{
+  "leave_request": { "id": 12, "teacher_id": 97, "start_date": "2026-08-14", "end_date": "2026-08-14", "reason": "Feeling unwell", "status": "approved", "requested_at": "2026-08-10T10:00:00Z", "decided_by": 41, "decided_at": "2026-08-10T10:05:00Z" },
+  "substitutions": [
+    {
+      "id": 5, "leave_request_id": 12, "timetable_slot_id": 501, "original_teacher_id": 97, "substitute_teacher_id": 99,
+      "status": "suggested", "suggested_score": 0.85, "confirmed_at": null,
+      "subject_id": 40, "class_id": 41, "day_of_week": 4, "period_number": 2,
+      "candidates": [ { "teacher_id": 99, "score": 0.85, "reason": "qualified for subject, current workload 9 periods/week" } ]
+    }
+  ]
+}
 ```
+- **Errors:** `400` invalid `decision` or missing `academic_year` on approval; `404` unknown `leave_request_id`.
+
+#### `POST /substitution/suggest`
+Re-run the solver. Two mutually exclusive modes:
+- **Mode A** (`leave_request_id` given): re-runs and persists fresh suggestions for
+  every `Substitution` already tied to that leave - e.g. if the first approval pass
+  had no good matches and circumstances changed.
+- **Mode B** (`teacher_id`+`start_date`+`end_date`+`academic_year`, no `leave_request_id`):
+  preview suggestions for a hypothetical date range with nothing persisted - useful
+  before a leave request even exists.
+- **Roles:** admin, principal
+- **Request (mode A):** `{ "leave_request_id": 12, "academic_year": "2026-27" }`
+- **Request (mode B):** `{ "teacher_id": 97, "start_date": "2026-08-14", "end_date": "2026-08-14", "academic_year": "2026-27" }`
+- **Response:** `{ "substitutions": [ /* same shape as approve_leave's, except mode B entries have id/leave_request_id/status/suggested_score all null - nothing was persisted */ ] }`
+- **Errors:** `400` neither mode's required fields present; `404` unknown `leave_request_id`.
+
+#### `PUT /substitution/{id}/confirm`
+Confirm a specific substitute for a slot, or override with a different teacher than
+suggested. Re-checks eligibility first (qualified, free, available, not on leave, not
+the absent teacher themselves) - on conflict, nothing is applied.
+- **Roles:** admin, principal
+- **Request:** `{ "substitute_teacher_id": 99 }` (omit to confirm whichever teacher is currently suggested)
+- **Response (applied):**
+```json
+{
+  "substitution": { "id": 5, "leave_request_id": 12, "timetable_slot_id": 501, "original_teacher_id": 97, "substitute_teacher_id": 99, "status": "confirmed", "suggested_score": 0.85, "confirmed_at": "2026-08-10T10:10:00Z", "subject_id": 40, "class_id": 41, "day_of_week": 4, "period_number": 2, "candidates": [] },
+  "conflicts": [],
+  "class_id": 41, "class_name": "Class 8A", "subject_name": "Math",
+  "original_teacher_name": "Demo Teacher 1", "substitute_teacher_name": "Demo Teacher 3",
+  "affected_student_ids": [103, 104, 105],
+  "leave_start_date": "2026-08-14", "leave_end_date": "2026-08-14"
+}
+```
+- **Response (conflict, not applied):** `{ "substitution": null, "conflicts": [ { "type": "already_busy", "message": "Teacher already has a class at this day/period" } ] }`
+(`type` is one of: `not_qualified`, `already_busy`, `unavailable`, `on_leave`, `is_original_teacher`)
+- **Errors:** `400` no `substitute_teacher_id` given and none currently suggested; `404` unknown substitution id.
+
+#### `GET /staff/leave_requests`
+List leave requests, filterable by status. Role-scoped: teacher sees only their own
+(any `teacher_id` param is ignored); admin/principal see every leave request in the
+system (no school-scoping yet, same simplification as `/timetable/active` and
+`/attendance/summary`) and may filter by `teacher_id`.
+- **Roles:** teacher, admin, principal
+- **Query:** `?status=&teacher_id=` (both optional)
+- **Response:** array of the same leave-request shape as `/staff/request_leave`'s response.
 
 #### `GET /admin/staffing/forecast`
-Predictive staffing shortage forecast for a week.
+Predictive staffing shortage forecast for a week. Recomputes from historical approved
+`LeaveRequest` rows and **upserts** into `staffing_forecasts` on every call, so later
+reads (e.g. the admin command center) don't need to re-run the model.
 - **Roles:** admin, principal
 - **Query:** `?school_id=&week_start=`
 - **Response:**
 ```json
-{ "school_id": 1, "week_start": "2026-08-10", "forecast": [ { "date": "2026-08-10", "predicted_absences": 3, "risk_level": "medium" } ] }
+{ "school_id": 41, "week_start": "2026-08-10", "forecast": [ { "date": "2026-08-10", "predicted_absences": 0.4, "risk_level": "low" }, { "date": "2026-08-14", "predicted_absences": 2.1, "risk_level": "medium" } ] }
+```
+
+#### `GET /admin/staffing/substitute-suggestions`
+Suggest substitutes for every slot a specific teacher has on a specific date -
+read-only, nothing persisted. Extended from the original stub with `academic_year`
+(needed to resolve timetable slots) and a `slots` breakdown (a teacher can have
+multiple different-subject slots in one day, each needing its own candidates).
+- **Roles:** admin, principal
+- **Query:** `?teacher_id=&date=&academic_year=`
+- **Response:**
+```json
+{
+  "absent_teacher_id": 97, "date": "2026-08-14",
+  "slots": [ { "timetable_slot_id": 501, "subject_id": 40, "class_id": 41, "period_number": 2, "suggestions": [ { "teacher_id": 99, "score": 0.85, "reason": "qualified for subject, current workload 9 periods/week" } ] } ]
+}
 ```
 
 ### Early-warning flags
 
+Second flagship demo chain, the AI half: Assignment/quiz -> grade -> Gradebook ->
+Performance analytics -> **Early-Warning ML** -> at-risk flag -> Teacher + Parent +
+Counselor notified. Backed by `backend/app/services/risk_scorer.py` (a documented
+heuristic, not a trained model - see its docstring for the weighting logic) and
+`backend/app/services/remark_sentiment.py` (VADER sentiment analysis). Flags are
+created either manually (`POST /risk/flag`) or by the nightly job
+(`backend/scripts/run_nightly_risk_scoring.py` - no scheduler infra exists in this
+repo yet, so it's a plain script for now, structured to drop into a real scheduler
+later without rework).
+
+**Which signals are real vs. placeholder - read before trusting a score:**
+- **Attendance: fully real.** Computed from this project's own `attendance_records`.
+- **Grades: placeholder, currently unused.** Person B's gradebook doesn't exist in
+  this repo yet (checked before building this). `risk_scorer.py`'s `GradeSignal` is a
+  documented dataclass *interface* with no backing table - nightly scoring currently
+  always passes `grades=None`, and the scorer excludes it from the score entirely
+  rather than assuming a fabricated average. Wire a real `GradeSignal` in once the
+  gradebook lands; nothing else about the API or scoring changes.
+- **Remark sentiment: the analysis is real, the text source is a placeholder.**
+  `remark_stubs` (`backend/app/models/risk.py`) is an explicitly-marked stand-in
+  table for Person B's not-yet-built remarks/report-card system, seeded with
+  synthetic remark text so the sentiment pipeline is genuinely testable end-to-end
+  today. Point it at the real remarks table once that exists.
+
+**Integration point for later work (not built here):** every `FlagOut` response
+(create and list alike) is enriched with `class_id`/`class_name` (via the student's
+primary `Enrollment`), `homeroom_teacher_id` (via that class's `class_teacher_id`),
+and `parent_ids` (via `parent_student`, plural for multi-parent support) - everything
+Person C's future notifier needs to reach teacher + parent + counselor without a
+re-query. Same pattern as Staffing's `confirm` endpoint. Nothing calls out to a
+notification system yet.
+
+#### `POST /risk/flag`
+Manually flag a student as potentially at-risk (a human's judgment call, not an
+algorithmic score - contrast with the nightly job's flags).
+- **Roles:** teacher, admin, principal
+- **Request:** `{ "student_id": 103, "risk_level": "high", "reasons": ["seems withdrawn in class", "missed 3 assignments"], "score": null }`
+(`score` optional - omit to use a nominal value for the given `risk_level`: low=0.2, medium=0.5, high=0.8)
+- **Response:** same shape as `/risk/flagged`'s items (below), including the alert-ready enrichment.
+- **Errors:** `400` invalid `risk_level` or empty `reasons`; `404` unknown `student_id`.
+
+#### `GET /risk/flagged`
+List currently-flagged students (excludes `resolved` unless `status` is explicitly
+requested). Role-scoped: teacher sees only students in classes where they're
+`class_teacher` (`403` if `class_id` isn't theirs); parent must pass `student_id` for
+a linked child (`400` if omitted, `403` if not linked); admin/principal see everything
+and may filter freely. Student role is not authorized on this endpoint.
+- **Roles:** teacher, admin, principal, parent
+- **Query:** `?risk_level=&class_id=&student_id=&status=`
+- **Response:**
+```json
+[
+  {
+    "id": 7, "student_id": 103, "risk_level": "high", "score": 0.75,
+    "reasons": ["attendance rate 40% is below the 90% threshold", "recent teacher remarks skew negative (avg sentiment -0.67)"],
+    "flagged_at": "2026-08-11T02:00:00Z", "status": "open", "resolved_by": null, "resolved_at": null,
+    "class_id": 41, "class_name": "Class 8A", "homeroom_teacher_id": 97, "parent_ids": [127], "student_name": "Demo Student Class 8A #01"
+  }
+]
+```
+
+#### `PUT /risk/{id}/acknowledge`
+Acknowledge an open flag (no separate "who/when" columns exist for this - only
+`status` changes; contrast with `resolve`, which does record `resolved_by`/`resolved_at`).
+- **Roles:** teacher, admin, principal
+- **Response:** the updated flag, same shape as `/risk/flagged`'s items.
+- **Errors:** `400` flag isn't currently `open`; `404` unknown flag id.
+
+#### `POST /risk/{id}/intervention`
+Log an outreach/intervention note against a flag - the history of what staff actually
+did, independent of the flag's own status.
+- **Roles:** teacher, admin, principal
+- **Request:** `{ "note": "Called parent to discuss attendance", "action_taken": "called_parent" }`
+(`action_taken` is free text, not an enum - e.g. "called parent", "counselor referral", "teacher meeting")
+- **Response:** `{ "id": 3, "risk_flag_id": 7, "created_by": 97, "note": "Called parent to discuss attendance", "action_taken": "called_parent", "created_at": "2026-08-11T03:00:00Z" }`
+- **Errors:** `400` empty `note`/`action_taken`; `404` unknown flag id.
+
+#### `PUT /risk/{id}/resolve`
+Mark a flag resolved.
+- **Roles:** admin, principal
+- **Response:** the updated flag (`status: "resolved"`, `resolved_by`/`resolved_at` set), same shape as `/risk/flagged`'s items.
+- **Errors:** `400` flag is already resolved; `404` unknown flag id.
+
 #### `GET /admin/early-warning/students`
-Fetch at-risk students (academic/attendance early-warning).
+Fetch at-risk students - reconciled with this pre-existing stub rather than
+duplicated under `/risk/flagged`: same underlying flags, this endpoint keeps the
+original role gate (no parent) and response shape (`{"items": [...]}`)  for whoever
+was already coding against it.
 - **Roles:** admin, principal, teacher
 - **Query:** `?class_id=&risk_level=`
 - **Response:**
 ```json
-{ "items": [ { "student_id": 15, "risk_level": "high", "reasons": ["attendance < 75%", "2 failed assessments"], "flagged_at": "2026-08-09T06:00:00Z" } ] }
+{ "items": [ { "student_id": 103, "risk_level": "high", "reasons": ["attendance rate 40% is below the 90% threshold"], "flagged_at": "2026-08-11T02:00:00Z" } ] }
 ```
 
 ### Admin command center
@@ -597,3 +898,9 @@ Global search across announcements, resources, and people.
       rows for multi-child support).
 - [ ] Class chat / doubt threads / notifications: polling or WebSocket? Affects
       whether `GET .../chat?since=` is the real transport or just a fallback.
+- [ ] Attendance RFID mode + CV/RFID reconciliation: `attendance_reconciliations`
+      (`backend/app/models/attendance.py`, migration `fd046d263fe1`) is schema-ready
+      (cross-references a `cv`-source and `rfid`-source `AttendanceRecord` per
+      student/slot/date, flags `status_mismatch` / `cv_only` / `rfid_only`) but
+      nothing populates or resolves it yet - no RFID ingestion endpoint exists, and no
+      job compares CV vs RFID rows. Next session.
