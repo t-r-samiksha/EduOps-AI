@@ -572,6 +572,114 @@ finding across this project.
   URL token or a fetch-based SSE polyfill. Not solved here; noted for whoever wires
   up the frontend.
 
+### Syllabus tracking + Anomaly detection
+
+Genuinely new section - no prior stub existed for either. Backed by `backend/app/
+services/syllabus_pace.py` (playbook 11.3) and `backend/app/services/
+anomaly_detector.py` (playbook 11.4), both decoupled from the ORM and unit-testable
+standalone; persisted via `backend/app/models/syllabus.py`.
+
+**Pacing model, kept demo-honest:** a `SyllabusPlan` is a flat `total_units` count
+across `[term_start_date, term_end_date]` - no week-by-week breakdown. Expected
+progress is linear (`elapsed_days / total_days`); actual progress is a raw COUNT of
+logged `SyllabusCheckpoint` rows, not their `sequence_number` (a teacher may
+legitimately log topics out of syllabus order). A class/subject is `behind` once
+`actual_fraction - expected_fraction <= -0.15`, `ahead` at `>= +0.15`, else
+`on_pace`. See `syllabus_pace.py`'s docstring for the full reasoning.
+
+**Anomaly categories - which are real, which are stubbed, read before trusting a
+flag:**
+- `attendance_drop`, `document_backlog`, `teacher_overload`: **fully real**, built
+  from tables this codebase already owns (`AttendanceRecord`, `Document`,
+  `TimetableSlot`). `teacher_overload` uses a scikit-learn `IsolationForest` once
+  there are enough teachers to make that meaningful (>=6), else a documented
+  mean-multiplier fallback rule - same honesty pattern as the Staffing session's
+  `PoissonRegressor` hybrid.
+- `submission_rate`: **honest stub**. Checked `backend/app/models/` before building
+  this (same check as Early-Warning's grades gap and OCR's admissions gap): Person
+  B's assignments/submissions tables do not exist yet - only documented as a future
+  contract earlier in this doc (`POST /classroom/{class_id}/assignments` etc. are
+  stubs, never implemented). `SubmissionRateSignal` is a pure dataclass interface
+  with no backing table, exactly like Early-Warning's `GradeSignal`.
+  `scripts/run_nightly_syllabus_anomaly_scan.py` never calls this detector today for
+  exactly that reason - wire a real caller in once Person B's submissions table
+  exists; nothing else changes.
+- `syllabus_drift`: **fully real** (see pacing model above) - a fifth type beyond
+  the playbook's literal four `AnomalyFlag` categories, added deliberately: both are
+  "an admin needs to know something operational is off," so they share one
+  detection job, one flag table, and one alert-source registration rather than two
+  parallel systems. Flagged here as a scope decision, not silently done.
+
+`AnomalyFlag` is the 7th source registered in `alert_aggregator.ALERT_SOURCES` (see
+that module and the Admin Command Center section above) - anomalies surface in
+`GET /admin/alerts` automatically. Resolving works both ways: directly via
+`PUT /admin/anomalies/{id}/resolve` below, or via the unified
+`POST /admin/alerts/{source}:{id}/resolve` path - both hit the same
+`AnomalyFlag.status` field (`anomaly_flag` was added to `admin_alerts.py`'s
+real-status-transition sources alongside `risk_flag`, not the dismissal-table path).
+
+#### `POST /syllabus/plan`
+**Not in the original playbook wording** - added because without a way to create a
+`SyllabusPlan`, `POST /syllabus/checkpoint` would have nothing to attach to. Flagged
+here, same pattern as the Command Center session's `GET /admin/alerts/summary`.
+- **Roles:** teacher, admin, principal
+- **Request:** `{ "class_id": 41, "subject_id": 40, "academic_year": "2026-27", "total_units": 10, "term_start_date": "2026-01-01", "term_end_date": "2026-03-12" }`
+- **Response:** `{ "id": 1, "class_id": 41, "subject_id": 40, "academic_year": "2026-27", "total_units": 10, "term_start_date": "2026-01-01", "term_end_date": "2026-03-12", "created_by": 97, "created_at": "2026-08-12T10:00:00Z" }`
+- **Errors:** `400` `total_units<=0`, `term_end_date<=term_start_date`, or a plan already exists for this class/subject/academic_year; `404` unknown class/subject.
+
+#### `POST /syllabus/checkpoint`
+Log one unit of actual progress.
+- **Roles:** teacher, admin, principal (a teacher may only log against a plan for a
+  class+subject they actually teach, per an active `TimetableSlot` - `403` otherwise)
+- **Request:** `{ "plan_id": 1, "topic_label": "Algebra basics", "sequence_number": 1 }`
+- **Response:** `{ "id": 5, "plan_id": 1, "topic_label": "Algebra basics", "sequence_number": 1, "logged_by": 97, "logged_at": "2026-08-12T10:05:00Z" }`
+- **Errors:** `400` empty `topic_label`; `403` teacher doesn't teach this class/subject; `404` unknown `plan_id`.
+
+#### `GET /syllabus/summary`
+Progress and drift stats by class/subject. Role-scoped: teacher sees only plans for
+subjects they actually teach (via `TimetableSlot`, not just homeroom); admin/
+principal see everything (no school-scoping, same simplification as `/risk/flagged`
+and staffing's `leave_requests`).
+- **Roles:** teacher, admin, principal
+- **Query:** `?class_id=&subject_id=&academic_year=`
+- **Response:**
+```json
+{
+  "items": [
+    {
+      "plan_id": 1, "class_id": 41, "class_name": "Class 8A", "subject_id": 40, "subject_name": "Math",
+      "academic_year": "2026-27", "total_units": 10, "checkpoints_logged": 3,
+      "term_start_date": "2026-01-01", "term_end_date": "2026-03-12",
+      "expected_fraction": 0.5, "actual_fraction": 0.3, "drift": -0.2, "status": "behind"
+    }
+  ]
+}
+```
+
+#### `GET /admin/anomalies`
+List current anomaly flags. **Not in the original playbook's endpoint list** -
+anomaly detection had no stub at all; added cleanly and flagged here.
+- **Roles:** admin, principal
+- **Query:** `?type=&severity=&status=` (excludes `resolved` unless `status` is explicitly requested, same convention as `/risk/flagged`)
+- **Response:**
+```json
+{
+  "items": [
+    {
+      "id": 3, "type": "teacher_overload", "entity_type": "users", "entity_id": 97, "severity": "urgent",
+      "detail": { "periods_per_week": 40, "peer_baseline": 10.0, "message": "Teacher 97 is teaching 40 periods/week vs a peer average of ~10.0" },
+      "detected_at": "2026-08-12T02:00:00Z", "status": "open", "resolved_by": null, "resolved_at": null
+    }
+  ]
+}
+```
+
+#### `PUT /admin/anomalies/{id}/resolve`
+Resolve an anomaly flag directly - equivalent to `POST /admin/alerts/anomaly_flag:{id}/resolve`, both hit the same row.
+- **Roles:** admin, principal
+- **Response:** the updated flag, same shape as `/admin/anomalies`'s items.
+- **Errors:** `400` already resolved; `404` unknown id.
+
 ### Approval chains
 
 #### `GET /admin/approvals`

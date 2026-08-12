@@ -13,6 +13,7 @@ from app.models.attendance import AttendanceReconciliation
 from app.models.document import Document
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
+from app.models.syllabus import AnomalyFlag
 from app.services.alert_aggregator import SEVERITY_LEVELS, aggregate_alerts, summarize_alerts
 from app.services.auth import CurrentUser, require_role
 
@@ -23,6 +24,15 @@ SSE_POLL_INTERVAL_SECONDS = 5
 enough not to re-run a cross-table aggregation query every request across however
 many admins have a tab open. See this module's docstring below for why polling
 rather than genuine push."""
+
+# Sources with a real terminal status="resolved" transition on their own row - resolve
+# routes directly there. Both RiskFlag and AnomalyFlag use identical status/
+# resolved_by/resolved_at mechanics (see AnomalyFlag's docstring), so one helper
+# handles both instead of duplicating the transition per source.
+_REAL_STATUS_SOURCES: dict[str, type] = {
+    "risk_flag": RiskFlag,
+    "anomaly_flag": AnomalyFlag,
+}
 
 # Sources whose "resolve" is a cross-cutting dismissal (AlertDismissal) rather than a
 # native status transition - see alert_aggregator.py's "RESOLVE ROUTING" docstring
@@ -105,31 +115,32 @@ def resolve_alert(
 ):
     """alert_id is the composite "{source}:{entity_id}" string from GET /admin/alerts
     - e.g. "risk_flag:43". Routes back to the correct source based on `source`:
-    risk_flag resolves the real RiskFlag.status field directly; every other source
-    records an AlertDismissal instead. See alert_aggregator.py's module docstring for
-    why those aren't the same mechanism."""
+    risk_flag and anomaly_flag resolve their real status field directly; every other
+    source records an AlertDismissal instead. See alert_aggregator.py's module
+    docstring for why those aren't the same mechanism."""
     source, sep, raw_entity_id = alert_id.partition(":")
     if not sep or not raw_entity_id.isdigit():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, 'Malformed alert id - expected "source:entity_id"')
     entity_id = int(raw_entity_id)
 
-    if source == "risk_flag":
-        flag = db.query(RiskFlag).filter(RiskFlag.id == entity_id).one_or_none()
-        if flag is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Alert's underlying risk_flag not found")
-        if flag.status == "resolved":
+    real_status_model = _REAL_STATUS_SOURCES.get(source)
+    if real_status_model is not None:
+        row = db.query(real_status_model).filter(real_status_model.id == entity_id).one_or_none()
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Alert's underlying {source} not found")
+        if row.status == "resolved":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Alert is already resolved")
-        flag.status = "resolved"
-        flag.resolved_by = user.id
-        flag.resolved_at = datetime.now(timezone.utc)
+        row.status = "resolved"
+        row.resolved_by = user.id
+        row.resolved_at = datetime.now(timezone.utc)
         db.commit()
         return ResolveResponse(id=alert_id, resolved=True)
 
-    model = _DISMISSAL_SOURCES.get(source)
-    if model is None:
+    dismissal_model = _DISMISSAL_SOURCES.get(source)
+    if dismissal_model is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown alert source: {source!r}")
 
-    if db.query(model).filter(model.id == entity_id).first() is None:
+    if db.query(dismissal_model).filter(dismissal_model.id == entity_id).first() is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Alert's underlying entity not found")
     if db.query(AlertDismissal).filter(AlertDismissal.alert_id == alert_id).first() is not None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Alert is already resolved")

@@ -25,15 +25,17 @@ Not a third "info"/"warning" tier - the playbook's own examples only ever need t
 and a flatter scheme is easier for a future notification UI to act on unambiguously
 (page someone now, or don't).
 
-RESOLVE ROUTING - risk_flag vs. everything else, and why they're NOT the same
+RESOLVE ROUTING - risk_flag/anomaly_flag vs. everything else, and why they differ
 --------------------------------------------------------------------------------
 `routers/admin_alerts.py`'s resolve endpoint needs one consistent contract for every
 alert `source`, but the sources genuinely don't have the same underlying mechanism:
 
-  - risk_flag: RiskFlag already has a real terminal `status="resolved"` transition
-    (see PUT /risk/{id}/resolve) - resolving the alert routes directly to that same
-    real status field. No separate dismissal state needed or wanted; duplicating it
-    would create two "resolved" concepts for one entity.
+  - risk_flag / anomaly_flag: both already have a real terminal `status="resolved"`
+    transition on their own row (see PUT /risk/{id}/resolve and PUT
+    /admin/anomalies/{id}/resolve, from the Early-Warning and Syllabus/Anomaly
+    sessions respectively) - resolving the alert routes directly to that same real
+    status field. No separate dismissal state needed or wanted for either; duplicating
+    it would create two "resolved" concepts for one entity.
   - leave_request / substitution: their real next states are decisions with
     consequences (approve/reject a leave triggers substitute-finding; confirming a
     substitution needs a chosen teacher) made through their own dedicated endpoints
@@ -71,6 +73,7 @@ from app.models.attendance import AttendanceReconciliation
 from app.models.document import Document, ExtractedEntity
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
+from app.models.syllabus import AnomalyFlag
 
 SEVERITY_LEVELS = ("normal", "urgent")
 
@@ -277,6 +280,33 @@ def attendance_reconciliation_alerts(db: Session) -> list[Alert]:
     ]
 
 
+def anomaly_flag_alerts(db: Session) -> list[Alert]:
+    """Open AnomalyFlag rows (services/anomaly_detector.py + syllabus_pace.py, via
+    scripts/run_nightly_syllabus_anomaly_scan.py) - the 7th alert source, added in
+    the Syllabus Tracking & Anomaly Detection session. `severity` is copied straight
+    from the row: AnomalyFlag.severity was deliberately defined to already match
+    SEVERITY_LEVELS (see models/syllabus.py), so there's no re-derivation here, unlike
+    risk_flag's open-vs-acknowledged nuance. `message` is read from
+    detail["message"] - populated by the nightly scan when it writes the row (see
+    that script's `_upsert_flag`) - rather than re-deriving formatting logic here
+    that would have to know about every anomaly `type`."""
+    flags = db.query(AnomalyFlag).filter(AnomalyFlag.status != "resolved").all()
+    return [
+        Alert(
+            id=f"anomaly_flag:{flag.id}",
+            source="anomaly_flag",
+            severity=flag.severity,
+            title=f"Anomaly: {flag.type}",
+            message=flag.detail.get("message", f"{flag.type} anomaly on {flag.entity_type}:{flag.entity_id}"),
+            entity_type=flag.entity_type,
+            entity_id=flag.entity_id,
+            created_at=flag.detected_at,
+            resolved=False,
+        )
+        for flag in flags
+    ]
+
+
 ALERT_SOURCES: dict[str, Callable[[Session], list[Alert]]] = {
     "risk_flag": risk_flag_alerts,
     "leave_request": leave_request_alerts,
@@ -284,6 +314,7 @@ ALERT_SOURCES: dict[str, Callable[[Session], list[Alert]]] = {
     "document_failed": document_failed_alerts,
     "document_low_confidence": document_low_confidence_alerts,
     "attendance_reconciliation": attendance_reconciliation_alerts,
+    "anomaly_flag": anomaly_flag_alerts,
 }
 
 

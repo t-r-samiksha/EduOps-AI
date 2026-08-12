@@ -9,6 +9,7 @@ from app.models.role import Role
 from app.models.school import School
 from app.models.staffing import LeaveRequest, StaffingForecast, Substitution
 from app.models.subject import Subject
+from app.models.syllabus import AnomalyFlag, SyllabusCheckpoint, SyllabusPlan
 from app.models.timetable import (
     ClassSubjectRequirement,
     Room,
@@ -21,6 +22,7 @@ from app.models.user import User
 
 __all__ = [
     "AlertDismissal",
+    "AnomalyFlag",
     "AttendanceReconciliation",
     "AttendanceRecord",
     "ClassSubjectRequirement",
@@ -42,6 +44,8 @@ __all__ = [
     "Subject",
     "SubjectRoomRequirement",
     "Substitution",
+    "SyllabusCheckpoint",
+    "SyllabusPlan",
     "TeacherSubject",
     "TeacherUnavailability",
     "TimetableSlot",
