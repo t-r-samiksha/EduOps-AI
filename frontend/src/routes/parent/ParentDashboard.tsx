@@ -1,8 +1,10 @@
+import PageHeader from "@/components/shared/PageHeader";
+
 export default function ParentDashboard() {
   return (
-    <div>
-      <h1 className="text-2xl font-semibold">Parent Dashboard</h1>
-      <p className="text-muted-foreground">Coming in a later phase.</p>
-    </div>
+    <PageHeader
+      title="Parent Dashboard"
+      description="A parent portal home lands in a later session (Person C territory) — use Timetable and Early-Warning in the meantime."
+    />
   );
 }

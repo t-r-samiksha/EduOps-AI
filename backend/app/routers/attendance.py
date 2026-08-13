@@ -22,6 +22,7 @@ from app.services.attendance_cv import (
     enroll_face,
     recognize_faces,
 )
+from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
@@ -315,10 +316,19 @@ def review(
     if user.role == "teacher" and record.class_id not in _teacher_class_ids(db, user.id):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your class")
 
+    previous_status = record.status
     record.status = body.status
     record.reviewed_by = user.id
     record.reviewed_at = datetime.now(timezone.utc)
 
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="review",
+        entity_type="attendance_records",
+        entity_id=record.id,
+        detail={"previous_status": previous_status, "new_status": body.status},
+    )
     db.commit()
     db.refresh(record)
 

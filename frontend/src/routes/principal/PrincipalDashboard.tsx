@@ -1,8 +1,10 @@
+import PageHeader from "@/components/shared/PageHeader";
+
 export default function PrincipalDashboard() {
   return (
-    <div>
-      <h1 className="text-2xl font-semibold">Principal Dashboard</h1>
-      <p className="text-muted-foreground">Coming in a later phase.</p>
-    </div>
+    <PageHeader
+      title="Principal Dashboard"
+      description="A school-wide overview lands in a later session — use Timetable, Staffing, Early-Warning, Syllabus, and Approvals in the meantime."
+    />
   );
 }

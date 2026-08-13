@@ -10,6 +10,7 @@ from app.models.enrollment import Enrollment
 from app.models.parent_student import ParentStudent
 from app.models.risk import Intervention, RiskFlag
 from app.models.user import User
+from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 
 router = APIRouter(tags=["early-warning"])
@@ -195,6 +196,7 @@ def acknowledge_flag(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Flag is already {flag.status}, cannot acknowledge")
 
     flag.status = "acknowledged"
+    write_audit_log(db, actor_id=user.id, action="acknowledge", entity_type="risk_flags", entity_id=flag.id)
     db.commit()
     db.refresh(flag)
     return _enrich_flag_out(db, flag)
@@ -237,6 +239,11 @@ def log_intervention(
 
     intervention = Intervention(risk_flag_id=flag_id, created_by=user.id, note=body.note, action_taken=body.action_taken)
     db.add(intervention)
+    db.flush()
+    write_audit_log(
+        db, actor_id=user.id, action="create", entity_type="interventions", entity_id=intervention.id,
+        detail={"risk_flag_id": flag_id, "action_taken": body.action_taken},
+    )
     db.commit()
     db.refresh(intervention)
     return InterventionOut.model_validate(intervention)
@@ -260,6 +267,7 @@ def resolve_flag(
     flag.status = "resolved"
     flag.resolved_by = user.id
     flag.resolved_at = datetime.now(timezone.utc)
+    write_audit_log(db, actor_id=user.id, action="resolve", entity_type="risk_flags", entity_id=flag.id)
     db.commit()
     db.refresh(flag)
     return _enrich_flag_out(db, flag)

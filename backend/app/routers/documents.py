@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.document import Document, ExtractedEntity, OcrResult
+from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
 from app.services.ocr_engine import InvalidImageError, OcrEngineError, WordConfidence, extract_text
 from app.services.ocr_postprocess import extract_entities
@@ -200,9 +201,14 @@ def correct_entity(
     if entity is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Extracted entity not found")
 
+    previous_value = entity.field_value if entity.corrected_value is None else entity.corrected_value
     entity.corrected_value = body.corrected_value
     entity.corrected_by = user.id
     entity.corrected_at = datetime.now(timezone.utc)
+    write_audit_log(
+        db, actor_id=user.id, action="correct", entity_type="extracted_entities", entity_id=entity.id,
+        detail={"field_name": entity.field_name, "previous_value": previous_value, "corrected_value": body.corrected_value},
+    )
     db.commit()
     db.refresh(entity)
     return EntityOut.model_validate(entity)

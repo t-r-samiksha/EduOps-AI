@@ -313,3 +313,27 @@ def test_stream_generator_respects_max_events(db_session, seed):
 
     events = asyncio.run(_collect(_alert_event_stream(db_session, max_events=2, poll_interval=0), 10))
     assert len(events) == 2
+
+
+# --- fee_overdue as 8th source: real HTTP-level integration ---
+
+
+def test_overdue_fee_appears_in_get_admin_alerts(client, db_session, seed):
+    from datetime import date, timedelta
+
+    from app.models.fees import FeeRecord, FeeSchedule
+
+    schedule = FeeSchedule(school_id=seed["school"].id, academic_year="2026-27", fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=10))
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=seed["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="overdue", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.get("/admin/alerts")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    match = next(i for i in items if i["id"] == f"fee_overdue:{record.id}")
+    assert match["source"] == "fee_overdue"
+    assert match["entity_type"] == "fee_records"

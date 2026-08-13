@@ -1,0 +1,269 @@
+import uuid
+from datetime import date, time
+
+import pytest
+
+from app.main import app
+from app.models.audit import AuditLogEntry
+from app.models.class_ import SchoolClass
+from app.models.role import Role
+from app.models.school import School
+from app.models.staffing import LeaveRequest, Substitution
+from app.models.subject import Subject
+from app.models.timetable import Room, TeacherSubject, TimetableSlot
+from app.models.user import User
+from app.services.auth import CurrentUser, get_current_user
+
+ACADEMIC_YEAR = "2026-27"
+
+
+def _override_user(role: str, user_id: int = 999):
+    def _fake_user():
+        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role)
+
+    app.dependency_overrides[get_current_user] = _fake_user
+
+
+@pytest.fixture(autouse=True)
+def _clear_user_override():
+    yield
+    app.dependency_overrides.pop(get_current_user, None)
+
+
+def _make_user(db_session, role_row, prefix, school):
+    email = f"{prefix}-{uuid.uuid4()}@example.com"
+    user = User(supabase_id=uuid.uuid4(), email=email, full_name=prefix, role_id=role_row.id, school_id=school.id)
+    db_session.add(user)
+    db_session.flush()
+    return user
+
+
+@pytest.fixture()
+def seed(db_session):
+    school = School(name="Test School")
+    db_session.add(school)
+    db_session.flush()
+
+    admin_role = db_session.query(Role).filter(Role.name == "admin").one()
+    teacher_role = db_session.query(Role).filter(Role.name == "teacher").one()
+
+    admin_user = _make_user(db_session, admin_role, "admin", school)
+    teacher = _make_user(db_session, teacher_role, "teacher", school)
+    sub_teacher = _make_user(db_session, teacher_role, "sub-teacher", school)
+
+    subject = Subject(name="Math", school_id=school.id)
+    db_session.add(subject)
+    db_session.flush()
+    room = Room(name="R1", capacity=30, room_type="classroom", school_id=school.id)
+    db_session.add(room)
+    db_session.flush()
+    school_class = SchoolClass(name="8A", academic_year=ACADEMIC_YEAR, school_id=school.id, class_teacher_id=teacher.id)
+    db_session.add(school_class)
+    db_session.flush()
+
+    db_session.add(TeacherSubject(teacher_id=sub_teacher.id, subject_id=subject.id))
+    # day_of_week must match today's weekday, since pending_leave below uses
+    # date.today() for a single-day leave - _distinct_slots_for_leave only touches
+    # the weekday(s) actually spanned by the leave's date range.
+    db_session.add(
+        TimetableSlot(
+            day_of_week=date.today().weekday(), period_number=0, start_time=time(8, 0), end_time=time(8, 45),
+            subject_id=subject.id, teacher_id=teacher.id, class_id=school_class.id, room_id=room.id,
+            academic_year=ACADEMIC_YEAR, is_active=True,
+        )
+    )
+    db_session.commit()
+
+    return {"school": school, "class": school_class, "admin_user": admin_user, "teacher": teacher, "sub_teacher": sub_teacher}
+
+
+@pytest.fixture()
+def pending_leave(db_session, seed):
+    lr = LeaveRequest(teacher_id=seed["teacher"].id, start_date=date.today(), end_date=date.today(), reason="sick", status="pending")
+    db_session.add(lr)
+    db_session.commit()
+    db_session.refresh(lr)
+    return lr
+
+
+# --- RBAC ---
+
+
+def test_list_approvals_401_without_token(client):
+    resp = client.get("/admin/approvals")
+    assert resp.status_code == 401
+
+
+def test_list_approvals_403_for_teacher_role(client):
+    # Deliberate: teacher is NOT authorized for the unified inbox - see
+    # routers/approvals.py's own comment for why.
+    _override_user("teacher")
+    resp = client.get("/admin/approvals")
+    assert resp.status_code == 403
+
+
+def test_decision_401_without_token(client):
+    resp = client.post("/admin/approvals/leave_request:1/decision", json={"decision": "approve"})
+    assert resp.status_code == 401
+
+
+def test_decision_403_for_teacher_role(client):
+    _override_user("teacher")
+    resp = client.post("/admin/approvals/leave_request:1/decision", json={"decision": "approve"})
+    assert resp.status_code == 403
+
+
+# --- GET /admin/approvals ---
+
+
+def test_list_approvals_returns_pending_leave_request(client, seed, pending_leave):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.get("/admin/approvals")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    match = next(i for i in items if i["id"] == f"leave_request:{pending_leave.id}")
+    assert match["type"] == "leave_request"
+    assert match["requested_by"] == seed["teacher"].id
+    assert match["entity_type"] == "leave_requests"
+    assert match["payload"]["reason"] == "sick"
+
+
+# --- POST /admin/approvals/{id}/decision ---
+
+
+def test_approve_decision_applies_and_creates_substitutions(client, db_session, seed, pending_leave):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/approvals/leave_request:{pending_leave.id}/decision",
+        json={"decision": "approve", "academic_year": ACADEMIC_YEAR},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"id": f"leave_request:{pending_leave.id}", "status": "approved"}
+
+    db_session.refresh(pending_leave)
+    assert pending_leave.status == "approved"
+    assert pending_leave.decided_by == seed["admin_user"].id
+    assert pending_leave.decided_at is not None
+
+    subs = db_session.query(Substitution).filter(Substitution.leave_request_id == pending_leave.id).all()
+    assert len(subs) == 1
+    assert subs[0].substitute_teacher_id == seed["sub_teacher"].id
+
+
+def test_reject_decision_does_not_require_academic_year(client, db_session, seed, pending_leave):
+    _override_user("principal", user_id=seed["admin_user"].id)
+    resp = client.post(f"/admin/approvals/leave_request:{pending_leave.id}/decision", json={"decision": "reject"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "rejected"
+
+    db_session.refresh(pending_leave)
+    assert pending_leave.status == "rejected"
+
+
+def test_approve_decision_without_academic_year_returns_400(client, seed, pending_leave):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(f"/admin/approvals/leave_request:{pending_leave.id}/decision", json={"decision": "approve"})
+    assert resp.status_code == 400
+
+
+def test_decision_rejects_invalid_decision_value(client, seed, pending_leave):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(f"/admin/approvals/leave_request:{pending_leave.id}/decision", json={"decision": "maybe"})
+    assert resp.status_code == 400
+
+
+def test_decision_malformed_id_returns_400(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post("/admin/approvals/not-a-valid-id/decision", json={"decision": "approve"})
+    assert resp.status_code == 400
+
+
+def test_decision_unknown_type_returns_404(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post("/admin/approvals/fees:1/decision", json={"decision": "approve"})
+    assert resp.status_code == 404
+
+
+def test_decision_unknown_entity_id_returns_404(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post("/admin/approvals/leave_request:999999/decision", json={"decision": "approve"})
+    assert resp.status_code == 404
+
+
+def test_decision_on_already_decided_leave_returns_400(client, seed, pending_leave):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    assert client.post(f"/admin/approvals/leave_request:{pending_leave.id}/decision", json={"decision": "reject"}).status_code == 200
+    resp = client.post(f"/admin/approvals/leave_request:{pending_leave.id}/decision", json={"decision": "reject"})
+    assert resp.status_code == 400
+
+
+def test_decision_writes_audit_log_entry(client, db_session, seed, pending_leave):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(f"/admin/approvals/leave_request:{pending_leave.id}/decision", json={"decision": "reject", "comment": "not enough notice"})
+    assert resp.status_code == 200
+
+    entry = (
+        db_session.query(AuditLogEntry)
+        .filter(AuditLogEntry.entity_type == "leave_requests", AuditLogEntry.entity_id == pending_leave.id, AuditLogEntry.action == "reject")
+        .one()
+    )
+    assert entry.actor_id == seed["admin_user"].id
+    assert entry.detail["comment"] == "not enough notice"
+
+
+# --- admission_application as 2nd real source: real HTTP-level integration ---
+
+
+def test_get_admin_approvals_shows_both_leave_request_and_admission_together(client, db_session, seed, pending_leave):
+    from datetime import date
+
+    from app.models.admissions import AdmissionApplication
+
+    application = AdmissionApplication(
+        school_id=seed["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
+        guardian_email="g@example.com", grade_applied="8A", status="under_review", submitted_by=seed["admin_user"].id,
+    )
+    db_session.add(application)
+    db_session.commit()
+    db_session.refresh(application)
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.get("/admin/approvals")
+    assert resp.status_code == 200
+    ids = {i["id"] for i in resp.json()["items"]}
+    assert f"leave_request:{pending_leave.id}" in ids
+    assert f"admission_application:{application.id}" in ids
+
+
+def test_approve_admission_via_unified_endpoint_creates_enrollment(client, db_session, seed):
+    from datetime import date
+
+    from app.models.admissions import AdmissionApplication
+    from app.models.enrollment import Enrollment
+
+    application = AdmissionApplication(
+        school_id=seed["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
+        guardian_email="g@example.com", grade_applied="8A", status="under_review", submitted_by=seed["admin_user"].id,
+    )
+    db_session.add(application)
+    db_session.commit()
+    db_session.refresh(application)
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/approvals/admission_application:{application.id}/decision",
+        json={"decision": "approve", "student_user_id": seed["sub_teacher"].id, "class_id": seed["class"].id},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"id": f"admission_application:{application.id}", "status": "accepted"}
+
+    db_session.refresh(application)
+    assert application.status == "accepted"
+    assert application.enrolled_student_id == seed["sub_teacher"].id
+
+    enrollment = (
+        db_session.query(Enrollment)
+        .filter(Enrollment.student_id == seed["sub_teacher"].id, Enrollment.class_id == seed["class"].id)
+        .one()
+    )
+    assert enrollment.is_primary is True

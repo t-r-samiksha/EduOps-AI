@@ -7,7 +7,22 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import admin_alerts, attendance, auth, documents, risk, staffing, syllabus, timetable
+from app.routers import (
+    admin_alerts,
+    admissions,
+    approvals,
+    attendance,
+    audit,
+    auth,
+    documents,
+    exams,
+    fees,
+    reference,
+    risk,
+    staffing,
+    syllabus,
+    timetable,
+)
 
 app = FastAPI(title="EduOps AI API")
 
@@ -27,6 +42,12 @@ app.include_router(risk.router)
 app.include_router(documents.router)
 app.include_router(admin_alerts.router)
 app.include_router(syllabus.router)
+app.include_router(approvals.router)
+app.include_router(audit.router)
+app.include_router(fees.router)
+app.include_router(admissions.router)
+app.include_router(exams.router)
+app.include_router(reference.router)
 
 
 @app.get("/health")

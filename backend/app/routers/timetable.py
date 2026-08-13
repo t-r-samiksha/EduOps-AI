@@ -17,6 +17,7 @@ from app.models.timetable import (
     TeacherUnavailability,
     TimetableSlot,
 )
+from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.timetable_solver import (
     ScheduledSlot,
@@ -334,6 +335,14 @@ def update_slot(
     slot.subject_id = subject_id
     slot.start_time, slot.end_time = _period_times(period_number)
 
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="update",
+        entity_type="timetable_slots",
+        entity_id=slot.id,
+        detail={"day_of_week": day_of_week, "period_number": period_number, "teacher_id": teacher_id, "room_id": room_id, "subject_id": subject_id},
+    )
     db.commit()
     db.refresh(slot)
 

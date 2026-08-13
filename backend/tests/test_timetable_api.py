@@ -139,7 +139,9 @@ def test_active_teacher_only_sees_own_slots(client, seed):
 
 
 def test_update_with_no_conflict_applies_change(client, seed):
-    _override_user("admin")
+    # Must be a real user id, not the default fake 999 - PUT /timetable/update now
+    # writes an AuditLogEntry with actor_id=user.id, a real FK to users.id.
+    _override_user("admin", user_id=seed["teacher1"].id)
     resp = client.put(
         "/timetable/update",
         json={"slot_id": seed["slot"].id, "day_of_week": 1, "period_number": 2, "room_id": seed["room_b"].id},

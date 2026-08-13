@@ -10,6 +10,7 @@ from app.models.class_ import SchoolClass
 from app.models.subject import Subject
 from app.models.syllabus import AnomalyFlag, SyllabusCheckpoint, SyllabusPlan
 from app.models.timetable import TimetableSlot
+from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.syllabus_pace import SyllabusPlanInput, compute_pace
 
@@ -278,6 +279,7 @@ def resolve_anomaly(
     flag.status = "resolved"
     flag.resolved_by = user.id
     flag.resolved_at = datetime.now(timezone.utc)
+    write_audit_log(db, actor_id=user.id, action="resolve", entity_type="anomaly_flags", entity_id=flag.id)
     db.commit()
     db.refresh(flag)
     return AnomalyOut.model_validate(flag)

@@ -11,10 +11,12 @@ from app.database import get_db
 from app.models.alerts import AlertDismissal
 from app.models.attendance import AttendanceReconciliation
 from app.models.document import Document
+from app.models.fees import FeeRecord
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
 from app.models.syllabus import AnomalyFlag
 from app.services.alert_aggregator import SEVERITY_LEVELS, aggregate_alerts, summarize_alerts
+from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
 
 router = APIRouter(tags=["admin-command-center"])
@@ -38,12 +40,16 @@ _REAL_STATUS_SOURCES: dict[str, type] = {
 # native status transition - see alert_aggregator.py's "RESOLVE ROUTING" docstring
 # and models/alerts.py's AlertDismissal for the full reasoning. Maps source -> the
 # model used to verify entity_id actually exists before recording a dismissal.
+# fee_overdue joins this list, not _REAL_STATUS_SOURCES: a fee's real resolution is
+# getting PAID (POST /admin/fees/records/{id}/payment), not a generic "resolve" -
+# dismissing the alert must not fake a payment that never happened.
 _DISMISSAL_SOURCES: dict[str, type] = {
     "leave_request": LeaveRequest,
     "substitution": Substitution,
     "document_failed": Document,
     "document_low_confidence": Document,
     "attendance_reconciliation": AttendanceReconciliation,
+    "fee_overdue": FeeRecord,
 }
 
 
@@ -133,6 +139,7 @@ def resolve_alert(
         row.status = "resolved"
         row.resolved_by = user.id
         row.resolved_at = datetime.now(timezone.utc)
+        write_audit_log(db, actor_id=user.id, action="resolve", entity_type=real_status_model.__tablename__, entity_id=entity_id)
         db.commit()
         return ResolveResponse(id=alert_id, resolved=True)
 
@@ -146,6 +153,10 @@ def resolve_alert(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Alert is already resolved")
 
     db.add(AlertDismissal(alert_id=alert_id, dismissed_by=user.id))
+    write_audit_log(
+        db, actor_id=user.id, action="dismiss_alert", entity_type=dismissal_model.__tablename__, entity_id=entity_id,
+        detail={"note": "alert hidden from feed - underlying entity status unchanged"},
+    )
     db.commit()
     return ResolveResponse(id=alert_id, resolved=True)
 

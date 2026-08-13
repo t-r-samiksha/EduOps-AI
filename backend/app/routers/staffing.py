@@ -14,6 +14,7 @@ from app.models.staffing import LeaveRequest, StaffingForecast, Substitution
 from app.models.subject import Subject
 from app.models.timetable import TeacherSubject, TeacherUnavailability, TimetableSlot
 from app.models.user import User
+from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.staffing_forecast import HistoricalGapObservation, forecast_staffing_gaps
 from app.services.substitute_solver import SubstituteCandidate, SubstituteSuggestion, find_substitutes
@@ -238,38 +239,39 @@ class ApproveLeaveResponse(BaseModel):
     substitutions: list[SubstitutionOut]
 
 
-@router.put("/staff/approve_leave", response_model=ApproveLeaveResponse)
-def approve_leave(
-    body: ApproveLeaveRequest,
-    user: CurrentUser = Depends(require_role("admin", "principal")),
-    db: Session = Depends(get_db),
-):
-    if body.decision not in ("approved", "rejected"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be 'approved' or 'rejected'")
+def decide_leave_request(
+    db: Session, leave: LeaveRequest, decision: str, actor_id: int, academic_year: str | None
+) -> list[SubstitutionOut]:
+    """Applies an approve/reject decision to a LeaveRequest, including the
+    substitute-finding side effect on approval. `decision` must already be
+    "approved"/"rejected" (callers own their own input-vocabulary validation - see
+    PUT /staff/approve_leave and POST /admin/approvals/{id}/decision, which accept
+    different wording but both normalize to this before calling in).
 
-    leave = db.query(LeaveRequest).filter(LeaveRequest.id == body.leave_request_id).one_or_none()
-    if leave is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Leave request not found")
-
-    leave.status = body.decision
-    leave.decided_by = user.id
+    Shared by both of those endpoints so they produce IDENTICAL behavior -
+    approving a leave through the unified approvals inbox must run the same
+    substitute-matching PUT /staff/approve_leave always did, not a stripped-down
+    parallel version that silently skips it. Does not commit or write an audit
+    entry - callers do both, since they need the caller-specific action verb."""
+    leave.status = decision
+    leave.decided_by = actor_id
     leave.decided_at = datetime.now(timezone.utc)
 
     substitutions_out: list[SubstitutionOut] = []
-    if body.decision == "approved":
-        if not body.academic_year:
+    if decision == "approved":
+        if not academic_year:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, "academic_year is required to resolve affected timetable slots"
             )
 
-        slots = _distinct_slots_for_leave(db, leave.teacher_id, leave.start_date, leave.end_date, body.academic_year)
+        slots = _distinct_slots_for_leave(db, leave.teacher_id, leave.start_date, leave.end_date, academic_year)
         for slot in slots:
             candidates = _build_substitute_candidates(
                 db,
                 subject_id=slot.subject_id,
                 day_of_week=slot.day_of_week,
                 period_number=slot.period_number,
-                academic_year=body.academic_year,
+                academic_year=academic_year,
                 exclude_teacher_id=leave.teacher_id,
                 leave_start=leave.start_date,
                 leave_end=leave.end_date,
@@ -302,6 +304,31 @@ def approve_leave(
 
             substitutions_out.append(_substitution_out(slot, suggestions, sub=sub))
 
+    return substitutions_out
+
+
+@router.put("/staff/approve_leave", response_model=ApproveLeaveResponse)
+def approve_leave(
+    body: ApproveLeaveRequest,
+    user: CurrentUser = Depends(require_role("admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    if body.decision not in ("approved", "rejected"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "decision must be 'approved' or 'rejected'")
+
+    leave = db.query(LeaveRequest).filter(LeaveRequest.id == body.leave_request_id).one_or_none()
+    if leave is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Leave request not found")
+
+    substitutions_out = decide_leave_request(db, leave, body.decision, user.id, body.academic_year)
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="approve" if body.decision == "approved" else "reject",
+        entity_type="leave_requests",
+        entity_id=leave.id,
+        detail={"academic_year": body.academic_year, "substitutions_affected": len(substitutions_out)},
+    )
     db.commit()
     db.refresh(leave)
 
@@ -500,6 +527,14 @@ def confirm_substitution(
     sub.substitute_teacher_id = target_teacher_id
     sub.status = "confirmed"
     sub.confirmed_at = datetime.now(timezone.utc)
+    write_audit_log(
+        db,
+        actor_id=user.id,
+        action="confirm",
+        entity_type="substitutions",
+        entity_id=sub.id,
+        detail={"substitute_teacher_id": target_teacher_id},
+    )
     db.commit()
     db.refresh(sub)
 

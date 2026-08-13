@@ -2,8 +2,8 @@
 in", per the playbook. This is an AGGREGATION feature, not a new data source: every
 alert here is read live from a table some other feature already owns and writes to
 (RiskFlag, LeaveRequest, Substitution, Document/ExtractedEntity,
-AttendanceReconciliation). Nothing in this module ever creates or mutates one of
-those rows for the purpose of generating an alert.
+AttendanceReconciliation, AnomalyFlag, FeeRecord). Nothing in this module ever
+creates or mutates one of those rows for the purpose of generating an alert.
 
 PLUGGABLE ALERT SOURCES
 -----------------------------
@@ -59,6 +59,22 @@ endpoint is a real design decision (would it log every attempted conflicting edi
 or only ones that actually blocked a save?) that belongs to whoever owns that
 endpoint's UX, not something to bolt on silently from the alerts side. Not included
 as a source.
+
+CONSIDERED AND DECLINED: InvigilationAssignment as a 9th source (Exam Management
+session). Substitution's escalation rule works because an unconfirmed substitution
+is a genuine open gap - the admin must act before the leave date or a class goes
+uncovered. InvigilationAssignment doesn't have that same shape: routers/exams.py's
+schedule-generation only ever creates a row once a real teacher has actually been
+assigned (see services/exam_scheduler.py) - `status` stays "assigned" for
+everything created this session because no confirm/decline endpoint was built (not
+requested). An "unconfirmed, close to date" alert on a status that has no path to
+ever change would be perpetually true and, worse, wouldn't link to any action a
+click-through could resolve. The real analogous gap - a room an exam needs covered
+that got NO invigilator at all - is surfaced instead, directly and synchronously, in
+POST /admin/exams/{id}/schedules's own response (`unassigned_rooms`), right where an
+admin generating the schedule can act on it immediately, rather than routed through
+an async alert a day later. Revisit if a real confirm/decline flow is ever added for
+invigilation duties.
 """
 
 from __future__ import annotations
@@ -71,6 +87,7 @@ from sqlalchemy.orm import Session
 
 from app.models.attendance import AttendanceReconciliation
 from app.models.document import Document, ExtractedEntity
+from app.models.fees import FeeRecord
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
 from app.models.syllabus import AnomalyFlag
@@ -307,6 +324,38 @@ def anomaly_flag_alerts(db: Session) -> list[Alert]:
     ]
 
 
+FEE_OVERDUE_URGENT_DAYS = 30
+"""Matches services/fee_reminder_engine.py's own third/"escalated" reminder tier
+threshold, deliberately - "urgent" here and "escalated" there should agree on what
+counts as seriously overdue rather than each inventing its own independent number."""
+
+
+def fee_overdue_alerts(db: Session, today: date | None = None) -> list[Alert]:
+    """Open FeeRecord rows in status="overdue" - the 8th alert source, added in the
+    Fees & Admissions session. Severity escalates at FEE_OVERDUE_URGENT_DAYS, same
+    threshold services/fee_reminder_engine.py treats as its final escalated tier."""
+    today = today or _utcnow().date()
+    records = db.query(FeeRecord).filter(FeeRecord.status == "overdue").all()
+    alerts = []
+    for r in records:
+        days_overdue = (today - r.due_date).days
+        balance = round(r.amount_due - r.amount_paid, 2)
+        alerts.append(
+            Alert(
+                id=f"fee_overdue:{r.id}",
+                source="fee_overdue",
+                severity="urgent" if days_overdue >= FEE_OVERDUE_URGENT_DAYS else "normal",
+                title="Overdue fee",
+                message=f"Student {r.student_id} has {balance} overdue, {days_overdue} days past due date {r.due_date}",
+                entity_type="fee_records",
+                entity_id=r.id,
+                created_at=r.created_at,
+                resolved=False,
+            )
+        )
+    return alerts
+
+
 ALERT_SOURCES: dict[str, Callable[[Session], list[Alert]]] = {
     "risk_flag": risk_flag_alerts,
     "leave_request": leave_request_alerts,
@@ -315,6 +364,7 @@ ALERT_SOURCES: dict[str, Callable[[Session], list[Alert]]] = {
     "document_low_confidence": document_low_confidence_alerts,
     "attendance_reconciliation": attendance_reconciliation_alerts,
     "anomaly_flag": anomaly_flag_alerts,
+    "fee_overdue": fee_overdue_alerts,
 }
 
 

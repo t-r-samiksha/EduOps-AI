@@ -24,6 +24,27 @@ owner should never be blocked waiting on a backend endpoint's shape.
 | ------ | ----------- | ----- | ------------------------------------ |
 | GET    | `/health`   | any   | Liveness check                       |
 | GET    | `/auth/me`  | any authenticated | Current user's identity + role |
+| GET    | `/reference/lookup` | any authenticated | Id -> name lookup for subjects/teachers/rooms/classes |
+
+#### `GET /reference/lookup`
+**Not in the original Phase 0 stub - added during the frontend session.** Phase 0 built
+the users/school/class/subject schema but never exposed a way to resolve their ids to
+display names, and every Person A endpoint (timetable slots, attendance matches, ...)
+only carries `subject_id`/`teacher_id`/`room_id`/`class_id` per this doc - a frontend
+has no way to show "Math" instead of "Subject #3" without this. Read-only, not
+role-gated beyond authentication (these entities carry no sensitive data themselves).
+- **Roles:** any authenticated
+- **Query:** `?school_id=` (required)
+- **Response:**
+```json
+{
+  "subjects": [ { "id": 3, "name": "Math" } ],
+  "teachers": [ { "id": 7, "name": "Demo Teacher 1" } ],
+  "students": [ { "id": 103, "name": "Demo Student Class 8A #01" } ],
+  "rooms": [ { "id": 1, "name": "Room 12" } ],
+  "classes": [ { "id": 41, "name": "Class 8A" } ]
+}
+```
 
 ## Person A — AI/algorithm core + admin/ops backbone
 
@@ -492,6 +513,12 @@ unambiguously):
 | `document_failed` | Document `status="failed"` | always `urgent` (the source image is never persisted - see `models/document.py` - so a failed document can't simply be retried) |
 | `document_low_confidence` | a Document has an uncorrected `is_low_confidence` field | always `normal`, one alert per document (not per field) |
 | `attendance_reconciliation` | AttendanceReconciliation `status="pending"` | always `normal` - included for completeness but expect this empty today; nothing populates that table yet (no RFID ingestion/reconciliation job exists) |
+| `anomaly_flag` | AnomalyFlag open (Syllabus/Anomaly session) | copied straight from `AnomalyFlag.severity` |
+| `fee_overdue` | FeeRecord `status="overdue"` (Fees & Admissions session) | `urgent` at >=30 days overdue (matches `fee_reminder_engine.py`'s own escalated tier), else `normal` |
+
+Two sources above (`anomaly_flag`, `fee_overdue`) were added in later sessions than
+this table itself - `anomaly_flag` was missing from this table even after being
+wired in, an oversight caught and fixed while adding `fee_overdue` this session.
 
 **A known gap, not silently solved:** `/timetable/update`'s conflict detection
 (`_find_conflicts` in `routers/timetable.py`) is purely transient - conflicts are
@@ -682,35 +709,149 @@ Resolve an anomaly flag directly - equivalent to `POST /admin/alerts/anomaly_fla
 
 ### Approval chains
 
+A generalization, not new domain logic: this is an AGGREGATION over entities that
+already have their own real approve/reject flow (same pattern as Command Center's
+`alert_aggregator.py`, applied to approvals via `backend/app/services/
+approval_aggregator.py`). Nothing here duplicates `LeaveRequest`'s status as a
+second approval system.
+
+**Which entities are genuinely approval-shaped - checked every prior session's
+models, not assumed:** an entity qualifies here only if it has a real PENDING state
+gating a decision made by someone other than the requester, with actual approve/
+reject outcomes - not merely "has a status column." **2 of 8 considered entities
+qualify** (up from 1/7 last session - the registry's pluggability, proven for real):
+- `LeaveRequest` (Staffing session): **yes.**
+- `AdmissionApplication` (Fees & Admissions session): **yes**, but only once
+  `status="under_review"` - a freshly-`submitted` application is pending an initial
+  triage step, not yet at the binary decision point this inbox's approve/reject
+  vocabulary fits. See `services/approval_aggregator.py`'s module docstring.
+- `RiskFlag`/`Intervention` (Early-Warning), `ExtractedEntity` correction (OCR),
+  `AnomalyFlag` (Syllabus/Anomaly), `Substitution` confirm (Staffing), `FeeRecord`/
+  `FeeReminder` (Fees & Admissions): **no** - all are either direct actions an
+  admin/teacher takes on their own authority with no second party's sign-off gating
+  them, or (fees specifically) alert-worthy but not decision-gated at all - a fee
+  either gets paid or doesn't, nobody "approves" it becoming due. Checked and ruled
+  out honestly, not padded into the registry to look more complete. Exam Management
+  (a later session) may introduce another real candidate - adding one is a single
+  new function registered in `APPROVAL_SOURCES`, per that module's docstring.
+
+**Role scoping - admin/principal only, NOT teacher** (a deliberate deviation from
+this section's original stub, which listed `teacher`): the one real source can only
+be decided by admin/principal, so no teacher is ever a decision-maker for anything
+in this inbox today. A teacher's own filed leave requests are already visible via
+the existing `GET /staff/leave_requests` self-service view. See
+`routers/approvals.py`'s own comment for the full reasoning; revisit once a
+genuinely teacher-decidable source exists.
+
+**Composite id - reused from Command Center, not reinvented:** `"{type}:{entity_id}"`
+e.g. `"leave_request:47"`, the exact same scheme `alert_aggregator.Alert.id` /
+`POST /admin/alerts/{source}:{id}/resolve` use.
+
 #### `GET /admin/approvals`
-Fetch pending approval requests visible to the current user.
-- **Roles:** admin, principal, teacher
+Fetch pending approval requests.
+- **Roles:** admin, principal
 - **Response:**
 ```json
-{ "items": [ { "id": 4, "type": "leave_request", "requested_by": 7, "status": "pending", "payload": { "reason": "..." }, "created_at": "2026-08-09T06:00:00Z" } ] }
+{ "items": [ { "id": "leave_request:47", "type": "leave_request", "requested_by": 97, "requested_at": "2026-08-12T06:00:00Z", "payload": { "start_date": "2026-08-20", "end_date": "2026-08-21", "reason": "medical" }, "entity_type": "leave_requests", "entity_id": 47 } ] }
 ```
 
 #### `POST /admin/approvals/{id}/decision`
-Approve or reject a pending request.
+Approve or reject. For `leave_request`-type approvals, routes through the exact same
+`decide_leave_request()` logic (and substitute-finding side effect) as
+`PUT /staff/approve_leave` - both entry points are behaviorally identical, not a
+unified endpoint that silently does less.
 - **Roles:** admin, principal
-- **Request:** `{ "decision": "approve", "comment": null }`
-- **Response:** `{ "id": 4, "status": "approved" }`
+- **Request:** `{ "decision": "approve", "comment": null, "academic_year": "2026-27" }`
+  (`academic_year` is an **addition beyond the original stub** - required only when deciding a `leave_request` approval with `decision="approve"`, needed to resolve affected timetable slots, exactly like `PUT /staff/approve_leave` already requires. Flagged here rather than silently extending the shape.)
+- **Response:** `{ "id": "leave_request:47", "status": "approved" }`
+- **Errors:** `400` invalid `decision`, malformed id, missing `academic_year` on an approve, or the request is no longer pending; `404` unknown type or entity_id.
 
 ### Audit log
 
-#### `GET /admin/audit-log`
-Fetch the audit trail.
+Per the playbook: "Audit log writer with a consistent schema for all auditable
+actions" - `backend/app/services/audit_log.py`'s `write_audit_log()`, called from
+**every** router with a privileged state-changing endpoint. Before this session,
+**nothing in this repo wrote anything audit-trail-shaped** - this closes a genuine,
+repo-wide gap, not a partial extension of something that already existed. Wired into
+11 endpoints across 8 routers:
+
+| Router | Endpoint | action | entity_type |
+| --- | --- | --- | --- |
+| timetable | `PUT /update` | `update` | `timetable_slots` |
+| attendance | `PUT /{id}/review` | `review` | `attendance_records` |
+| staffing | `PUT /staff/approve_leave` | `approve`/`reject` | `leave_requests` |
+| staffing | `PUT /substitution/{id}/confirm` | `confirm` | `substitutions` |
+| risk | `PUT /{id}/acknowledge` | `acknowledge` | `risk_flags` |
+| risk | `POST /{id}/intervention` | `create` | `interventions` |
+| risk | `PUT /{id}/resolve` | `resolve` | `risk_flags` |
+| documents | `PUT .../entities/{id}` | `correct` | `extracted_entities` |
+| syllabus | `PUT /admin/anomalies/{id}/resolve` | `resolve` | `anomaly_flags` |
+| admin_alerts | `POST /admin/alerts/{id}/resolve` | `resolve` (real-status sources) or `dismiss_alert` (dismissal sources - honest that the underlying row did NOT change) | varies by source |
+| approvals | `POST /admin/approvals/{id}/decision` | `approve`/`reject` | `leave_requests` |
+
+Deliberately NOT wired in: read-only `GET`s, and creates without a meaningful
+"state changed" semantic (`POST /risk/flag`, `POST /syllabus/checkpoint`,
+`POST /timetable/generate`, etc.) - audited actions are decisions/corrections/
+transitions on an existing entity, not every write in the system.
+
+`entity_id` is not a DB-enforced foreign key - which table it refers to depends on
+`entity_type`, genuinely polymorphic across every feature this repo has built (same
+reasoning as `AnomalyFlag.entity_id` and `Alert.entity_id`).
+
+**A shape change from the original stub:** this section originally spec'd one
+`GET /admin/audit-log?entity_type=&entity_id=&actor_id=&page=&page_size=` endpoint.
+Replaced with the two path-based endpoints the playbook itself names (`fetch all
+actions by a given user` / `fetch all actions on a given object`) - no pagination,
+matching this project's other list endpoints at this data scale.
+
+#### `GET /audit/by_user/{user_id}`
+All actions performed by a given user.
 - **Roles:** admin, principal
-- **Query:** `?entity_type=&entity_id=&actor_id=&page=&page_size=`
 - **Response:**
 ```json
-{ "items": [ { "id": 100, "actor_id": 3, "action": "update", "entity_type": "user", "entity_id": 15, "created_at": "2026-08-09T06:00:00Z" } ], "total": 1, "page": 1, "page_size": 20 }
+{ "items": [ { "id": 100, "actor_id": 252, "action": "resolve", "entity_type": "risk_flags", "entity_id": 43, "detail": null, "created_at": "2026-08-12T06:00:00Z" } ] }
 ```
+
+#### `GET /audit/by_object/{object_type}/{object_id}`
+All actions performed on a given entity, e.g. `/audit/by_object/leave_requests/47`.
+- **Roles:** admin, principal
+- **Response:** same item shape as `/audit/by_user/{user_id}`.
 
 ### Fees
 
+Backed by `backend/app/models/fees.py` (`FeeSchedule` -> `FeeRecord` -> `FeeReminder`)
+and `backend/app/services/fee_reminder_engine.py`'s cadence heuristic. `FeeSchedule`
+is class-scoped (`class_id` nullable = school-wide, e.g. transport; set = class-
+specific, e.g. tiered tuition) - matches how real fee structures vary by grade far
+more than by individual student. `scripts/run_monthly_fee_invoicing.py` generates
+`FeeRecord` rows from active schedules and marks past-due ones overdue; overdue
+records are the 8th `alert_aggregator.ALERT_SOURCES` entry (`fee_overdue`), so they
+surface in `GET /admin/alerts` automatically. Resolving a `fee_overdue` alert via
+`POST /admin/alerts/fee_overdue:{id}/resolve` only dismisses it from the feed - a
+fee's real resolution is a payment (below), not a generic resolve.
+
+**Reminder cadence, per playbook's "heuristic engine":** 7/14/30 days overdue,
+escalating to `urgent` severity at 30 (matching the alert feed's own threshold) -
+round numbers, not calibrated against real payment-behavior data.
+`FeeReminder.sent_at` stays null: checked, no email-sending infrastructure exists
+anywhere in this repo (same finding as Command Center's briefing email) - a row here
+means "the system determined a reminder was due," not "an email was delivered."
+
+#### `POST /admin/fees/schedules`
+Create a fee schedule.
+- **Roles:** admin, principal
+- **Request:** `{ "school_id": 41, "class_id": 41, "academic_year": "2026-27", "fee_type": "tuition", "amount": 15000, "due_date": "2026-09-01" }`
+- **Response:** the created schedule, including `id`/`created_at`.
+- **Errors:** `400` non-positive `amount` or empty `fee_type`; `404` unknown `class_id`.
+
+#### `GET /admin/fees/schedules`
+List fee schedules.
+- **Roles:** admin, principal
+- **Query:** `?school_id=&academic_year=`
+
 #### `POST /admin/fees/reminders`
-Trigger a batch fee-reminder send.
+Trigger a batch fee-reminder send - runs the cadence heuristic against matching
+`FeeRecord`s and logs a `FeeReminder` for each that's due one.
 - **Roles:** admin, principal
 - **Request:** `{ "class_id": null, "overdue_only": true }`
 - **Response:** `{ "sent_count": 24 }`
@@ -721,56 +862,171 @@ Fetch fee status across students (admin view — see also Person C's parent-scop
 - **Query:** `?class_id=&status=`
 - **Response:**
 ```json
-{ "items": [ { "student_id": 15, "amount_due": 5000, "due_date": "2026-08-15", "status": "overdue" } ] }
+{ "items": [ { "student_id": 15, "fee_record_id": 9, "amount_due": 5000, "amount_paid": 0, "due_date": "2026-08-15", "status": "overdue" } ] }
 ```
 
+#### `POST /admin/fees/records/{id}/payment`
+Record a payment against a fee record, however it was collected - the frontend
+payment-collection UI itself is Person C's parent-portal territory; this only
+persists the outcome. Recomputes `status` (`partial` if `0 < amount_paid <
+amount_due`, `paid` if `amount_paid >= amount_due`).
+- **Roles:** admin, principal
+- **Request:** `{ "amount": 5000, "paid_at": null }`
+- **Response:** `{ "fee_record_id": 9, "amount_paid": 5000, "amount_due": 5000, "status": "paid" }`
+- **Errors:** `400` non-positive `amount`; `404` unknown fee record.
+
 ### Admissions
+
+Backed by `backend/app/models/admissions.py` (`AdmissionApplication`) and
+`backend/app/services/admissions_rules.py` (state machine + eligibility).
+`AdmissionApplication` carries `school_id`/`academic_year`/`submitted_by` beyond the
+original stub's field list - necessary, not decorative: eligibility checking ("is
+`grade_applied` offered by the school") is meaningless without knowing which school/
+year to check against, and `submitted_by` is the real user id behind
+`PendingApproval.requested_by` once registered below (the applicant has no user row
+of their own).
+
+**State machine - legal transitions only:**
+```
+submitted    -> under_review, rejected
+under_review -> accepted, rejected
+accepted, rejected -> (terminal - no further transitions)
+```
+`submitted -> accepted` directly is explicitly illegal (must pass through
+`under_review`); `PATCH` rejects illegal transitions with `400` and a clear reason
+rather than silently allowing them.
+
+**Registered as the 2nd real source in `approval_aggregator.APPROVAL_SOURCES`** (up
+from 1/7 last session, now 2/8) - but only for `status="under_review"`, not
+`"submitted"`: a freshly-submitted application is pending an initial triage step
+(this `PATCH` endpoint, moved to `under_review`), not yet at the binary approve/
+reject decision point `GET /admin/approvals` / `POST /admin/approvals/{id}/decision`
+offer. See `services/approval_aggregator.py`'s module docstring for the full
+reasoning.
+
+**Accept -> Enrollment wiring is REAL, not stubbed - with one honestly-scoped
+exception:** accepting an application (`status="accepted"`) creates a genuine
+`Enrollment` row when the caller supplies both `student_user_id` (an
+**already-existing** user) and `class_id`. Checked first: this repo has no account-
+creation flow anywhere (Supabase Auth signup is out of scope for this session) - so
+creating a brand-new student user account for a newly-accepted applicant is the one
+piece that stays a documented no-op (`enrollment_created: false` in the response),
+not silently faked. Enrollment creation itself, once a real user id exists, is fully
+real.
 
 #### `POST /admin/admissions/applications`
 Submit a new admission application (typically entered by office staff, possibly pre-filled via OCR).
 - **Roles:** admin
 - **Request:**
 ```json
-{ "applicant_name": "Jane Doe", "dob": "2015-04-01", "guardian_email": "guardian@example.com", "grade_applied": "6", "ocr_document_ids": [1] }
+{ "school_id": 41, "academic_year": "2026-27", "applicant_name": "Jane Doe", "dob": "2015-04-01", "guardian_email": "guardian@example.com", "grade_applied": "6", "ocr_document_ids": [1] }
 ```
-- **Response:** `{ "id": 3, "status": "submitted" }`
+- **Response:** the created application (`id`, `status: "submitted"`, etc).
+- **Errors:** `400` empty `applicant_name`, or `grade_applied` not offered by the school for that academic_year.
 
 #### `GET /admin/admissions/applications`
 List/search admission applications.
 - **Roles:** admin, principal
-- **Query:** `?status=&page=`
+- **Query:** `?status=&page=&page_size=` (`page_size` defaults to 20)
 - **Response:**
 ```json
-{ "items": [ { "id": 3, "applicant_name": "Jane Doe", "grade_applied": "6", "status": "under_review" } ], "total": 1 }
+{ "items": [ { "id": 3, "applicant_name": "Jane Doe", "grade_applied": "6", "status": "under_review" } ], "total": 1, "page": 1, "page_size": 20 }
 ```
 
 #### `PATCH /admin/admissions/applications/{id}`
-Update an application's status.
+Update an application's status via the state machine above.
 - **Roles:** admin, principal
-- **Request:** `{ "status": "accepted" }`
-- **Response:** `{ "id": 3, "status": "accepted" }`
+- **Request:** `{ "status": "accepted", "decision_justification": null, "student_user_id": null, "class_id": null }`
+  (`student_user_id`/`class_id` are **additions beyond the original stub** - see "Accept -> Enrollment wiring" above; both required together to wire a real Enrollment on acceptance, both optional otherwise)
+- **Response:** `{ "id": 3, "status": "accepted", "enrollment_created": true }`
+- **Errors:** `400` illegal state transition (message names the required intermediate step, e.g. "must pass through 'under_review' first"); `404` unknown application id, or `student_user_id`/`class_id` don't refer to real rows.
 
-### Exam seating
+### Exam management
 
-#### `POST /admin/exams/seating/generate`
-Generate a seating plan for an exam.
+The final Person A backend task group. School-wide, seated/invigilated exams
+(playbook: "exam scheduling, seating allocation, invigilation management") -
+checked `backend/app/models/` before building: no `exams`/quizzes concept existed
+anywhere yet, no naming collision with Person B's (separate, not-yet-built) online
+assessments. Backed by `backend/app/models/exams.py` and `backend/app/services/
+exam_scheduler.py`; reuses `Room` from `models/timetable.py` rather than a second
+room concept.
+
+**Seating is a plain bin-fill, not a CP-SAT solve** - unlike timetable generation,
+seating has no interesting constraint beyond "one seat per student, room capacity
+respected," so it's a deterministic greedy fill rather than search machinery bought
+for no benefit. **Invigilation is `substitute_solver.py`'s filter+rank shape
+adapted, not timetable_solver's full CSP** - genuinely the same kind of problem
+(assign a qualified/free teacher to a slot), with real differences: no subject-
+qualification filter (any teacher can invigilate), a real TIME-RANGE overlap check
+against `TimetableSlot` (an exam's `start_time`/`end_time` may span multiple regular
+periods, so this isn't an exact-slot match), and an approved-`LeaveRequest` check
+for the exam date. See `exam_scheduler.py`'s module docstring for the full reasoning.
+
+**A gap the response surfaces directly, not silently:** if no eligible teacher
+remains for a room, that room's `teacher_id` is `null` and its `room_id` appears in
+`unassigned_rooms` - an honest, immediately-actionable result rather than a partial
+schedule pretending to be complete.
+
+**Registry integration considered, declined with reasoning:** evaluated whether an
+unconfirmed `InvigilationAssignment` close to its exam date deserves a 9th
+`alert_aggregator` source, the same escalation logic as `Substitution`. Declined:
+every `InvigilationAssignment` this session creates already has a real teacher
+assigned (`status="assigned"` by construction), and no confirm/decline endpoint was
+built this session (not requested) - so `status` has no path to ever change, making
+an "unconfirmed" alert perpetually true and not actionable via any click-through.
+The real analogous gap (a room genuinely left uncovered) is surfaced directly and
+synchronously in this session's own generation response above, at the point an
+admin can immediately act on it, instead of routed through an async alert. See
+`alert_aggregator.py`'s module docstring for the full reasoning.
+
+#### `POST /admin/exams`
+Create an exam. **Not in the original stub** - added because `POST /admin/exams/
+{id}/schedules` has nothing to generate a schedule for without an `Exam` already
+existing. Flagged here, same pattern as every prior session's necessary additions.
 - **Roles:** admin, principal
-- **Request:**
-```json
-{ "exam_id": 5, "rooms": [ { "room": "204", "capacity": 30 } ] }
-```
+- **Request:** `{ "school_id": 41, "subject_id": 40, "class_id": 41, "academic_year": "2026-27", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00", "total_marks": 100 }`
+- **Response:** the created exam, including `id`/`created_at`.
+- **Errors:** `400` `end_time<=start_time`; `404` unknown `subject_id`/`class_id`.
+
+#### `POST /admin/exams/{id}/schedules`
+Generate a complete seating chart + invigilation schedule for an exam - supersedes
+any previous generation for this exam (not additive), same convention as
+`POST /timetable/generate`. **Path changed from the original stub**
+(`POST /admin/exams/seating/generate` with `exam_id` in the body) to put the id in
+the path, matching every other `.../{id}/...` action endpoint in this codebase -
+flagged, not silently changed.
+- **Roles:** admin, principal
+- **Request:** `{ "rooms": [ { "room_id": 5, "capacity": 30 } ] }`
 - **Response:**
 ```json
-{ "exam_id": 5, "status": "generated", "seating": [ { "student_id": 15, "room": "204", "seat_no": 1 } ] }
+{
+  "exam_id": 5, "status": "generated",
+  "seating": [ { "student_id": 15, "room_id": 5, "seat_no": 1 } ],
+  "invigilators": [ { "room_id": 5, "teacher_id": 97 } ],
+  "unassigned_rooms": []
+}
 ```
+- **Errors:** `400` no `rooms` given; `404` unknown `exam_id` or `room_id`; `422` total room capacity is less than the class's enrolled student count.
 
 #### `GET /admin/exams/seating`
-Fetch a generated seating plan.
+Fetch a generated seating plan. A student sees only their own seat - any
+`student_id` they pass is ignored in favor of their own id (same scoping pattern as
+attendance/risk's student-facing GETs).
 - **Roles:** admin, principal, teacher, student
-- **Query:** `?exam_id=` or `?exam_id=&student_id=`
+- **Query:** `?exam_id=&student_id=` (both optional - a student with neither set sees all their own seats across every exam)
 - **Response:**
 ```json
-{ "exam_id": 5, "items": [ { "student_id": 15, "room": "204", "seat_no": 1 } ] }
+{ "exam_id": 5, "items": [ { "exam_id": 5, "student_id": 15, "room_id": 5, "room_name": "Room 204", "seat_no": 1 } ] }
+```
+
+#### `GET /admin/exams/invigilations/me`
+Backend for the playbook's "invigilator self-lookup" frontend note - built even
+though the frontend itself is deferred. Strictly self-scoped to the caller's own
+`user.id` (a "self-lookup," not a general admin-queries-any-teacher endpoint).
+- **Roles:** teacher, admin, principal
+- **Response:**
+```json
+[ { "exam_id": 5, "room_id": 5, "room_name": "Room 204", "subject_id": 40, "subject_name": "Math", "class_id": 41, "class_name": "Class 8A", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00", "status": "assigned" } ]
 ```
 
 ## Person B — Classroom & academics

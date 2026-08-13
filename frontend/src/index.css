@@ -4,35 +4,134 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
-    --primary: 222 47% 11%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --border: 214 32% 91%;
-    --radius: 0.5rem;
+    /* Light theme — matches the reference's blue/white/off-white system exactly
+       (hexes given directly, not reinterpreted): #0056D2 accent, #F4F6F9 page,
+       #FFFFFF surface. Panel == card in fill; they're distinguished by shadow/
+       border, same as the reference's white sidebar+header vs. shadow-bento cards. */
+    --paper: 216 29% 97%; /* #F4F6F9 */
+    --panel: 0 0% 100%; /* #FFFFFF — sidebar/header surface */
+    --card: 0 0% 100%; /* #FFFFFF */
+    --elevated: 210 20% 95%; /* hover-state tint on white surfaces */
+    --border: 214 32% 91%; /* #E2E8F0 */
+    --border-strong: 213 27% 84%; /* #CBD5E1 */
+
+    --ink: 222 47% 11%; /* #0F172A */
+    --ink-muted: 215 19% 35%; /* #475569 */
+    --ink-faint: 215 16% 57%; /* tertiary/timestamps */
+    --card-foreground: 222 47% 11%;
+
+    --accent: 215 100% 41%; /* #0056D2 */
+    --accent-hover: 216 100% 33%; /* #0043A8 */
+    --accent-foreground: 0 0% 100%;
+
+    --urgent: 0 84% 60%; /* #EF4444 */
+    --urgent-foreground: 222 47% 11%;
+
+    --positive: 160 84% 39%; /* #10B981 */
+    --positive-foreground: 222 47% 11%;
+
+    --warning: 38 92% 50%; /* #F59E0B */
+    --warning-foreground: 222 47% 11%;
+
+    --ring: 215 100% 41%;
+
+    /* A moderate base radius for controls (buttons/inputs/badges/select);
+       cards/headers use explicit rounded-2xl/3xl utilities (see tailwind.config.js). */
+    --radius: 0.625rem;
+
+    /* Real, visible cast shadow — tinted toward the ink hue rather than pure
+       black, per the reference's shadow-bento but softened for our surfaces. */
+    --shadow-elevated: 0 10px 40px -10px hsl(222 47% 11% / 0.10), 0 2px 8px -2px hsl(222 47% 11% / 0.06);
+    --shadow-floating: 0 20px 50px -12px hsl(215 100% 41% / 0.18);
+
+    /* Timetable subject-chip legend — a fixed, low-saturation hue rotation distinct
+       from accent/urgent/positive/warning, used only to color-code subject cells. */
+    --chip-1: 262 52% 47%; /* violet */
+    --chip-2: 330 65% 47%; /* magenta */
+    --chip-3: 24 70% 46%; /* amber-orange */
+    --chip-4: 173 58% 33%; /* teal */
+    --chip-5: 200 70% 40%; /* sky */
+    --chip-6: 142 50% 34%; /* green */
   }
 
   .dark {
-    --background: 222 47% 11%;
-    --foreground: 210 40% 98%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222 47% 11%;
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --border: 217 33% 17%;
+    /* Dark theme — a deep desaturated navy (hue-matched to the blue accent
+       family, not neutral gray), with the same accent brightened for legibility
+       and cards distinctly lighter than the page via real lightness steps. */
+    --paper: 222 47% 8%;
+    --panel: 222 40% 11%;
+    --card: 222 35% 15%;
+    --elevated: 222 28% 21%;
+    --border: 222 22% 27%;
+    --border-strong: 217 18% 35%;
+
+    --ink: 210 40% 96%;
+    --ink-muted: 215 20% 65%;
+    --ink-faint: 215 15% 48%;
+    --card-foreground: 210 40% 96%;
+
+    --accent: 217 91% 65%; /* brightened from #0056D2 for contrast on dark bg */
+    --accent-hover: 217 91% 72%;
+    --accent-foreground: 222 47% 12%; /* dark text reads far better than white here */
+
+    --urgent: 0 91% 71%;
+    --urgent-foreground: 222 47% 12%;
+
+    --positive: 160 64% 52%;
+    --positive-foreground: 222 47% 12%;
+
+    --warning: 43 96% 56%;
+    --warning-foreground: 222 47% 12%;
+
+    --ring: 217 91% 65%;
+
+    /* Dark mode: pair a real dark cast shadow with a faint inset top highlight —
+       the highlight is what actually sells elevation once the shadow alone
+       stops reading against an already-dark page. */
+    --shadow-elevated: 0 10px 30px -10px hsl(0 0% 0% / 0.5), inset 0 1px 0 0 hsl(222 22% 30% / 0.6);
+    --shadow-floating: 0 20px 45px -12px hsl(217 91% 65% / 0.25);
+
+    --chip-1: 262 65% 72%;
+    --chip-2: 330 70% 72%;
+    --chip-3: 24 75% 66%;
+    --chip-4: 173 55% 55%;
+    --chip-5: 200 75% 65%;
+    --chip-6: 142 50% 58%;
   }
 
   * {
     @apply border-border;
   }
 
+  html {
+    -webkit-font-smoothing: antialiased;
+  }
+
   body {
-    @apply bg-background text-foreground;
+    @apply bg-paper text-ink font-sans;
+    font-feature-settings: "tnum" 1;
+  }
+
+  /* Visible keyboard focus everywhere, drawn with the accent ring */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
   }
 }

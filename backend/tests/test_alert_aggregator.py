@@ -6,6 +6,7 @@ import pytest
 from app.models.attendance import AttendanceReconciliation
 from app.models.class_ import SchoolClass
 from app.models.document import Document, ExtractedEntity
+from app.models.fees import FeeRecord, FeeSchedule
 from app.models.risk import RiskFlag
 from app.models.role import Role
 from app.models.school import School
@@ -14,11 +15,14 @@ from app.models.subject import Subject
 from app.models.timetable import Room, TimetableSlot
 from app.models.user import User
 from app.services.alert_aggregator import (
+    ALERT_SOURCES,
+    FEE_OVERDUE_URGENT_DAYS,
     Alert,
     aggregate_alerts,
     attendance_reconciliation_alerts,
     document_failed_alerts,
     document_low_confidence_alerts,
+    fee_overdue_alerts,
     leave_request_alerts,
     risk_flag_alerts,
     substitution_alerts,
@@ -319,3 +323,74 @@ def test_summarize_empty_list():
     assert summary["total"] == 0
     assert summary["by_severity"] == {"normal": 0, "urgent": 0}
     assert summary["by_source"] == {}
+
+
+def test_registry_has_eight_sources_including_fee_overdue():
+    assert set(ALERT_SOURCES.keys()) == {
+        "risk_flag", "leave_request", "substitution", "document_failed",
+        "document_low_confidence", "attendance_reconciliation", "anomaly_flag", "fee_overdue",
+    }
+
+
+# --- fee_overdue_alerts (8th source) ---
+
+
+def test_recently_overdue_fee_is_normal_severity(db_session, base):
+    schedule = FeeSchedule(school_id=base["school"].id, academic_year=ACADEMIC_YEAR, fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=5))
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=base["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="overdue", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+
+    alert = _find(fee_overdue_alerts(db_session, today=date.today()), f"fee_overdue:{record.id}")
+    assert alert.severity == "normal"
+    assert alert.entity_type == "fee_records"
+    assert alert.entity_id == record.id
+    assert str(base["student"].id) in alert.message
+
+
+def test_severely_overdue_fee_is_urgent(db_session, base):
+    schedule = FeeSchedule(school_id=base["school"].id, academic_year=ACADEMIC_YEAR, fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=FEE_OVERDUE_URGENT_DAYS))
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=base["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=5000.0, status="overdue", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+
+    alert = _find(fee_overdue_alerts(db_session, today=date.today()), f"fee_overdue:{record.id}")
+    assert alert.severity == "urgent"
+
+
+def test_paid_fee_record_is_not_an_alert(db_session, base):
+    schedule = FeeSchedule(school_id=base["school"].id, academic_year=ACADEMIC_YEAR, fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=10))
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=base["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=15000.0, status="paid", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+
+    assert f"fee_overdue:{record.id}" not in {a.id for a in fee_overdue_alerts(db_session)}
+
+
+def test_pending_not_yet_due_fee_record_is_not_an_alert(db_session, base):
+    schedule = FeeSchedule(school_id=base["school"].id, academic_year=ACADEMIC_YEAR, fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=10))
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=base["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="pending", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+
+    assert f"fee_overdue:{record.id}" not in {a.id for a in fee_overdue_alerts(db_session)}
+
+
+def test_real_registry_surfaces_a_real_overdue_fee(db_session, base):
+    schedule = FeeSchedule(school_id=base["school"].id, academic_year=ACADEMIC_YEAR, fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=5))
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=base["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="overdue", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+
+    alerts = aggregate_alerts(db_session)  # real ALERT_SOURCES, not fakes
+    assert f"fee_overdue:{record.id}" in {a.id for a in alerts}
