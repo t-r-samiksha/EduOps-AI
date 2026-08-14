@@ -41,6 +41,17 @@ export interface TimetableSlot {
 
 export interface TimetableActiveResponse extends Array<TimetableSlot> {}
 
+export interface TimetableUpdateConflict {
+  type: "teacher" | "room" | "class" | string;
+  conflicting_slot_id: number;
+  message: string;
+}
+
+export interface TimetableUpdateResponse {
+  slot: TimetableSlot | null;
+  conflicts: TimetableUpdateConflict[];
+}
+
 export interface EnrollResponse {
   id: number;
   student_id: number;

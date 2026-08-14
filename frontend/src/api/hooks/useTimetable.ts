@@ -1,6 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
-import { apiGet } from "@/api/client";
-import type { TimetableSlot } from "@/api/types";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiGet, apiPut } from "@/api/client";
+import type { TimetableSlot, TimetableUpdateResponse } from "@/api/types";
 
 interface UseTimetableParams {
   academicYear: string;
@@ -23,6 +23,33 @@ export function useTimetableActive({ academicYear, classId, teacherId, studentId
       }),
     enabled,
     ...(retry !== undefined ? { retry } : {}),
+  });
+}
+
+export interface UpdateTimetableSlotBody {
+  slot_id: number;
+  day_of_week?: number;
+  period_number?: number;
+  teacher_id?: number;
+  room_id?: number;
+  subject_id?: number;
+}
+
+/** PUT /timetable/update: on conflict, the backend leaves the slot UNTOUCHED and
+ * returns `{ slot: null, conflicts: [...] }` instead of throwing - so a "conflict"
+ * is a normal 200 response, not a mutation error. Callers must check `result.slot`
+ * rather than relying on isError/isSuccess to know whether anything actually
+ * changed. Only a real success (`result.slot` non-null) should invalidate the
+ * cached grid; a conflict changed nothing server-side, so nothing to refetch. */
+export function useUpdateTimetableSlot() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateTimetableSlotBody) => apiPut<TimetableUpdateResponse>("/timetable/update", body),
+    onSuccess: (result) => {
+      if (result.slot) {
+        queryClient.invalidateQueries({ queryKey: ["timetable-active"] });
+      }
+    },
   });
 }
 

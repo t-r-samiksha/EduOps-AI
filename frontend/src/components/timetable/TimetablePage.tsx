@@ -39,6 +39,13 @@ export default function TimetablePage() {
                 · <span className="font-mono text-ink">{lookup.data.classes.find((c) => c.id === classId)?.name}</span>
               </>
             ) : null}
+            {isAdminLike && (
+              <>
+                {" "}
+                · Drag a slot to a new day/period to reschedule it. Red drop zones are a same-teacher/room/class heads-up
+                based on what's currently loaded (accurate only for "All classes") — the real check happens on drop.
+              </>
+            )}
           </>
         }
         actions={
@@ -104,7 +111,7 @@ export default function TimetablePage() {
         <div className="h-64 animate-pulse rounded-lg border border-border bg-elevated/60" />
       ) : (
         (role !== "parent" || parentStudentId !== undefined) &&
-        !error && <TimetableGrid slots={data ?? []} lookup={lookup.data} showClass={isAdminLike && !classId} />
+        !error && <TimetableGrid slots={data ?? []} lookup={lookup.data} showClass={isAdminLike && !classId} editable={isAdminLike} />
       )}
     </div>
   );
