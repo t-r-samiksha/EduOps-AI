@@ -153,6 +153,23 @@ UNAVAILABLE_PERIODS = range(6)
 # parent-portal testing. 3 total, spread across both classes.
 PARENT_LINKED_STUDENTS = [("Class 8A", 1), ("Class 8A", 2), ("Class 8B", 1)]
 
+# EXTENSION (frontend session - real multi-child parent dashboard testing):
+# test.parent@eduopsai.test is a genuine Supabase Auth account (see gettoken.py) an
+# engineer can actually log in as - unlike demo.parentN above, which are direct DB
+# inserts with a synthetic deterministic supabase_id and can never log in for real
+# (see the module docstring). It had zero parent_student links, which meant the
+# real multi-child selector on the parent dashboard could only ever be verified
+# against a mocked API response - not good enough. Linked here to two real children:
+# - ("Class 8A", 1): the SAME student as demo.parent1 above (real multi-guardian
+#   support - ParentStudent explicitly allows a student to have >1 linked parent,
+#   see its docstring) AND the "at_risk" synthetic-attendance student below, so
+#   this child's stat tiles show real non-zero attendance/risk numbers, not just
+#   empty states.
+# - ("Class 8B", 2): a second, distinct child in the other class, genuinely unlinked
+#   to any other parent, purely to exercise the multi-child selector for real.
+REAL_TEST_PARENT_EMAIL = f"test.parent@{DEMO_EMAIL_DOMAIN}"
+REAL_TEST_PARENT_LINKED_STUDENTS = [("Class 8A", 1), ("Class 8B", 2)]
+
 # Synthetic historical leave data for the staffing forecast model - see the module
 # docstring's "EXTENSION" section. (teacher_index, weeks_back, weekday) tuples;
 # weekday is 0=Monday matching the rest of this codebase's convention. Each becomes a
@@ -459,6 +476,22 @@ def seed(session: Session, counts: dict[str, int]) -> dict:
         track(created, "parent_student_links")
         parent_links.append((parent, student))
 
+    # Real multi-child parent link - see REAL_TEST_PARENT_LINKED_STUDENTS above.
+    # Deliberately NOT get_or_create'd on User: this must be a pre-existing real
+    # Supabase-authenticated row (created by _get_or_create_user on first real
+    # login, not by this script) - creating it here with a synthetic supabase_id
+    # would race the real one and later break that account's actual login with a
+    # UNIQUE constraint violation on users.email. If it hasn't logged in yet on
+    # this DB, we skip the link this run rather than fake the account into being.
+    real_parent = session.query(User).filter(User.email == REAL_TEST_PARENT_EMAIL).one_or_none()
+    real_parent_children: list[User] = []
+    if real_parent is not None:
+        for class_name, student_index in REAL_TEST_PARENT_LINKED_STUDENTS:
+            student = students_by_class[class_name][student_index - 1]
+            _link, created = get_or_create(session, ParentStudent, parent_id=real_parent.id, student_id=student.id)
+            track(created, "parent_student_links")
+            real_parent_children.append(student)
+
     for teacher_index, weeks_back, weekday in HISTORICAL_LEAVE_PATTERN:
         leave_date = _date_weeks_ago_on_weekday(weeks_back, weekday)
         _leave, created = get_or_create(
@@ -504,6 +537,8 @@ def seed(session: Session, counts: dict[str, int]) -> dict:
         "classes": classes,
         "students_by_class": students_by_class,
         "parent_links": parent_links,
+        "real_parent": real_parent,
+        "real_parent_children": real_parent_children,
     }
 
 
@@ -562,6 +597,16 @@ def _print_summary(session: Session, counts: dict[str, int], data: dict) -> None
     healthy_student = data["students_by_class"]["Class 8A"][4]
     print(f"  student user_id (synthetic AT-RISK attendance + negative remarks): {at_risk_student.id}")
     print(f"  student user_id (synthetic healthy attendance + positive remark): {healthy_student.id}")
+
+    if data["real_parent"] is not None:
+        child_ids = ", ".join(str(c.id) for c in data["real_parent_children"])
+        print(f"  {REAL_TEST_PARENT_EMAIL} (user_id {data['real_parent'].id}) linked to real children: {child_ids}")
+    else:
+        print(
+            f"  NOTE: {REAL_TEST_PARENT_EMAIL} has no users row yet on this DB (hasn't logged in via "
+            "Supabase Auth) - its multi-child link was skipped this run. Log in once (frontend or "
+            "`python gettoken.py parent`), then re-run this script to link its 2 demo children."
+        )
 
     print(f"\nacademic_year for /timetable/generate and /timetable/active: {ACADEMIC_YEAR!r}")
     print(

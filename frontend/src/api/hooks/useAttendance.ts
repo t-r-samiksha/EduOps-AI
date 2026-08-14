@@ -25,14 +25,21 @@ export function useMarkAttendance() {
   });
 }
 
-export function useAttendanceSummary(params: { fromDate: string; toDate: string; classId?: number; enabled?: boolean }) {
+export function useAttendanceSummary(params: {
+  fromDate: string;
+  toDate: string;
+  classId?: number;
+  studentId?: number;
+  enabled?: boolean;
+}) {
   return useQuery({
-    queryKey: ["attendance-summary", params.fromDate, params.toDate, params.classId],
+    queryKey: ["attendance-summary", params.fromDate, params.toDate, params.classId, params.studentId],
     queryFn: () =>
       apiGet<AttendanceSummaryResponse>("/attendance/summary", {
         from_date: params.fromDate,
         to_date: params.toDate,
         class_id: params.classId,
+        student_id: params.studentId,
       }),
     enabled: params.enabled ?? true,
   });

@@ -269,3 +269,12 @@ export interface Approval {
   entity_type: string;
   entity_id: number;
 }
+
+// --- Parent -----------------------------------------------------------------
+
+export interface LinkedChild {
+  id: number;
+  name: string;
+  class_id: number | null;
+  class_name: string | null;
+}

@@ -8,9 +8,10 @@ interface UseTimetableParams {
   teacherId?: number;
   studentId?: number;
   enabled?: boolean;
+  retry?: boolean | number;
 }
 
-export function useTimetableActive({ academicYear, classId, teacherId, studentId, enabled = true }: UseTimetableParams) {
+export function useTimetableActive({ academicYear, classId, teacherId, studentId, enabled = true, retry }: UseTimetableParams) {
   return useQuery({
     queryKey: ["timetable-active", academicYear, classId, teacherId, studentId],
     queryFn: () =>
@@ -21,6 +22,7 @@ export function useTimetableActive({ academicYear, classId, teacherId, studentId
         student_id: studentId,
       }),
     enabled,
+    ...(retry !== undefined ? { retry } : {}),
   });
 }
 

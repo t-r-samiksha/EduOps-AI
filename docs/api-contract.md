@@ -20,6 +20,10 @@ owner should never be blocked waiting on a backend endpoint's shape.
 
 ## Shared / Phase 0
 
+_Endpoints here are genuinely cross-cutting - not scoped to one person's domain.
+See CLAUDE.md's "Out-of-turn endpoints" note for a one-line pointer to anything added
+here outside the normal "agree in this doc first" flow._
+
 | Method | Path        | Roles | Description                          |
 | ------ | ----------- | ----- | ------------------------------------ |
 | GET    | `/health`   | any   | Liveness check                       |
@@ -27,12 +31,16 @@ owner should never be blocked waiting on a backend endpoint's shape.
 | GET    | `/reference/lookup` | any authenticated | Id -> name lookup for subjects/teachers/rooms/classes |
 
 #### `GET /reference/lookup`
-**Not in the original Phase 0 stub - added during the frontend session.** Phase 0 built
-the users/school/class/subject schema but never exposed a way to resolve their ids to
-display names, and every Person A endpoint (timetable slots, attendance matches, ...)
-only carries `subject_id`/`teacher_id`/`room_id`/`class_id` per this doc - a frontend
-has no way to show "Math" instead of "Subject #3" without this. Read-only, not
-role-gated beyond authentication (these entities carry no sensitive data themselves).
+**Not in the original Phase 0 stub - added out-of-turn during Person A's frontend
+session**, i.e. implemented directly rather than proposed here first, then written up
+after the fact. Phase 0 built the users/school/class/subject schema but never exposed
+a way to resolve their ids to display names, and every Person A endpoint (timetable
+slots, attendance matches, ...) only carries `subject_id`/`teacher_id`/`room_id`/
+`class_id` per this doc - a frontend has no way to show "Math" instead of "Subject #3"
+without this. Deliberately homed here rather than under Person A: it resolves ids
+across subjects/teachers/rooms/classes/students, i.e. every domain's entities at once,
+so it doesn't belong to any single person's section. Read-only, not role-gated beyond
+authentication (these entities carry no sensitive data themselves).
 - **Roles:** any authenticated
 - **Query:** `?school_id=` (required)
 - **Response:**
@@ -1289,8 +1297,24 @@ Mark a notification as read.
 
 #### `GET /parent/children`
 List the children linked to the current parent account.
+
+**Already implemented out-of-turn by Person A's frontend session** (`backend/app/routers/
+parent.py`), ahead of Person C picking up parent portal work, to unblock a real parent
+dashboard that needs its child set up front rather than having every screen make the
+parent type in a `student_id` by hand. Strictly scoped to the caller's own links via
+`ParentStudent.parent_id = user.id`.
+
+**Shape mismatch, please read before building on this:** the version below is the
+original Person C stub's proposed shape. The version actually running is different -
+`{ "items": [ { "id": 103, "name": "Demo Student Class 8A #01", "class_id": 41, "class_name":
+"Class 8A" } ] }`, i.e. `id`/`name` instead of `student_id`/`full_name`, plus a
+`class_name` the stub didn't have (`null` if the child has no primary `Enrollment` yet).
+The frontend (`ParentDashboard.tsx`) is already wired to the real shape. If Person C
+needs the stub's shape instead, that's a coordinate-before-changing conversation, not a
+silent edit - this doc is now describing what's live, not the original proposal.
 - **Roles:** parent
-- **Response:** `{ "items": [ { "student_id": 15, "full_name": "Jane Doe", "class_id": 2 } ] }`
+- **Response (as implemented):** `{ "items": [ { "id": 103, "name": "Demo Student Class 8A #01", "class_id": 41, "class_name": "Class 8A" } ] }`
+- ~~**Response (original stub, not what's running):** `{ "items": [ { "student_id": 15, "full_name": "Jane Doe", "class_id": 2 } ] }`~~
 
 #### `GET /parent/children/{student_id}/performance`
 Child's academic performance summary.

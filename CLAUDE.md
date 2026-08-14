@@ -75,6 +75,22 @@ Team of 3, vertical domain ownership:
   against the seeded base data. Add `--force` to skip its confirmation prompt when the
   DB already has non-trivial data.
 
+## Out-of-turn endpoints
+
+Person A's frontend session implemented two endpoints directly (code first, doc
+written up after) instead of proposing them in `docs/api-contract.md` first, to avoid
+blocking a real dashboard on cross-person coordination. Person B/C: check these before
+building overlapping work, rather than diffing the whole api-contract.md file:
+
+- **`GET /reference/lookup`** — id → name lookup across subjects/teachers/rooms/
+  classes/students. Lives in api-contract.md's "Shared / Phase 0" section (genuinely
+  cross-cutting, not any one person's domain).
+- **`GET /parent/children`** — the calling parent's own linked children. Lives in
+  Person C's "Parent portal" section. **Its real response shape (`id`/`name`/
+  `class_id`/`class_name`) does not match Person C's original stub for the same path
+  (`student_id`/`full_name`/`class_id`) — see that section for the full diff before
+  building anything that assumes the stub's shape.**
+
 ## Current phase
 
 **Phase 0 — Shared Foundation.** Scope for this phase:

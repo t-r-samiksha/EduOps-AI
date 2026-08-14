@@ -17,6 +17,7 @@ from app.routers import (
     documents,
     exams,
     fees,
+    parent,
     reference,
     risk,
     staffing,
@@ -48,6 +49,7 @@ app.include_router(fees.router)
 app.include_router(admissions.router)
 app.include_router(exams.router)
 app.include_router(reference.router)
+app.include_router(parent.router)
 
 
 @app.get("/health")
