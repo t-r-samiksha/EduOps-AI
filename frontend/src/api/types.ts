@@ -278,3 +278,207 @@ export interface LinkedChild {
   class_id: number | null;
   class_name: string | null;
 }
+
+// --- Document OCR --------------------------------------------------------------
+
+export type DocumentType = "marksheet" | "admission_form" | "id_proof" | "other";
+export type DocumentStatus = "queued" | "processing" | "done" | "failed";
+
+export interface DocumentCreateResult {
+  id: number;
+  document_type: DocumentType;
+  status: DocumentStatus;
+  uploaded_at: string;
+}
+
+export interface DocumentSummary {
+  id: number;
+  document_type: DocumentType;
+  status: DocumentStatus;
+  uploaded_at: string;
+  processed_at: string | null;
+}
+
+export interface DocumentsListResponse {
+  items: DocumentSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ExtractedEntity {
+  id: number;
+  field_name: string;
+  field_value: string;
+  confidence_score: number;
+  is_low_confidence: boolean;
+  corrected_value: string | null;
+  corrected_by: number | null;
+  corrected_at: string | null;
+}
+
+export interface DocumentRouting {
+  routed: boolean;
+  target_table: string | null;
+  reason: string;
+}
+
+export interface DocumentDetail {
+  id: number;
+  document_type: DocumentType;
+  status: DocumentStatus;
+  uploaded_at: string;
+  processed_at: string | null;
+  extracted_fields: Record<string, string>;
+  entities: ExtractedEntity[];
+  raw_text: string | null;
+  ocr_confidence: number | null;
+  routing: DocumentRouting | null;
+  error: string | null;
+}
+
+// --- Fees ----------------------------------------------------------------------
+
+export interface FeeSchedule {
+  id: number;
+  school_id: number;
+  class_id: number | null;
+  academic_year: string;
+  fee_type: string;
+  amount: number;
+  due_date: string;
+  created_at: string;
+}
+
+export interface FeeStatusItem {
+  student_id: number;
+  fee_record_id: number;
+  amount_due: number;
+  amount_paid: number;
+  due_date: string;
+  status: "pending" | "partial" | "paid" | "overdue" | string;
+}
+
+export interface RemindersResult {
+  sent_count: number;
+}
+
+export interface PaymentResult {
+  fee_record_id: number;
+  amount_paid: number;
+  amount_due: number;
+  status: string;
+}
+
+// --- Admissions ------------------------------------------------------------------
+
+export type AdmissionStatus = "submitted" | "under_review" | "accepted" | "rejected";
+
+export interface AdmissionApplication {
+  id: number;
+  school_id: number;
+  academic_year: string;
+  applicant_name: string;
+  dob: string;
+  guardian_email: string;
+  grade_applied: string;
+  ocr_document_ids: number[];
+  status: AdmissionStatus;
+  submitted_by: number;
+  submitted_at: string;
+  decided_by: number | null;
+  decided_at: string | null;
+  decision_justification: string | null;
+  enrolled_student_id: number | null;
+}
+
+export interface AdmissionsListResponse {
+  items: AdmissionApplication[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface AdmissionDecisionResult {
+  id: number;
+  status: AdmissionStatus;
+  enrollment_created: boolean;
+}
+
+// --- Exam management ---------------------------------------------------------------
+
+export interface Exam {
+  id: number;
+  school_id: number;
+  subject_id: number;
+  class_id: number;
+  academic_year: string;
+  exam_date: string;
+  start_time: string;
+  end_time: string;
+  total_marks: number | null;
+  created_at: string;
+}
+
+export interface ExamListItem {
+  id: number;
+  subject_id: number;
+  class_id: number;
+  academic_year: string;
+  exam_date: string;
+  start_time: string;
+  end_time: string;
+}
+
+export interface ExamsListResponse {
+  items: ExamListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface SeatAssignment {
+  student_id: number;
+  room_id: number;
+  seat_no: number;
+}
+
+export interface InvigilatorAssignment {
+  room_id: number;
+  teacher_id: number | null;
+}
+
+export interface GenerateSchedulesResult {
+  exam_id: number;
+  status: string;
+  seating: SeatAssignment[];
+  invigilators: InvigilatorAssignment[];
+  unassigned_rooms: number[];
+}
+
+export interface SeatingItem {
+  exam_id: number;
+  student_id: number;
+  room_id: number;
+  room_name: string;
+  seat_no: number;
+}
+
+export interface SeatingResponse {
+  exam_id: number | null;
+  items: SeatingItem[];
+}
+
+export interface InvigilationDuty {
+  exam_id: number;
+  room_id: number;
+  room_name: string;
+  subject_id: number;
+  subject_name: string;
+  class_id: number;
+  class_name: string;
+  exam_date: string;
+  start_time: string;
+  end_time: string;
+  status: string;
+}

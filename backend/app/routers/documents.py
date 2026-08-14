@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,7 @@ from app.services.ocr_routing import route_entities
 router = APIRouter(tags=["document-ocr"])
 
 VALID_DOCUMENT_TYPES = ("marksheet", "admission_form", "id_proof", "other")
+DEFAULT_PAGE_SIZE = 20
 
 
 def _words_to_metadata(words: list[WordConfidence]) -> dict:
@@ -164,6 +165,63 @@ async def upload_document(
     db.refresh(document)
 
     return DocumentCreateOut.model_validate(document)
+
+
+class DocumentSummaryOut(BaseModel):
+    id: int
+    document_type: str
+    status: str
+    uploaded_at: datetime
+    processed_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DocumentsListResponse(BaseModel):
+    items: list[DocumentSummaryOut]
+    total: int
+    page: int
+    page_size: int
+
+
+@router.get("/admin/ocr/documents", response_model=DocumentsListResponse)
+def list_documents(
+    status_filter: str | None = Query(None, alias="status"),
+    document_type: str | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: CurrentUser = Depends(require_role("admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """Not in the original stub - added because the frontend's document review
+    screen had no real way to browse previously-uploaded documents, only fetch one
+    by a known id (see GET .../{document_id} below). Summary shape only (no
+    extracted_fields/entities/raw_text) - that detail stays on the single-document
+    GET, same split as e.g. GET /admin/admissions/applications vs a single
+    application's full record."""
+    if page < 1 or page_size < 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "page and page_size must be positive")
+
+    query = db.query(Document)
+    if status_filter is not None:
+        query = query.filter(Document.status == status_filter)
+    if document_type is not None:
+        query = query.filter(Document.document_type == document_type)
+
+    total = query.count()
+    # Secondary sort by id: uploaded_at alone can tie (Postgres freezes now() for
+    # the whole transaction, so rows inserted in quick succession within one
+    # transaction can share an identical timestamp), which makes pagination
+    # non-deterministic - rows could be skipped or duplicated across pages.
+    rows = (
+        query.order_by(Document.uploaded_at.desc(), Document.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return DocumentsListResponse(
+        items=[DocumentSummaryOut.model_validate(d) for d in rows], total=total, page=page, page_size=page_size
+    )
 
 
 @router.get("/admin/ocr/documents/{document_id}", response_model=DocumentDetailOut)

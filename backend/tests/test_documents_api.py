@@ -249,3 +249,94 @@ def test_reextract_returns_400_when_no_ocr_result_exists(client, db_session, see
     _override_user("admin", user_id=seed["admin_user"].id)
     resp = client.post(f"/admin/ocr/documents/{document.id}/reextract", json={})
     assert resp.status_code == 400
+
+
+# --- GET /admin/ocr/documents: list ---
+
+
+def test_list_documents_401_without_token(client):
+    resp = client.get("/admin/ocr/documents")
+    assert resp.status_code == 401
+
+
+def test_list_documents_403_for_teacher_role(client):
+    _override_user("teacher")
+    resp = client.get("/admin/ocr/documents")
+    assert resp.status_code == 403
+
+
+def test_list_documents_returns_uploaded_documents(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    id1 = _upload(client, FIXTURES / "admission_form.png", "admission_form").json()["id"]
+    id2 = _upload(client, FIXTURES / "marksheet.png", "marksheet").json()["id"]
+
+    resp = client.get("/admin/ocr/documents")
+    assert resp.status_code == 200
+    body = resp.json()
+    returned_ids = {item["id"] for item in body["items"]}
+    assert {id1, id2} <= returned_ids  # own fixtures present, not a global-count assertion
+
+    by_id = {item["id"]: item for item in body["items"]}
+    assert by_id[id1]["document_type"] == "admission_form"
+    assert by_id[id1]["status"] == "done"
+    assert by_id[id1]["processed_at"] is not None
+    # Summary shape only - no extracted_fields/entities/raw_text on the list endpoint.
+    assert "extracted_fields" not in by_id[id1]
+    assert "entities" not in by_id[id1]
+
+
+def test_list_documents_filters_by_status_and_document_type(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    admission_id = _upload(client, FIXTURES / "admission_form.png", "admission_form").json()["id"]
+    marksheet_id = _upload(client, FIXTURES / "marksheet.png", "marksheet").json()["id"]
+
+    resp = client.get("/admin/ocr/documents", params={"document_type": "marksheet"})
+    ids = {item["id"] for item in resp.json()["items"]}
+    assert marksheet_id in ids
+    assert admission_id not in ids
+
+    resp = client.get("/admin/ocr/documents", params={"status": "done"})
+    ids = {item["id"] for item in resp.json()["items"]}
+    assert {admission_id, marksheet_id} <= ids
+
+    resp = client.get("/admin/ocr/documents", params={"status": "failed"})
+    ids = {item["id"] for item in resp.json()["items"]}
+    assert admission_id not in ids
+    assert marksheet_id not in ids
+
+
+def test_list_documents_paginates(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    uploaded_ids = [
+        _upload(client, FIXTURES / "id_proof.png", "id_proof").json()["id"] for _ in range(3)
+    ]
+
+    resp = client.get("/admin/ocr/documents", params={"page": 1, "page_size": 2})
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["page"] == 1
+    assert body["page_size"] == 2
+    assert len(body["items"]) == 2
+    assert body["total"] >= 3  # at least our own 3 fixtures, other tests may add more in the same run
+
+    # Walk pages until every one of our own uploaded ids has been seen - proves
+    # pagination doesn't drop or duplicate rows across pages, without asserting
+    # on a brittle global total.
+    seen_ids = set()
+    page = 1
+    while len(seen_ids) < body["total"] and page <= body["total"]:
+        page_resp = client.get("/admin/ocr/documents", params={"page": page, "page_size": 2})
+        items = page_resp.json()["items"]
+        if not items:
+            break
+        seen_ids.update(item["id"] for item in items)
+        page += 1
+    assert set(uploaded_ids) <= seen_ids
+
+
+def test_list_documents_rejects_invalid_pagination(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.get("/admin/ocr/documents", params={"page": 0})
+    assert resp.status_code == 400
+    resp = client.get("/admin/ocr/documents", params={"page_size": 0})
+    assert resp.status_code == 400

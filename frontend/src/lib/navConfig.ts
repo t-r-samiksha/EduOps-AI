@@ -1,12 +1,16 @@
 import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
+  Armchair,
   BookOpenCheck,
   CalendarClock,
+  ClipboardList,
   FileCheck2,
   LayoutGrid,
+  ScanText,
   ScanFace,
   Users,
+  Wallet,
   User as UserIcon,
 } from "lucide-react";
 import type { Role } from "@/store/authStore";
@@ -27,6 +31,10 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Early-Warning", path: "/admin/risk", icon: AlertTriangle },
     { label: "Syllabus", path: "/admin/syllabus", icon: BookOpenCheck },
     { label: "Approvals", path: "/admin/approvals", icon: FileCheck2 },
+    { label: "Document OCR", path: "/admin/ocr", icon: ScanText },
+    { label: "Fees", path: "/admin/fees", icon: Wallet },
+    { label: "Admissions", path: "/admin/admissions", icon: ClipboardList },
+    { label: "Exams", path: "/admin/exams", icon: Armchair },
   ],
   principal: [
     { label: "Dashboard", path: "/principal", icon: LayoutGrid, end: true },
@@ -35,6 +43,10 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Early-Warning", path: "/principal/risk", icon: AlertTriangle },
     { label: "Syllabus", path: "/principal/syllabus", icon: BookOpenCheck },
     { label: "Approvals", path: "/principal/approvals", icon: FileCheck2 },
+    { label: "Document OCR", path: "/principal/ocr", icon: ScanText },
+    { label: "Fees", path: "/principal/fees", icon: Wallet },
+    { label: "Admissions", path: "/principal/admissions", icon: ClipboardList },
+    { label: "Exams", path: "/principal/exams", icon: Armchair },
   ],
   teacher: [
     { label: "Dashboard", path: "/teacher", icon: LayoutGrid, end: true },
@@ -43,10 +55,12 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Staffing", path: "/teacher/staffing", icon: Users },
     { label: "Early-Warning", path: "/teacher/risk", icon: AlertTriangle },
     { label: "Syllabus", path: "/teacher/syllabus", icon: BookOpenCheck },
+    { label: "Exam Duties", path: "/teacher/exams", icon: Armchair },
   ],
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
     { label: "Timetable", path: "/student/timetable", icon: CalendarClock },
+    { label: "Exam Seats", path: "/student/exams", icon: Armchair },
   ],
   parent: [
     { label: "Dashboard", path: "/parent", icon: LayoutGrid, end: true },

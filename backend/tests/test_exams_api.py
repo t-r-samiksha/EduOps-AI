@@ -361,3 +361,134 @@ def test_teacher_with_no_duties_sees_empty_list(client, seed, generated_exam):
     resp = client.get("/admin/exams/invigilations/me")
     assert resp.status_code == 200
     assert all(d["exam_id"] != generated_exam.id for d in resp.json())
+
+
+# --- GET /admin/exams: list ---
+
+
+def test_list_exams_401_without_token(client):
+    resp = client.get("/admin/exams")
+    assert resp.status_code == 401
+
+
+def test_list_exams_403_for_parent_role(client):
+    _override_user("parent")
+    resp = client.get("/admin/exams")
+    assert resp.status_code == 403
+
+
+def test_list_exams_returns_created_exam(client, seed, exam):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.get("/admin/exams")
+    assert resp.status_code == 200
+    body = resp.json()
+    ids = {item["id"] for item in body["items"]}
+    assert exam.id in ids  # own fixture id present, not a global-count assertion
+
+    item = next(i for i in body["items"] if i["id"] == exam.id)
+    assert item["subject_id"] == seed["subject"].id
+    assert item["class_id"] == seed["class"].id
+    assert item["academic_year"] == ACADEMIC_YEAR
+    assert item["exam_date"] == str(EXAM_DATE)
+
+
+def test_list_exams_filters_by_class_subject_academic_year(client, seed, exam):
+    _override_user("admin", user_id=seed["admin_user"].id)
+
+    resp = client.get("/admin/exams", params={"class_id": seed["class"].id})
+    assert exam.id in {i["id"] for i in resp.json()["items"]}
+
+    resp = client.get("/admin/exams", params={"class_id": 999999})
+    assert exam.id not in {i["id"] for i in resp.json()["items"]}
+
+    resp = client.get("/admin/exams", params={"subject_id": seed["subject"].id})
+    assert exam.id in {i["id"] for i in resp.json()["items"]}
+
+    resp = client.get("/admin/exams", params={"academic_year": "2099-00"})
+    assert exam.id not in {i["id"] for i in resp.json()["items"]}
+
+
+def test_list_exams_paginates(client, db_session, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    exam_ids = []
+    for i in range(3):
+        e = Exam(
+            school_id=seed["school"].id, subject_id=seed["subject"].id, class_id=seed["class"].id,
+            academic_year=ACADEMIC_YEAR, exam_date=EXAM_DATE + timedelta(days=i),
+            start_time=seed["exam_start"], end_time=seed["exam_end"],
+        )
+        db_session.add(e)
+        db_session.flush()
+        exam_ids.append(e.id)
+    db_session.commit()
+
+    resp = client.get("/admin/exams", params={"class_id": seed["class"].id, "page": 1, "page_size": 2})
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["page"] == 1
+    assert body["page_size"] == 2
+    assert len(body["items"]) == 2
+    assert body["total"] >= 3
+
+    seen_ids = set()
+    page = 1
+    while len(seen_ids) < body["total"] and page <= body["total"]:
+        page_resp = client.get("/admin/exams", params={"class_id": seed["class"].id, "page": page, "page_size": 2})
+        items = page_resp.json()["items"]
+        if not items:
+            break
+        seen_ids.update(i["id"] for i in items)
+        page += 1
+    assert set(exam_ids) <= seen_ids
+
+
+def test_list_exams_rejects_invalid_pagination(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.get("/admin/exams", params={"page": 0})
+    assert resp.status_code == 400
+    resp = client.get("/admin/exams", params={"page_size": 0})
+    assert resp.status_code == 400
+
+
+def test_student_sees_only_their_own_class_exams(client, db_session, seed, exam):
+    other_class = SchoolClass(name="8B", academic_year=ACADEMIC_YEAR, school_id=seed["school"].id)
+    db_session.add(other_class)
+    db_session.flush()
+    other_exam = Exam(
+        school_id=seed["school"].id, subject_id=seed["subject"].id, class_id=other_class.id,
+        academic_year=ACADEMIC_YEAR, exam_date=EXAM_DATE, start_time=seed["exam_start"], end_time=seed["exam_end"],
+    )
+    db_session.add(other_exam)
+    db_session.commit()
+
+    _override_user("student", user_id=seed["student1"].id)
+    resp = client.get("/admin/exams")
+    assert resp.status_code == 200
+    ids = {i["id"] for i in resp.json()["items"]}
+    assert exam.id in ids  # their own class's exam
+    assert other_exam.id not in ids  # a different class's exam
+
+
+def test_student_with_no_enrollment_sees_empty_list(client, db_session, seed, exam):
+    unenrolled = _make_user(db_session, db_session.query(Role).filter(Role.name == "student").one(), "unenrolled", seed["school"])
+    db_session.commit()
+
+    _override_user("student", user_id=unenrolled.id)
+    resp = client.get("/admin/exams")
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+
+
+def test_teacher_sees_only_exams_for_classes_they_actually_teach(client, seed, exam):
+    # busy_teacher has a real active TimetableSlot for (seed["class"], seed["subject"])
+    # per the seed fixture - the exam's own (class_id, subject_id) pair.
+    _override_user("teacher", user_id=seed["busy_teacher"].id)
+    resp = client.get("/admin/exams")
+    assert resp.status_code == 200
+    assert exam.id in {i["id"] for i in resp.json()["items"]}
+
+    # free_teacher has no TimetableSlot at all in the seed - shouldn't see it.
+    _override_user("teacher", user_id=seed["free_teacher"].id)
+    resp = client.get("/admin/exams")
+    assert resp.status_code == 200
+    assert exam.id not in {i["id"] for i in resp.json()["items"]}

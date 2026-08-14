@@ -17,6 +17,12 @@ import StaffingPage from "@/components/staffing/StaffingPage";
 import RiskDashboard from "@/components/risk/RiskDashboard";
 import SyllabusPage from "@/components/syllabus/SyllabusPage";
 import ApprovalsInbox from "@/components/approvals/ApprovalsInbox";
+import OcrPage from "@/components/ocr/OcrPage";
+import FeesPage from "@/components/fees/FeesPage";
+import AdmissionsPage from "@/components/admissions/AdmissionsPage";
+import ExamsPage from "@/components/exams/ExamsPage";
+import InvigilationDutiesPage from "@/components/exams/InvigilationDutiesPage";
+import StudentSeatLookup from "@/components/exams/StudentSeatLookup";
 
 interface RouteConfig {
   path: string;
@@ -33,6 +39,10 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/risk", role: "principal", element: <RiskDashboard /> },
   { path: "/principal/syllabus", role: "principal", element: <SyllabusPage /> },
   { path: "/principal/approvals", role: "principal", element: <ApprovalsInbox /> },
+  { path: "/principal/ocr", role: "principal", element: <OcrPage /> },
+  { path: "/principal/fees", role: "principal", element: <FeesPage /> },
+  { path: "/principal/admissions", role: "principal", element: <AdmissionsPage /> },
+  { path: "/principal/exams", role: "principal", element: <ExamsPage /> },
 
   { path: "/admin", role: "admin", element: <AdminDashboard /> },
   { path: "/admin/timetable", role: "admin", element: <TimetablePage /> },
@@ -41,6 +51,10 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/risk", role: "admin", element: <RiskDashboard /> },
   { path: "/admin/syllabus", role: "admin", element: <SyllabusPage /> },
   { path: "/admin/approvals", role: "admin", element: <ApprovalsInbox /> },
+  { path: "/admin/ocr", role: "admin", element: <OcrPage /> },
+  { path: "/admin/fees", role: "admin", element: <FeesPage /> },
+  { path: "/admin/admissions", role: "admin", element: <AdmissionsPage /> },
+  { path: "/admin/exams", role: "admin", element: <ExamsPage /> },
 
   { path: "/teacher", role: "teacher", element: <TeacherDashboard /> },
   { path: "/teacher/timetable", role: "teacher", element: <TimetablePage /> },
@@ -48,9 +62,11 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/staffing", role: "teacher", element: <StaffingPage /> },
   { path: "/teacher/risk", role: "teacher", element: <RiskDashboard /> },
   { path: "/teacher/syllabus", role: "teacher", element: <SyllabusPage /> },
+  { path: "/teacher/exams", role: "teacher", element: <InvigilationDutiesPage /> },
 
   { path: "/student", role: "student", element: <StudentDashboard /> },
   { path: "/student/timetable", role: "student", element: <TimetablePage /> },
+  { path: "/student/exams", role: "student", element: <StudentSeatLookup /> },
 
   { path: "/parent", role: "parent", element: <ParentDashboard /> },
   { path: "/parent/timetable", role: "parent", element: <TimetablePage /> },

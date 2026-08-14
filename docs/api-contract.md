@@ -106,6 +106,24 @@ Upload a document (marksheet, admission form, ID proof, ...) for OCR processing.
 ```
 - **Errors:** `400` invalid `document_type`; `422` undecodable image; `503` Tesseract binary unavailable on the server.
 
+#### `GET /admin/ocr/documents`
+**Not in the original stub - added because the frontend's document review screen
+had no real way to browse previously-uploaded documents, only fetch one by a known
+id (below). Previously worked around with a client-side session history of ids;
+that workaround is now removed in favor of this real endpoint.** Summary shape
+only (no `extracted_fields`/`entities`/`raw_text`) - that detail stays on the
+single-document `GET`, same split as `GET /admin/admissions/applications` vs a
+single application's full record.
+- **Roles:** admin, principal
+- **Query:** `?status=&document_type=&page=&page_size=` (`page_size` defaults to 20)
+- **Response:**
+```json
+{
+  "items": [ { "id": 1, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z", "processed_at": "2026-08-11T10:00:01Z" } ],
+  "total": 1, "page": 1, "page_size": 20
+}
+```
+
 #### `GET /admin/ocr/documents/{id}`
 Fetch OCR processing status/result for a previously uploaded document.
 - **Roles:** admin, principal
@@ -995,6 +1013,25 @@ existing. Flagged here, same pattern as every prior session's necessary addition
 - **Request:** `{ "school_id": 41, "subject_id": 40, "class_id": 41, "academic_year": "2026-27", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00", "total_marks": 100 }`
 - **Response:** the created exam, including `id`/`created_at`.
 - **Errors:** `400` `end_time<=start_time`; `404` unknown `subject_id`/`class_id`.
+
+#### `GET /admin/exams`
+**Not in the original stub - added because the frontend's exam management screen
+had no real way to browse existing exams, only remember ids from its own session's
+creates.** Real RBAC-scoped list, not admin-only: a teacher only sees exams for
+`(class_id, subject_id)` pairs they actually teach (an active `TimetableSlot` for
+that pair - a class's homeroom teacher is often a different person than who
+teaches a given subject to it, same distinction syllabus tracking's scoping
+already makes); a student only sees exams for their own primary-enrollment class,
+same scoping as their seat-lookup.
+- **Roles:** admin, principal, teacher, student
+- **Query:** `?class_id=&subject_id=&academic_year=&page=&page_size=` (`page_size` defaults to 20)
+- **Response:**
+```json
+{
+  "items": [ { "id": 5, "subject_id": 40, "class_id": 41, "academic_year": "2026-27", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00" } ],
+  "total": 1, "page": 1, "page_size": 20
+}
+```
 
 #### `POST /admin/exams/{id}/schedules`
 Generate a complete seating chart + invigilation schedule for an exam - supersedes

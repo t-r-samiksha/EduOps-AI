@@ -1,7 +1,7 @@
 from collections import defaultdict
 from datetime import date, datetime, time
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ from app.services.exam_scheduler import (
 )
 
 router = APIRouter(tags=["exams"])
+DEFAULT_PAGE_SIZE = 20
 
 
 # --- POST /admin/exams ---------------------------------------------------------------
@@ -82,6 +83,105 @@ def create_exam(
     db.commit()
     db.refresh(exam)
     return ExamOut.model_validate(exam)
+
+
+# --- GET /admin/exams -------------------------------------------------------------------
+# NOT in the original stub - added because the frontend's exam management screen had no
+# real way to browse existing exams, only remember ids from this session's own creates.
+# Real RBAC-scoped list, not admin-only: a teacher only sees exams for (class, subject)
+# pairs they actually teach; a student only sees exams for their own primary-enrollment
+# class - same scoping precedents as syllabus.py's _teacher_class_subject_pairs and
+# timetable.py's _resolve_student_class_id, duplicated locally per this codebase's
+# per-router convention (see parent.py's identical duplication) rather than
+# cross-importing a one-query helper.
+
+
+def _teacher_class_subject_pairs(db: Session, teacher_id: int) -> set[tuple[int, int]]:
+    rows = (
+        db.query(TimetableSlot.class_id, TimetableSlot.subject_id)
+        .filter(TimetableSlot.teacher_id == teacher_id, TimetableSlot.is_active.is_(True))
+        .distinct()
+        .all()
+    )
+    return {(r.class_id, r.subject_id) for r in rows}
+
+
+def _resolve_student_class_id(db: Session, student_id: int) -> int | None:
+    enrollment = (
+        db.query(Enrollment)
+        .filter(Enrollment.student_id == student_id, Enrollment.is_primary.is_(True))
+        .one_or_none()
+    )
+    return enrollment.class_id if enrollment else None
+
+
+class ExamListItemOut(BaseModel):
+    id: int
+    subject_id: int
+    class_id: int
+    academic_year: str
+    exam_date: date
+    start_time: time
+    end_time: time
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ExamsListResponse(BaseModel):
+    items: list[ExamListItemOut]
+    total: int
+    page: int
+    page_size: int
+
+
+@router.get("/admin/exams", response_model=ExamsListResponse)
+def list_exams(
+    class_id: int | None = None,
+    subject_id: int | None = None,
+    academic_year: str | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if user.role not in ("admin", "principal", "teacher", "student"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized")
+    if page < 1 or page_size < 1:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "page and page_size must be positive")
+
+    query = db.query(Exam)
+    if class_id is not None:
+        query = query.filter(Exam.class_id == class_id)
+    if subject_id is not None:
+        query = query.filter(Exam.subject_id == subject_id)
+    if academic_year is not None:
+        query = query.filter(Exam.academic_year == academic_year)
+    # Secondary sort by id: exam_date/start_time alone can tie across distinct
+    # exams (e.g. same day, same slot, different class), which makes pagination
+    # non-deterministic - rows could be skipped or duplicated across pages.
+    query = query.order_by(Exam.exam_date.desc(), Exam.start_time.desc(), Exam.id.desc())
+
+    if user.role == "student":
+        student_class_id = _resolve_student_class_id(db, user.id)
+        query = query.filter(Exam.class_id == (student_class_id if student_class_id is not None else -1))
+        total = query.count()
+        rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    elif user.role == "teacher":
+        # Pair-based scoping isn't a simple column filter, so (matching
+        # syllabus.py's identical precedent) it's applied in Python after fetching
+        # the admin-filtered rows, with pagination applied to the filtered list.
+        owned_pairs = _teacher_class_subject_pairs(db, user.id)
+        all_matching = query.all()
+        filtered = [e for e in all_matching if (e.class_id, e.subject_id) in owned_pairs]
+        total = len(filtered)
+        rows = filtered[(page - 1) * page_size : (page - 1) * page_size + page_size]
+    else:
+        total = query.count()
+        rows = query.offset((page - 1) * page_size).limit(page_size).all()
+
+    return ExamsListResponse(
+        items=[ExamListItemOut.model_validate(e) for e in rows], total=total, page=page, page_size=page_size
+    )
 
 
 # --- POST /admin/exams/{id}/schedules --------------------------------------------------

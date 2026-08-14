@@ -1,0 +1,67 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiGet, apiPost, apiPostForm, apiPut } from "@/api/client";
+import type { DocumentCreateResult, DocumentDetail, DocumentsListResponse, DocumentType, ExtractedEntity } from "@/api/types";
+
+// Processing is synchronous (see docs/api-contract.md's "Document OCR" section),
+// so there is no queued/processing gap to poll across - a document's POST
+// response already carries its final status.
+
+export function useUploadDocument() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ file, documentType }: { file: File; documentType: DocumentType }) => {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("document_type", documentType);
+      return apiPostForm<DocumentCreateResult>("/admin/ocr/documents", form);
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["ocr-document", result.id] });
+      queryClient.invalidateQueries({ queryKey: ["ocr-documents-list"] });
+    },
+  });
+}
+
+export function useDocumentsList(params: { status?: string; documentType?: DocumentType; page?: number; pageSize?: number } = {}) {
+  return useQuery({
+    queryKey: ["ocr-documents-list", params.status, params.documentType, params.page, params.pageSize],
+    queryFn: () =>
+      apiGet<DocumentsListResponse>("/admin/ocr/documents", {
+        status: params.status,
+        document_type: params.documentType,
+        page: params.page,
+        page_size: params.pageSize,
+      }),
+  });
+}
+
+export function useDocument(documentId: number | undefined) {
+  return useQuery({
+    queryKey: ["ocr-document", documentId],
+    queryFn: () => apiGet<DocumentDetail>(`/admin/ocr/documents/${documentId}`),
+    enabled: documentId !== undefined,
+  });
+}
+
+export function useCorrectEntity() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ documentId, entityId, correctedValue }: { documentId: number; entityId: number; correctedValue: string }) =>
+      apiPut<ExtractedEntity>(`/admin/ocr/documents/${documentId}/entities/${entityId}`, { corrected_value: correctedValue }),
+    onSuccess: (_result, { documentId }) => {
+      queryClient.invalidateQueries({ queryKey: ["ocr-document", documentId] });
+    },
+  });
+}
+
+export function useReextractDocument() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ documentId, documentType }: { documentId: number; documentType?: DocumentType }) =>
+      apiPost<DocumentDetail>(`/admin/ocr/documents/${documentId}/reextract`, documentType ? { document_type: documentType } : {}),
+    onSuccess: (_result, { documentId }) => {
+      queryClient.invalidateQueries({ queryKey: ["ocr-document", documentId] });
+      queryClient.invalidateQueries({ queryKey: ["ocr-documents-list"] });
+    },
+  });
+}
