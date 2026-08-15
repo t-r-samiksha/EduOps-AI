@@ -16,7 +16,7 @@ from app.models.timetable import TeacherSubject, TeacherUnavailability, Timetabl
 from app.models.user import User
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
-from app.services.staffing_forecast import HistoricalGapObservation, forecast_staffing_gaps
+from app.services.staffing_forecast import HistoricalGapObservation, forecast_staffing_gaps, has_sufficient_data
 from app.services.substitute_solver import SubstituteCandidate, SubstituteSuggestion, find_substitutes
 
 router = APIRouter(tags=["staffing"])
@@ -209,6 +209,11 @@ def request_leave(
     else:
         if body.teacher_id is None:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "teacher_id is required when filing on behalf of a teacher")
+        teacher = (
+            db.query(User).join(Role, User.role_id == Role.id).filter(User.id == body.teacher_id, Role.name == "teacher").one_or_none()
+        )
+        if teacher is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Teacher not found")
         teacher_id = body.teacher_id
 
     if body.end_date < body.start_date:
@@ -355,14 +360,26 @@ class SuggestResponse(BaseModel):
 @router.post("/substitution/suggest", response_model=SuggestResponse)
 def suggest_substitutions(
     body: SuggestRequest,
-    user: CurrentUser = Depends(require_role("admin", "principal")),
+    user: CurrentUser = Depends(require_role("admin", "principal", "teacher")),
     db: Session = Depends(get_db),
 ):
+    """`leave_request_id` mode is readable by the teacher who OWNS that leave
+    request too (they should be able to see who's covering their own
+    classes), not just admin/principal - this is what backs the Staffing
+    page's inline substitutions view for both roles. The `teacher_id` +
+    date-range preview mode (Mode B) stays admin/principal-only - it lets
+    the caller probe ANY teacher's schedule/candidates, which a teacher
+    shouldn't be able to do for a colleague."""
     if body.leave_request_id is not None:
         if not body.academic_year:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "academic_year is required")
         leave = db.query(LeaveRequest).filter(LeaveRequest.id == body.leave_request_id).one_or_none()
         if leave is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Leave request not found")
+        if user.role == "teacher" and leave.teacher_id != user.id:
+            # Same 404 as a genuinely missing request - never confirms a
+            # different teacher's leave request exists (that would itself be
+            # a real information leak: "this id is valid, just not yours").
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Leave request not found")
 
         results = []
@@ -388,6 +405,9 @@ def suggest_substitutions(
 
         db.commit()
         return SuggestResponse(substitutions=results)
+
+    if user.role == "teacher":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized for this preview")
 
     if body.teacher_id is None or body.start_date is None or body.end_date is None or body.academic_year is None:
         raise HTTPException(
@@ -589,6 +609,64 @@ def list_leave_requests(
     return [LeaveRequestOut.model_validate(r) for r in query.order_by(LeaveRequest.requested_at.desc()).all()]
 
 
+# --- GET /staff/my-substitute-duties ---------------------------------------------
+
+
+class MySubstituteDutyOut(BaseModel):
+    substitution_id: int
+    leave_request_id: int
+    original_teacher_id: int
+    subject_id: int
+    class_id: int
+    day_of_week: int
+    period_number: int
+    status: str
+    """"suggested" or "confirmed" - a teacher should be able to tell the
+    difference (a suggestion isn't a real commitment yet)."""
+    leave_start_date: date_
+    leave_end_date: date_
+
+
+@router.get("/staff/my-substitute-duties", response_model=list[MySubstituteDutyOut])
+def my_substitute_duties(
+    user: CurrentUser = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Real gap this closes: a teacher confirmed as someone else's substitute
+    had NO way to discover it anywhere in their own UI - Substitution rows
+    were only ever surfaced to the leave-taker and admin/principal, never to
+    the substitute themselves. Scoped to still-relevant leave (end_date not
+    already past) so old, resolved coverage doesn't clutter this indefinitely."""
+    today = date_.today()
+    rows = (
+        db.query(Substitution, TimetableSlot, LeaveRequest)
+        .join(TimetableSlot, Substitution.timetable_slot_id == TimetableSlot.id)
+        .join(LeaveRequest, Substitution.leave_request_id == LeaveRequest.id)
+        .filter(
+            Substitution.substitute_teacher_id == user.id,
+            LeaveRequest.status == "approved",
+            LeaveRequest.end_date >= today,
+        )
+        .order_by(LeaveRequest.start_date, TimetableSlot.day_of_week, TimetableSlot.period_number)
+        .all()
+    )
+    return [
+        MySubstituteDutyOut(
+            substitution_id=sub.id,
+            leave_request_id=sub.leave_request_id,
+            original_teacher_id=sub.original_teacher_id,
+            subject_id=slot.subject_id,
+            class_id=slot.class_id,
+            day_of_week=slot.day_of_week,
+            period_number=slot.period_number,
+            status=sub.status,
+            leave_start_date=leave.start_date,
+            leave_end_date=leave.end_date,
+        )
+        for sub, slot, leave in rows
+    ]
+
+
 # --- GET /admin/staffing/forecast -----------------------------------------------
 
 
@@ -602,6 +680,14 @@ class ForecastResponse(BaseModel):
     school_id: int
     week_start: date_
     forecast: list[ForecastDayOut]
+    data_sufficient: bool
+    """False when fewer than staffing_forecast.MIN_SOURCE_LEAVE_EVENTS_FOR_
+    CONFIDENCE real approved leave requests exist in the lookback window - a
+    school with e.g. exactly one ever-approved leave can mathematically
+    produce a full week of numbers (see forecast_staffing_gaps), but that's
+    one data point, not a real pattern. The frontend shows an explicit
+    "insufficient historical data" state instead of a flat, confidently-
+    styled risk_level when this is false."""
 
 
 @router.get("/admin/staffing/forecast", response_model=ForecastResponse)
@@ -658,7 +744,12 @@ def get_staffing_forecast(
         forecast_out.append(ForecastDayOut(date=f.date, predicted_absences=f.predicted_gap_count, risk_level=f.risk_level))
 
     db.commit()
-    return ForecastResponse(school_id=school_id, week_start=week_start, forecast=forecast_out)
+    return ForecastResponse(
+        school_id=school_id,
+        week_start=week_start,
+        forecast=forecast_out,
+        data_sufficient=has_sufficient_data(len(history_rows)),
+    )
 
 
 # --- GET /admin/staffing/substitute-suggestions ---------------------------------

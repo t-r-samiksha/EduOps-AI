@@ -37,6 +37,16 @@ from sklearn.linear_model import PoissonRegressor
 MIN_OBSERVATIONS_FOR_MODEL = 10
 MIN_DISTINCT_WEEKDAYS_FOR_MODEL = 3
 
+# A single long-running leave request can expand into many day-observations
+# (see HistoricalGapObservation) that superficially look "diverse" - e.g. one
+# 8-day leave touches all 7 weekdays, but it's still exactly ONE real
+# underlying event, not real historical pattern data. Confidence must be
+# judged against the count of DISTINCT SOURCE leave requests feeding the
+# forecast, not the (misleadingly larger) count of expanded day-observations
+# - callers (routers/staffing.py) have access to that raw count and pass it
+# to has_sufficient_data() below.
+MIN_SOURCE_LEAVE_EVENTS_FOR_CONFIDENCE = 3
+
 # risk_level thresholds as a fraction of total_teacher_count.
 LOW_RISK_MAX_FRACTION = 0.15
 MEDIUM_RISK_MAX_FRACTION = 0.35
@@ -68,6 +78,16 @@ def _risk_level(predicted_gap_count: float, total_teacher_count: int) -> str:
     if fraction <= MEDIUM_RISK_MAX_FRACTION:
         return "medium"
     return "high"
+
+
+def has_sufficient_data(source_leave_event_count: int) -> bool:
+    """Whether the forecast is backed by enough real historical leave events
+    to be shown as a confident prediction, rather than an honest "not enough
+    data yet" - e.g. a school with exactly one ever-approved leave request
+    can mathematically produce a full week of "predicted_gap_count" numbers
+    (see forecast_staffing_gaps), but that's one data point dressed up as a
+    week of insight, not a real pattern."""
+    return source_leave_event_count >= MIN_SOURCE_LEAVE_EVENTS_FOR_CONFIDENCE
 
 
 def _weekday_means(history: list[HistoricalGapObservation]) -> dict[int, float]:

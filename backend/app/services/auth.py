@@ -54,11 +54,12 @@ def _get_signing_key(kid: str) -> dict:
 
 
 class CurrentUser:
-    def __init__(self, id: int, sub: str, email: str | None, role: str | None):
+    def __init__(self, id: int, sub: str, email: str | None, role: str | None, school_id: int | None = None):
         self.id = id
         self.sub = sub
         self.email = email
         self.role = role
+        self.school_id = school_id
 
 
 def _get_or_create_user(db: Session, supabase_id: uuid.UUID, email: str | None, role: str | None) -> User:
@@ -108,7 +109,7 @@ def get_current_user(
     email = payload.get("email")
 
     user = _get_or_create_user(db, supabase_id, email, role)
-    return CurrentUser(id=user.id, sub=str(user.supabase_id), email=user.email, role=role)
+    return CurrentUser(id=user.id, sub=str(user.supabase_id), email=user.email, role=role, school_id=user.school_id)
 
 
 def require_role(*allowed_roles: str):

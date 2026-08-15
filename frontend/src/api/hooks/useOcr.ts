@@ -6,13 +6,20 @@ import type { DocumentCreateResult, DocumentDetail, DocumentsListResponse, Docum
 // so there is no queued/processing gap to poll across - a document's POST
 // response already carries its final status.
 
-export function useUploadDocument() {
+// school_id is REQUIRED on every one of these calls now - a reliability-audit
+// fix (documents had zero tenant scoping; an admin could see/correct/reextract
+// another school's documents, confirmed empirically). See docs/api-contract.md's
+// "Document OCR" section. Callers pass the real logged-in admin's own
+// school_id (from useCurrentUser()) - it's no longer a hardcoded constant here.
+
+export function useUploadDocument(schoolId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ file, documentType }: { file: File; documentType: DocumentType }) => {
       const form = new FormData();
       form.append("file", file);
       form.append("document_type", documentType);
+      form.append("school_id", String(schoolId));
       return apiPostForm<DocumentCreateResult>("/admin/ocr/documents", form);
     },
     onSuccess: (result) => {
@@ -22,11 +29,15 @@ export function useUploadDocument() {
   });
 }
 
-export function useDocumentsList(params: { status?: string; documentType?: DocumentType; page?: number; pageSize?: number } = {}) {
+export function useDocumentsList(
+  schoolId: number,
+  params: { status?: string; documentType?: DocumentType; page?: number; pageSize?: number } = {}
+) {
   return useQuery({
-    queryKey: ["ocr-documents-list", params.status, params.documentType, params.page, params.pageSize],
+    queryKey: ["ocr-documents-list", schoolId, params.status, params.documentType, params.page, params.pageSize],
     queryFn: () =>
       apiGet<DocumentsListResponse>("/admin/ocr/documents", {
+        school_id: schoolId,
         status: params.status,
         document_type: params.documentType,
         page: params.page,
@@ -35,30 +46,35 @@ export function useDocumentsList(params: { status?: string; documentType?: Docum
   });
 }
 
-export function useDocument(documentId: number | undefined) {
+export function useDocument(schoolId: number, documentId: number | undefined) {
   return useQuery({
     queryKey: ["ocr-document", documentId],
-    queryFn: () => apiGet<DocumentDetail>(`/admin/ocr/documents/${documentId}`),
+    queryFn: () => apiGet<DocumentDetail>(`/admin/ocr/documents/${documentId}`, { school_id: schoolId }),
     enabled: documentId !== undefined,
   });
 }
 
-export function useCorrectEntity() {
+export function useCorrectEntity(schoolId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ documentId, entityId, correctedValue }: { documentId: number; entityId: number; correctedValue: string }) =>
-      apiPut<ExtractedEntity>(`/admin/ocr/documents/${documentId}/entities/${entityId}`, { corrected_value: correctedValue }),
+      apiPut<ExtractedEntity>(`/admin/ocr/documents/${documentId}/entities/${entityId}?school_id=${schoolId}`, {
+        corrected_value: correctedValue,
+      }),
     onSuccess: (_result, { documentId }) => {
       queryClient.invalidateQueries({ queryKey: ["ocr-document", documentId] });
     },
   });
 }
 
-export function useReextractDocument() {
+export function useReextractDocument(schoolId: number) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ documentId, documentType }: { documentId: number; documentType?: DocumentType }) =>
-      apiPost<DocumentDetail>(`/admin/ocr/documents/${documentId}/reextract`, documentType ? { document_type: documentType } : {}),
+      apiPost<DocumentDetail>(
+        `/admin/ocr/documents/${documentId}/reextract?school_id=${schoolId}`,
+        documentType ? { document_type: documentType } : {}
+      ),
     onSuccess: (_result, { documentId }) => {
       queryClient.invalidateQueries({ queryKey: ["ocr-document", documentId] });
       queryClient.invalidateQueries({ queryKey: ["ocr-documents-list"] });

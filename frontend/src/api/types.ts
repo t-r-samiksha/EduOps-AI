@@ -41,6 +41,43 @@ export interface TimetableSlot {
 
 export interface TimetableActiveResponse extends Array<TimetableSlot> {}
 
+export interface Remedy {
+  action: string;
+  quantity: number;
+  detail: string;
+}
+
+export interface Finding {
+  severity: "error" | "warning";
+  code: string;
+  subject: string | null;
+  message: string;
+  numbers: Record<string, number>;
+  remedies: Remedy[];
+  details: Record<string, unknown> | null;
+}
+
+/** POST /timetable/preflight's response shape, and also the shape of a
+ * failed POST /timetable/generate's 422 `detail` - see docs/api-contract.md.
+ * `stage` is null/absent when feasible; "preflight" means an arithmetic
+ * check failed before the solver ran (milliseconds), "solve" means every
+ * pre-flight check passed but CP-SAT itself proved infeasible. */
+export interface PreflightResult {
+  feasible: boolean;
+  stage: "preflight" | "solve" | null;
+  findings: Finding[];
+}
+
+export interface TimetableGenerateResponse {
+  academic_year: string;
+  slots_created: number;
+  slots: TimetableSlot[];
+  warnings: string[];
+  findings: Finding[];
+  objective_weights: Record<string, number>;
+  objective_values: Record<string, number>;
+}
+
 export interface TimetableUpdateConflict {
   type: "teacher" | "room" | "class" | string;
   conflicting_slot_id: number;
@@ -148,6 +185,19 @@ export interface Substitution {
   candidates: SubstitutionCandidate[];
 }
 
+export interface MySubstituteDuty {
+  substitution_id: number;
+  leave_request_id: number;
+  original_teacher_id: number;
+  subject_id: number;
+  class_id: number;
+  day_of_week: number;
+  period_number: number;
+  status: "suggested" | "confirmed";
+  leave_start_date: string;
+  leave_end_date: string;
+}
+
 export interface ApproveLeaveResponse {
   leave_request: LeaveRequest;
   substitutions: Substitution[];
@@ -185,6 +235,12 @@ export interface StaffingForecast {
   school_id: number;
   week_start: string;
   forecast: ForecastDay[];
+  data_sufficient: boolean;
+  /** False when fewer than a handful of real approved leave requests exist
+   * historically - a school with e.g. exactly one ever-approved leave can
+   * mathematically produce a full week of numbers, but that's one data
+   * point, not a real pattern. Render an explicit "not enough data" state
+   * instead of a flat, confidently-styled risk_level when this is false. */
 }
 
 export interface SlotSuggestion {
@@ -297,6 +353,7 @@ export type DocumentStatus = "queued" | "processing" | "done" | "failed";
 
 export interface DocumentCreateResult {
   id: number;
+  school_id: number | null;
   document_type: DocumentType;
   status: DocumentStatus;
   uploaded_at: string;
@@ -304,6 +361,7 @@ export interface DocumentCreateResult {
 
 export interface DocumentSummary {
   id: number;
+  school_id: number | null;
   document_type: DocumentType;
   status: DocumentStatus;
   uploaded_at: string;
@@ -336,6 +394,7 @@ export interface DocumentRouting {
 
 export interface DocumentDetail {
   id: number;
+  school_id: number | null;
   document_type: DocumentType;
   status: DocumentStatus;
   uploaded_at: string;

@@ -4,7 +4,7 @@ import PageHeader from "@/components/shared/PageHeader";
 import SeatingChart from "@/components/exams/SeatingChart";
 import { useSeating } from "@/api/hooks/useExams";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
-import { DEMO_SCHOOL_ID } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 import { ApiError } from "@/api/client";
 
 /** No exam_id/student_id passed — per the real backend (GET /admin/exams/seating),
@@ -14,7 +14,7 @@ import { ApiError } from "@/api/client";
  * caller's own. */
 export default function StudentSeatLookup() {
   const seating = useSeating();
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+  const lookup = useReferenceLookup(useCurrentUser().data?.school_id);
 
   return (
     <div className="flex flex-col gap-3">

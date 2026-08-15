@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
@@ -7,6 +8,7 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.scheduler import shutdown_scheduler, start_scheduler
 from app.routers import (
     admin_alerts,
     admissions,
@@ -17,15 +19,31 @@ from app.routers import (
     documents,
     exams,
     fees,
+    master_data,
     parent,
+    parents,
     reference,
     risk,
     staffing,
+    students,
     syllabus,
+    teachers,
     timetable,
 )
 
-app = FastAPI(title="EduOps AI API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Real scheduled execution for the 4 previously-manual-only nightly/monthly
+    # jobs (see app/scheduler.py's module docstring) - starts automatically
+    # whenever this process runs, stops cleanly on shutdown. The manual CLI
+    # scripts (`python -m scripts.run_nightly_risk_scoring ...`) keep working
+    # unchanged alongside this.
+    start_scheduler()
+    yield
+    shutdown_scheduler()
+
+
+app = FastAPI(title="EduOps AI API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,6 +68,10 @@ app.include_router(admissions.router)
 app.include_router(exams.router)
 app.include_router(reference.router)
 app.include_router(parent.router)
+app.include_router(master_data.router)
+app.include_router(teachers.router)
+app.include_router(students.router)
+app.include_router(parents.router)
 
 
 @app.get("/health")

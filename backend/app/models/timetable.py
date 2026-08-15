@@ -15,10 +15,29 @@ class Room(Base):
     room_type: Mapped[str] = mapped_column(String(30), nullable=False, server_default="classroom")
     """One of: classroom, lab, auditorium, ... — free-form, matched against
     SubjectRoomRequirement.room_type by the solver."""
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
 
     school_id: Mapped[int] = mapped_column(ForeignKey("schools.id"), nullable=False)
 
     school: Mapped["School"] = relationship()
+
+
+class TeacherProfile(Base):
+    """Scheduling-relevant profile data for a teacher, one row per teacher.
+    Seed-populated the same way as TeacherSubject/TeacherUnavailability - no CRUD
+    API exists for this (see CLAUDE.md's scope note on this deliberately staying
+    seed-script-managed rather than becoming a general admin data-management
+    feature nobody asked for)."""
+
+    __tablename__ = "teacher_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    teacher_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, nullable=False)
+    max_periods_per_week: Mapped[int] = mapped_column(Integer, nullable=False, server_default="30")
+    """Default weekly teaching-load cap, overridable per-generation-run via
+    POST /timetable/generate's teacher_selections[].max_periods_per_week_override."""
+
+    teacher: Mapped["User"] = relationship()
 
 
 class TeacherSubject(Base):

@@ -53,7 +53,15 @@ Team of 3, vertical domain ownership:
 ## Commands
 
 - Frontend dev: `npm run dev` (in `/frontend`)
-- Backend dev: `uvicorn app.main:app --reload` (in `/backend`)
+- Backend dev: `uvicorn app.main:app --reload` (in `/backend`) — **this now starts a real
+  APScheduler instance** (`backend/app/scheduler.py`, wired into the FastAPI lifespan)
+  that runs 4 jobs automatically for every active school: nightly risk scoring (02:00
+  UTC), nightly syllabus/anomaly scan (02:15 UTC), nightly admin briefing (02:30 UTC),
+  monthly fee invoicing (1st of the month, 03:00 UTC). Leaving a dev server running
+  past those times will produce real `RiskFlag`/`AnomalyFlag`/`FeeRecord` rows, not
+  just when you manually run a script. The manual CLI scripts
+  (`python -m scripts.run_nightly_risk_scoring --school-id ... --academic-year ...`,
+  etc.) still work unchanged for on-demand/single-school runs.
 - Backend deps: `pip install -r requirements.txt --break-system-packages` (or use a venv)
 - **System dependency (not a pip package):** Document OCR (`backend/app/services/
   ocr_engine.py`) needs the actual Tesseract OCR engine binary installed separately -

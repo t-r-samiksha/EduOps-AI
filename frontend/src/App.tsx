@@ -6,6 +6,8 @@ import { useAuthStore, type Role } from "@/store/authStore";
 import Layout from "@/components/Layout";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Login from "@/routes/Login";
+import Signup from "@/routes/Signup";
+import OnboardingWizard from "@/routes/OnboardingWizard";
 import PrincipalDashboard from "@/routes/principal/PrincipalDashboard";
 import AdminDashboard from "@/routes/admin/AdminDashboard";
 import TeacherDashboard from "@/routes/teacher/TeacherDashboard";
@@ -23,6 +25,7 @@ import AdmissionsPage from "@/components/admissions/AdmissionsPage";
 import ExamsPage from "@/components/exams/ExamsPage";
 import InvigilationDutiesPage from "@/components/exams/InvigilationDutiesPage";
 import StudentSeatLookup from "@/components/exams/StudentSeatLookup";
+import SchoolManagementPage from "@/components/admin/SchoolManagementPage";
 
 interface RouteConfig {
   path: string;
@@ -43,6 +46,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/fees", role: "principal", element: <FeesPage /> },
   { path: "/principal/admissions", role: "principal", element: <AdmissionsPage /> },
   { path: "/principal/exams", role: "principal", element: <ExamsPage /> },
+  { path: "/principal/school-management", role: "principal", element: <SchoolManagementPage /> },
 
   { path: "/admin", role: "admin", element: <AdminDashboard /> },
   { path: "/admin/timetable", role: "admin", element: <TimetablePage /> },
@@ -55,6 +59,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/fees", role: "admin", element: <FeesPage /> },
   { path: "/admin/admissions", role: "admin", element: <AdmissionsPage /> },
   { path: "/admin/exams", role: "admin", element: <ExamsPage /> },
+  { path: "/admin/school-management", role: "admin", element: <SchoolManagementPage /> },
 
   { path: "/teacher", role: "teacher", element: <TeacherDashboard /> },
   { path: "/teacher/timetable", role: "teacher", element: <TimetablePage /> },
@@ -92,6 +97,15 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/signup" element={<Signup />} />
+      <Route
+        path="/onboarding"
+        element={
+          <ProtectedRoute allowedRoles={["admin", "principal"]}>
+            <OnboardingWizard />
+          </ProtectedRoute>
+        }
+      />
       <Route element={<Layout />}>
         <Route path="/" element={<Navigate to={role ? `/${role}` : "/login"} replace />} />
         {ROUTE_TABLE.map(({ path, role: routeRole, element }) => (

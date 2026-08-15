@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models.class_ import SchoolClass
 from app.models.role import Role
 from app.models.subject import Subject
-from app.models.timetable import Room
+from app.models.timetable import Room, TeacherProfile, TeacherSubject
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user
 
@@ -28,19 +28,50 @@ class NamedItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SubjectItem(NamedItem):
+    periods_per_week: int
+    lab_required: bool
+    """Real, persisted master-data defaults (School Management's Subjects tab)
+    - POST /timetable/generate's per-run SubjectSelection can still override
+    either for that one run, but now defaults from these instead of an
+    arbitrary hardcoded value."""
+
+
+class TeacherItem(NamedItem):
+    max_periods_per_week: int | None = None
+    """From TeacherProfile - None only if a teacher somehow has no profile row
+    (seed_demo_data.py gives every seeded teacher one)."""
+    subject_ids: list[int] = []
+    """This teacher's TeacherSubject qualifications - which subjects they're
+    eligible to teach, real seed-managed data (see CLAUDE.md)."""
+
+
+class RoomItem(NamedItem):
+    room_type: str
+
+
+class ClassItem(NamedItem):
+    grade_level: int | None = None
+    grade_label: str | None = None
+    """Display label for grade_level (e.g. "LKG") - null for a plain numeric
+    grade. See SchoolClass.grade_label's docstring - display code should show
+    this when present, falling back to f"Grade {grade_level}" otherwise."""
+    section: str | None = None
+
+
 class LookupResponse(BaseModel):
-    subjects: list[NamedItem]
-    teachers: list[NamedItem]
+    subjects: list[SubjectItem]
+    teachers: list[TeacherItem]
     students: list[NamedItem]
-    rooms: list[NamedItem]
-    classes: list[NamedItem]
+    rooms: list[RoomItem]
+    classes: list[ClassItem]
 
 
 def _users_by_role(db: Session, school_id: int, role_name: str) -> list[User]:
     return (
         db.query(User)
         .join(Role, User.role_id == Role.id)
-        .filter(User.school_id == school_id, Role.name == role_name)
+        .filter(User.school_id == school_id, Role.name == role_name, User.is_active.is_(True))
         .all()
     )
 
@@ -51,16 +82,44 @@ def get_lookup(
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    subjects = db.query(Subject).filter(Subject.school_id == school_id).all()
+    # Deactivated master-data rows are excluded everywhere below - this is what
+    # makes master_data.py/teachers.py's "deactivate" endpoints actually mean
+    # something end to end, rather than just flipping a column nothing reads.
+    subjects = db.query(Subject).filter(Subject.school_id == school_id, Subject.is_active.is_(True)).all()
     teachers = _users_by_role(db, school_id, "teacher")
     students = _users_by_role(db, school_id, "student")
-    rooms = db.query(Room).filter(Room.school_id == school_id).all()
-    classes = db.query(SchoolClass).filter(SchoolClass.school_id == school_id).all()
+    rooms = db.query(Room).filter(Room.school_id == school_id, Room.is_active.is_(True)).all()
+    classes = (
+        db.query(SchoolClass).filter(SchoolClass.school_id == school_id, SchoolClass.is_active.is_(True)).all()
+    )
+
+    teacher_ids = [t.id for t in teachers]
+    max_periods_by_teacher = {
+        p.teacher_id: p.max_periods_per_week
+        for p in db.query(TeacherProfile).filter(TeacherProfile.teacher_id.in_(teacher_ids)).all()
+    }
+    subject_ids_by_teacher: dict[int, list[int]] = {}
+    for row in db.query(TeacherSubject).filter(TeacherSubject.teacher_id.in_(teacher_ids)).all():
+        subject_ids_by_teacher.setdefault(row.teacher_id, []).append(row.subject_id)
 
     return LookupResponse(
-        subjects=[NamedItem(id=s.id, name=s.name) for s in subjects],
-        teachers=[NamedItem(id=t.id, name=t.full_name or t.email) for t in teachers],
+        subjects=[
+            SubjectItem(id=s.id, name=s.name, periods_per_week=s.periods_per_week, lab_required=s.lab_required)
+            for s in subjects
+        ],
+        teachers=[
+            TeacherItem(
+                id=t.id,
+                name=t.full_name or t.email,
+                max_periods_per_week=max_periods_by_teacher.get(t.id),
+                subject_ids=subject_ids_by_teacher.get(t.id, []),
+            )
+            for t in teachers
+        ],
         students=[NamedItem(id=s.id, name=s.full_name or s.email) for s in students],
-        rooms=[NamedItem(id=r.id, name=r.name) for r in rooms],
-        classes=[NamedItem(id=c.id, name=c.name) for c in classes],
+        rooms=[RoomItem(id=r.id, name=r.name, room_type=r.room_type) for r in rooms],
+        classes=[
+            ClassItem(id=c.id, name=c.name, grade_level=c.grade_level, grade_label=c.grade_label, section=c.section)
+            for c in classes
+        ],
     )

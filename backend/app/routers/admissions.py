@@ -25,6 +25,37 @@ def _offered_grades(db: Session, school_id: int, academic_year: str) -> set[str]
     }
 
 
+def enroll_student_primary(db: Session, student_user_id: int, class_id: int) -> bool:
+    """Real, idempotent primary-enrollment creation - `Enrollment(subject_id=None,
+    is_primary=True)` is this codebase's "this student's homeroom class" record
+    (see the Enrollment model). Returns True iff a new row was created (False if
+    the student was already primary-enrolled in that class - re-calling this is
+    always safe, never creates a duplicate).
+
+    Shared by two real, intentionally-distinct callers - not duplicated logic:
+    `decide_admission_application` below (processing a NEW applicant through the
+    admissions pipeline) and `routers/students.py::create_student` (onboarding an
+    EXISTING roster directly, e.g. via the onboarding wizard) - see
+    docs/api-contract.md's "Two ways a student gets an Enrollment" note for why
+    both are real and neither is a legacy stub of the other."""
+    student = db.query(User).filter(User.id == student_user_id).one_or_none()
+    if student is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "student_user_id does not refer to an existing user")
+    school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).one_or_none()
+    if school_class is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "class_id does not refer to an existing class")
+
+    existing = (
+        db.query(Enrollment)
+        .filter(Enrollment.student_id == student_user_id, Enrollment.class_id == class_id, Enrollment.subject_id.is_(None))
+        .one_or_none()
+    )
+    if existing is not None:
+        return False
+    db.add(Enrollment(student_id=student_user_id, class_id=class_id, subject_id=None, is_primary=True))
+    return True
+
+
 def decide_admission_application(
     db: Session,
     application: AdmissionApplication,
@@ -40,9 +71,9 @@ def decide_admission_application(
 
     Enrollment wiring is REAL, not stubbed - but only fires when the caller supplies
     both student_user_id (an ALREADY-EXISTING user - see AdmissionApplication's own
-    docstring for why creating a new account is out of scope) and class_id. Without
-    both, acceptance still succeeds; enrollment creation is a documented no-op
-    reflected in the return value, not a silent skip.
+    docstring, and routers/students.py for how a brand new one gets created) and
+    class_id. Without both, acceptance still succeeds; enrollment creation is a
+    documented no-op reflected in the return value, not a silent skip.
 
     Shared by PATCH /admin/admissions/applications/{id} and
     POST /admin/approvals/{id}/decision (routers/approvals.py) so both entry points
@@ -60,22 +91,9 @@ def decide_admission_application(
     if new_status != "accepted" or student_user_id is None or class_id is None:
         return False
 
-    student = db.query(User).filter(User.id == student_user_id).one_or_none()
-    if student is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "student_user_id does not refer to an existing user")
-    school_class = db.query(SchoolClass).filter(SchoolClass.id == class_id).one_or_none()
-    if school_class is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "class_id does not refer to an existing class")
-
-    existing = (
-        db.query(Enrollment)
-        .filter(Enrollment.student_id == student_user_id, Enrollment.class_id == class_id, Enrollment.subject_id.is_(None))
-        .one_or_none()
-    )
-    if existing is None:
-        db.add(Enrollment(student_id=student_user_id, class_id=class_id, subject_id=None, is_primary=True))
+    created = enroll_student_primary(db, student_user_id, class_id)
     application.enrolled_student_id = student_user_id
-    return True
+    return created
 
 
 # --- POST /admin/admissions/applications ---------------------------------------------

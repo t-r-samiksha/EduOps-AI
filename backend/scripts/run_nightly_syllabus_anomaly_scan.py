@@ -1,15 +1,14 @@
 """Nightly (or on-demand) scan: compares syllabus actual-vs-planned progress and runs
 the anomaly detectors, writing results into AnomalyFlag.
 
-SCHEDULING - same finding as every prior session, trusted rather than re-verified
-------------------------------------------------------------------------------------
-No Celery, Dramatiq, Huey, APScheduler, or other job-scheduling infrastructure exists
-anywhere in this repo (confirmed independently by Early-Warning, OCR, and Command
-Center sessions - not re-checked here per the task's own instruction to trust that
-finding). Same dependency-free-script pattern as scripts/run_nightly_risk_scoring.py:
-`run_scan()` is a pure function of (Session, school_id, academic_year) with no
-argparse/print/process-exit concerns baked in; `main()` is a thin CLI wrapper for
-manual/cron invocation: `python -m scripts.run_nightly_syllabus_anomaly_scan
+SCHEDULING - now real, wired into APScheduler (was manual-only for several sessions)
+--------------------------------------------------------------------------------------
+`run_scan()` (below) now runs automatically every night at 02:15 UTC for every
+active school/academic_year, via `app/scheduler.py`'s
+`run_nightly_syllabus_anomaly_scan_job()` - started in `app/main.py`'s FastAPI
+lifespan. `run_scan()` itself is unchanged: still a pure function of (Session,
+school_id, academic_year); `main()` below remains a thin CLI wrapper for
+manual/on-demand invocation: `python -m scripts.run_nightly_syllabus_anomaly_scan
 --school-id 41 --academic-year 2026-27`.
 
 WHY SYLLABUS DRIFT AND ANOMALY DETECTION SHARE ONE SCRIPT (AND ONE TABLE)

@@ -6,6 +6,7 @@ export function useFeeSchedules(params: { schoolId?: number; academicYear?: stri
   return useQuery({
     queryKey: ["fee-schedules", params.schoolId, params.academicYear],
     queryFn: () => apiGet<FeeSchedule[]>("/admin/fees/schedules", { school_id: params.schoolId, academic_year: params.academicYear }),
+    enabled: params.schoolId != null,
   });
 }
 

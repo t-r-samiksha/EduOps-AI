@@ -15,15 +15,15 @@ import EntityCard from "@/components/shared/EntityCard";
 import StatTile from "@/components/shared/StatTile";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useFlaggedStudents, useCreateRiskFlag, useAcknowledgeFlag, useResolveFlag, useLogIntervention } from "@/api/hooks/useRisk";
-import { DEMO_SCHOOL_ID } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 import { timeAgo } from "@/lib/format";
 import { ApiError } from "@/api/client";
 import type { RiskFlag } from "@/api/types";
 
 const LEVEL_TONE: Record<string, "urgent" | "warning" | "neutral"> = { high: "urgent", medium: "warning", low: "neutral" };
 
-function FlagStudentDialog() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+function FlagStudentDialog({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
   const create = useCreateRiskFlag();
   const [open, setOpen] = useState(false);
   const [studentId, setStudentId] = useState("");
@@ -221,6 +221,7 @@ function FlagFeed({ riskLevel, studentId }: { riskLevel?: string; studentId?: nu
 
 export default function RiskDashboard() {
   const { role } = useAuthStore();
+  const schoolId = useCurrentUser().data?.school_id;
   const [studentId, setStudentId] = useState("");
   const parentStudentId = role === "parent" && studentId.trim() ? Number(studentId) : undefined;
   const canFlag = role === "teacher" || role === "admin" || role === "principal";
@@ -236,7 +237,7 @@ export default function RiskDashboard() {
       <PageHeader
         title="Early-Warning & Risk"
         description="Attendance, remark sentiment, and manual flags — students who may need support."
-        actions={canFlag ? <FlagStudentDialog /> : undefined}
+        actions={canFlag && schoolId != null ? <FlagStudentDialog schoolId={schoolId} /> : undefined}
       />
 
       {role === "parent" && (

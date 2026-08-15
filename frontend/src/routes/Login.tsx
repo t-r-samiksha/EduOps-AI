@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { GraduationCap } from "lucide-react";
 import { signInWithEmail } from "@/api/auth";
 import { Button } from "@/components/ui/button";
@@ -55,6 +55,12 @@ export default function Login() {
           <Button type="submit" className="mt-2 w-full" disabled={isSubmitting}>
             {isSubmitting ? "Signing in…" : "Sign in"}
           </Button>
+          <p className="text-center text-xs text-ink-muted">
+            New school?{" "}
+            <Link to="/signup" className="font-medium text-accent hover:underline">
+              Sign up
+            </Link>
+          </p>
         </div>
       </form>
     </div>

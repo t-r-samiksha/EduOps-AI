@@ -1,22 +1,20 @@
 """Nightly (or on-demand) re-scoring job for the early-warning system.
 
-SCHEDULING - deliberately not built this session
------------------------------------------------------
-Checked first: no Celery, Dramatiq, Huey, APScheduler, or any other job-scheduling
-library/infrastructure exists anywhere in this repo (the playbook mentions
-Celery/Dramatiq/Huey for OCR elsewhere, but that isn't built yet either, so there's no
-existing convention to match). Standing up real scheduler infrastructure for a single
-nightly job is over-investment for this session - this is a plain, dependency-free
-script instead, structured so wiring it into a real scheduler later is a one-line
-change, not a rewrite:
-  - `run_nightly_scoring()` is a pure function of (session, school_id, academic_year)
-    with no argparse/print/process-exit concerns baked in - a Celery task or
-    APScheduler job would just import and call it directly.
-  - `main()` is only a thin CLI wrapper (argparse + a session + a printed summary) for
-    manual/cron invocation today: `python -m scripts.run_nightly_risk_scoring
-    --school-id 41 --academic-year 2026-27`, or `0 2 * * * cd .../backend && venv/
-    bin/python -m scripts.run_nightly_risk_scoring --school-id 41 --academic-year
-    2026-27` in an actual crontab.
+SCHEDULING - now real, wired into APScheduler (was manual-only for several sessions)
+--------------------------------------------------------------------------------------
+`run_nightly_scoring()` (below) now runs automatically every night at 02:00 UTC
+for every active school/academic_year, via `app/scheduler.py`'s
+`run_nightly_risk_scoring_job()` - started in `app/main.py`'s FastAPI lifespan,
+so it fires for real whenever the backend process is running, no human/cron
+required. This function itself is unchanged: still a pure function of
+(session, school_id, academic_year) with no argparse/print/process-exit
+concerns baked in - `app/scheduler.py` imports and calls it directly, same as
+`main()` below does.
+
+The manual CLI invocation below still works exactly as before, for on-demand/
+single-school runs: `python -m scripts.run_nightly_risk_scoring --school-id 41
+--academic-year 2026-27`. `main()` is only a thin CLI wrapper (argparse + a
+session + a printed summary) around the same function the real scheduler uses.
 
 WHAT IT DOES
 --------------

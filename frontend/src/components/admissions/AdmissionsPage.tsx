@@ -12,7 +12,8 @@ import Field from "@/components/ui/field";
 import PageHeader from "@/components/shared/PageHeader";
 import EntityCard from "@/components/shared/EntityCard";
 import { useSubmitApplication, useApplicationsList, useUpdateApplication } from "@/api/hooks/useAdmissions";
-import { DEMO_SCHOOL_ID, DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
+import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { ApiError } from "@/api/client";
 import type { AdmissionApplication, AdmissionStatus } from "@/api/types";
 
@@ -36,7 +37,7 @@ const LEGAL_NEXT: Record<AdmissionStatus, AdmissionStatus[]> = {
 
 const STATUS_TABS: (AdmissionStatus | "all")[] = ["all", "submitted", "under_review", "accepted", "rejected"];
 
-function SubmitTab() {
+function SubmitTab({ schoolId }: { schoolId: number }) {
   const submit = useSubmitApplication();
   const [applicantName, setApplicantName] = useState("");
   const [dob, setDob] = useState("");
@@ -47,7 +48,7 @@ function SubmitTab() {
     if (!applicantName.trim() || !dob || !guardianEmail.trim() || !gradeApplied.trim()) return;
     submit.mutate(
       {
-        school_id: DEMO_SCHOOL_ID,
+        school_id: schoolId,
         academic_year: DEFAULT_ACADEMIC_YEAR,
         applicant_name: applicantName,
         dob,
@@ -250,6 +251,7 @@ function ReviewQueueTab() {
 
 export default function AdmissionsPage() {
   const { role } = useAuthStore();
+  const schoolId = useCurrentUser().data?.school_id;
   // POST /admin/admissions/applications is admin-only on the real backend
   // (principal is not in that route's require_role list) - the Submit tab is
   // hidden for principal rather than shown-then-403ing.
@@ -272,9 +274,9 @@ export default function AdmissionsPage() {
         <TabsContent value="queue">
           <ReviewQueueTab />
         </TabsContent>
-        {canSubmit && (
+        {canSubmit && schoolId != null && (
           <TabsContent value="submit">
-            <SubmitTab />
+            <SubmitTab schoolId={schoolId} />
           </TabsContent>
         )}
       </Tabs>

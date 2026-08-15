@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.class_ import SchoolClass
 from app.models.fees import FeeRecord, FeeReminder, FeeSchedule
+from app.models.school import School
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
 from app.services.fee_reminder_engine import determine_reminder
@@ -50,6 +51,8 @@ def create_schedule(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount must be positive")
     if not body.fee_type.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "fee_type must not be empty")
+    if db.query(School).filter(School.id == body.school_id).one_or_none() is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown school_id {body.school_id}")
     if body.class_id is not None and db.query(SchoolClass).filter(SchoolClass.id == body.class_id).one_or_none() is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Class not found")
 

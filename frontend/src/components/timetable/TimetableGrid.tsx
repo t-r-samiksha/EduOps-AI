@@ -213,7 +213,9 @@ export default function TimetableGrid({ slots, lookup, showClass, editable = fal
       <div className="flex flex-col items-center gap-1 rounded-2xl border border-dashed border-border px-6 py-8 text-center">
         <p className="font-display text-sm font-medium text-ink">No active timetable slots</p>
         <p className="max-w-xs text-xs text-ink-muted">
-          Nothing has been generated for this scope yet — run <code className="font-mono">POST /timetable/generate</code> for this class/academic year.
+          {editable
+            ? 'Nothing has been generated for this scope yet — use the "Generate timetable" button above.'
+            : "Nothing has been generated for this scope yet — an admin or principal needs to generate it first."}
         </p>
       </div>
     );

@@ -12,7 +12,8 @@ import PageHeader from "@/components/shared/PageHeader";
 import ProgressBar from "@/components/shared/ProgressBar";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useSyllabusSummary, useCreateSyllabusPlan, useLogCheckpoint } from "@/api/hooks/useSyllabus";
-import { DEFAULT_ACADEMIC_YEAR, DEMO_SCHOOL_ID } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
+import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { ApiError } from "@/api/client";
 
 const STATUS_VARIANT: Record<string, "urgent" | "positive" | "accent"> = {
@@ -21,8 +22,8 @@ const STATUS_VARIANT: Record<string, "urgent" | "positive" | "accent"> = {
   ahead: "accent",
 };
 
-function NewPlanDialog() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+function NewPlanDialog({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
   const create = useCreateSyllabusPlan();
   const [open, setOpen] = useState(false);
   const [classId, setClassId] = useState("");
@@ -151,7 +152,8 @@ function LogCheckpointDialog({ plans }: { plans: { plan_id: number; class_name: 
 }
 
 export default function SyllabusPage() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+  const schoolId = useCurrentUser().data?.school_id;
+  const lookup = useReferenceLookup(schoolId);
   const [classId, setClassId] = useState("all");
   const summary = useSyllabusSummary({ classId: classId === "all" ? undefined : Number(classId), academicYear: DEFAULT_ACADEMIC_YEAR });
 
@@ -163,10 +165,12 @@ export default function SyllabusPage() {
         title="Syllabus Tracking"
         description="Expected vs. actual pace per class/subject."
         actions={
-          <>
-            <NewPlanDialog />
-            <LogCheckpointDialog plans={items} />
-          </>
+          schoolId != null && (
+            <>
+              <NewPlanDialog schoolId={schoolId} />
+              <LogCheckpointDialog plans={items} />
+            </>
+          )
         }
       />
 

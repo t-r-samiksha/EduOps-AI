@@ -12,7 +12,8 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useTimetableActive } from "@/api/hooks/useTimetable";
 import { useEnrollStudent, useMarkAttendance, useAttendanceSummary, useReviewAttendanceRecord } from "@/api/hooks/useAttendance";
-import { DEFAULT_ACADEMIC_YEAR, DEMO_SCHOOL_ID, DAY_LABELS } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
+import { DEFAULT_ACADEMIC_YEAR, DAY_LABELS } from "@/lib/constants";
 import { ApiError } from "@/api/client";
 import type { TimetableSlot } from "@/api/types";
 import { cn } from "@/lib/utils";
@@ -67,8 +68,8 @@ function ConfidenceBadge({ confidence, needsReview }: { confidence: number; need
   );
 }
 
-function EnrollTab() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+function EnrollTab({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
   const [studentId, setStudentId] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
   const enroll = useEnrollStudent();
@@ -138,9 +139,9 @@ function EnrollTab() {
   );
 }
 
-function MarkTab() {
+function MarkTab({ schoolId }: { schoolId: number }) {
   const timetable = useTimetableActive({ academicYear: DEFAULT_ACADEMIC_YEAR });
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+  const lookup = useReferenceLookup(schoolId);
   const [slotId, setSlotId] = useState<string>("");
   const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [file, setFile] = useState<File | null>(null);
@@ -297,8 +298,8 @@ function daysAgo(n: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-function SummaryTab() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+function SummaryTab({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
   const [fromDate, setFromDate] = useState(() => daysAgo(7));
   const [toDate, setToDate] = useState(() => daysAgo(0));
   const [classId, setClassId] = useState<string>("all");
@@ -383,30 +384,36 @@ function SummaryTab() {
 }
 
 export default function AttendanceCapture() {
+  const schoolId = useCurrentUser().data?.school_id;
+
   return (
     <div className="flex flex-col gap-3">
       <PageHeader
         title="Attendance"
         description="CV-based face recognition — enroll reference photos, mark attendance from a classroom photo, review low-confidence matches, and track summary stats."
       />
-      <Tabs defaultValue="mark">
-        <TabsList>
-          <TabsTrigger value="mark">Mark attendance</TabsTrigger>
-          <TabsTrigger value="enroll">Enroll student</TabsTrigger>
-          <TabsTrigger value="summary">
-            <ClipboardCheck className="mr-1 h-3.5 w-3.5" /> Summary
-          </TabsTrigger>
-        </TabsList>
-        <TabsContent value="mark">
-          <MarkTab />
-        </TabsContent>
-        <TabsContent value="enroll">
-          <EnrollTab />
-        </TabsContent>
-        <TabsContent value="summary">
-          <SummaryTab />
-        </TabsContent>
-      </Tabs>
+      {schoolId == null ? (
+        <div className="h-40 animate-pulse rounded-2xl bg-elevated/60" />
+      ) : (
+        <Tabs defaultValue="mark">
+          <TabsList>
+            <TabsTrigger value="mark">Mark attendance</TabsTrigger>
+            <TabsTrigger value="enroll">Enroll student</TabsTrigger>
+            <TabsTrigger value="summary">
+              <ClipboardCheck className="mr-1 h-3.5 w-3.5" /> Summary
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="mark">
+            <MarkTab schoolId={schoolId} />
+          </TabsContent>
+          <TabsContent value="enroll">
+            <EnrollTab schoolId={schoolId} />
+          </TabsContent>
+          <TabsContent value="summary">
+            <SummaryTab schoolId={schoolId} />
+          </TabsContent>
+        </Tabs>
+      )}
     </div>
   );
 }

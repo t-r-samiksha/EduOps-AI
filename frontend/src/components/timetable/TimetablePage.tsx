@@ -1,18 +1,21 @@
 import { useState } from "react";
 import { useAuthStore } from "@/store/authStore";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
-import { DEFAULT_ACADEMIC_YEAR, DEMO_SCHOOL_ID } from "@/lib/constants";
+import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import Field from "@/components/ui/field";
 import PageHeader from "@/components/shared/PageHeader";
 import TimetableGrid from "@/components/timetable/TimetableGrid";
+import GenerateTimetableForm from "@/components/timetable/GenerateTimetableForm";
 import { ApiError } from "@/api/client";
 
 export default function TimetablePage() {
   const { role } = useAuthStore();
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+  const schoolId = useCurrentUser().data?.school_id;
+  const lookup = useReferenceLookup(schoolId);
   const [classId, setClassId] = useState<number | undefined>(undefined);
   const [studentId, setStudentId] = useState<string>("");
 
@@ -68,6 +71,8 @@ export default function TimetablePage() {
                 </SelectContent>
               </Select>
             )}
+
+            {isAdminLike && schoolId != null && <GenerateTimetableForm schoolId={schoolId} />}
 
             {role === "parent" && (
               <Field label="" className="w-40">

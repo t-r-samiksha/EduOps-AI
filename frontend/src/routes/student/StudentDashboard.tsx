@@ -4,8 +4,9 @@ import StatTile from "@/components/shared/StatTile";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useAttendanceSummary } from "@/api/hooks/useAttendance";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 import { ApiError } from "@/api/client";
-import { DEFAULT_ACADEMIC_YEAR, DEMO_SCHOOL_ID, DAY_LABELS } from "@/lib/constants";
+import { DEFAULT_ACADEMIC_YEAR, DAY_LABELS } from "@/lib/constants";
 
 function daysAgo(n: number): string {
   const d = new Date();
@@ -18,7 +19,7 @@ function todayDow(): number {
 }
 
 export default function StudentDashboard() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+  const lookup = useReferenceLookup(useCurrentUser().data?.school_id);
   // No class enrollment -> the real backend 404s here (see timetable.py's
   // _resolve_student_class_id) rather than returning an empty list. Retry
   // disabled since a 404 for "not enrolled" won't resolve itself on retry.

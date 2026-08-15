@@ -9,7 +9,8 @@ import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable
 import { useAttendanceSummary } from "@/api/hooks/useAttendance";
 import { useFlaggedStudents } from "@/api/hooks/useRisk";
 import { useAuthStore } from "@/store/authStore";
-import { DEFAULT_ACADEMIC_YEAR, DEMO_SCHOOL_ID } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
+import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 
 function daysAgo(n: number): string {
   const d = new Date();
@@ -23,7 +24,7 @@ function todayDow(): number {
 
 export default function ParentDashboard() {
   const children = useParentChildren();
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+  const lookup = useReferenceLookup(useCurrentUser().data?.school_id);
   const email = useAuthStore((s) => s.user?.email);
   const [selectedId, setSelectedId] = useState<string>("");
 

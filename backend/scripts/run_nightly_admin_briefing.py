@@ -1,16 +1,15 @@
 """Nightly admin briefing: compiles the current unified alerts feed
 (services/alert_aggregator.py) into a plain-text summary for admins/principals.
 
-SCHEDULING - same finding as Early-Warning/OCR sessions, stayed consistent
---------------------------------------------------------------------------------
-Checked first: no Celery, Dramatiq, Huey, APScheduler, or any job-scheduling
-infrastructure exists anywhere in this repo. This is a plain, dependency-free script
-- `compile_briefing()` is a pure function of a Session with no argparse/print/
-process-exit concerns baked in, so a real scheduler could import and call it
-directly later; `main()` is only a thin CLI wrapper for manual/cron invocation today:
-`python -m scripts.run_nightly_admin_briefing`, or
-`0 6 * * * cd .../backend && venv/bin/python -m scripts.run_nightly_admin_briefing
---recipients admin@school.example` in an actual crontab.
+SCHEDULING - now real, wired into APScheduler (was manual-only for several sessions)
+--------------------------------------------------------------------------------------
+`compile_briefing()` (below) now runs automatically every night at 02:30 UTC via
+`app/scheduler.py`'s `run_nightly_admin_briefing_job()` - started in
+`app/main.py`'s FastAPI lifespan. Unlike the other 3 nightly/monthly jobs, this
+one isn't looped per school (the alerts feed it reads has no school scoping of
+its own - see `alert_aggregator.py`). `compile_briefing()` itself is unchanged:
+still a pure function of a Session; `main()` below remains a thin CLI wrapper
+for manual/on-demand invocation: `python -m scripts.run_nightly_admin_briefing`.
 
 EMAIL SENDING - stubbed, not fabricated
 ------------------------------------------

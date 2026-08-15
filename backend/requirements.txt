@@ -8,6 +8,13 @@ pydantic>=2.10.0
 pydantic-settings>=2.6.0
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.12
+
+# Master-data admin endpoints (teacher account creation) call the Supabase Admin
+# API server-side (auth.admin.create_user) to provision a real, login-capable
+# Supabase Auth account - the same mechanism used ad-hoc by gettoken.py/manual
+# account-creation scripts, now a genuine backend runtime dependency rather than
+# a script-only tool, so it belongs here rather than being implicitly relied on.
+supabase>=2.31.0
 ortools>=9.11.0
 pgvector>=0.3.6
 scikit-learn>=1.5.0
@@ -42,6 +49,14 @@ Pillow>=10.4.0
 # face_recognition_models still imports pkg_resources at import time; pin below the
 # setuptools version that dropped it (removal began ~81).
 setuptools<81
+
+# Real scheduled execution for the 4 nightly/monthly jobs (risk scoring, syllabus/
+# anomaly scan, admin briefing, fee invoicing) - previously manual-CLI-only,
+# confirmed by two separate reliability audits to have zero automation. Chosen
+# over Celery/Dramatiq/Huey: pure-Python, no external broker (Redis/RabbitMQ)
+# needed, appropriate for 4 jobs at this scale. Wired into FastAPI's lifespan in
+# app/main.py - see app/scheduler.py.
+apscheduler>=3.10,<4.0
 
 # dev/test
 pytest>=8.3.0

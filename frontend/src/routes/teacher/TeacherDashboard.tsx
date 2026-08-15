@@ -2,23 +2,26 @@ import { CalendarClock, AlertTriangle, ScanFace, Users, BookOpenCheck } from "lu
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
 import QuickLinkCard from "@/components/shared/QuickLinkCard";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useFlaggedStudents } from "@/api/hooks/useRisk";
-import { useLeaveRequests } from "@/api/hooks/useStaffing";
+import { useLeaveRequests, useMySubstituteDuties } from "@/api/hooks/useStaffing";
 import { useSyllabusSummary } from "@/api/hooks/useSyllabus";
-import { DEFAULT_ACADEMIC_YEAR, DEMO_SCHOOL_ID, DAY_LABELS } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
+import { DEFAULT_ACADEMIC_YEAR, DAY_LABELS } from "@/lib/constants";
 
 function todayDow(): number {
   return (new Date().getDay() + 6) % 7;
 }
 
 export default function TeacherDashboard() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+  const lookup = useReferenceLookup(useCurrentUser().data?.school_id);
   const timetable = useTimetableActive({ academicYear: DEFAULT_ACADEMIC_YEAR });
   const flagged = useFlaggedStudents({});
   const pendingLeave = useLeaveRequests({ status: "pending" });
   const syllabus = useSyllabusSummary({ academicYear: DEFAULT_ACADEMIC_YEAR });
+  const substituteDuties = useMySubstituteDuties();
 
   const dow = todayDow();
   const todaySlots = (timetable.data ?? [])
@@ -30,6 +33,7 @@ export default function TeacherDashboard() {
   const subjectName = (id: number) => lookup.data?.subjects.find((s) => s.id === id)?.name ?? `Subject #${id}`;
   const roomName = (id: number) => lookup.data?.rooms.find((r) => r.id === id)?.name ?? `Rm ${id}`;
   const className = (id: number) => lookup.data?.classes.find((c) => c.id === id)?.name ?? `Class #${id}`;
+  const teacherName = (id: number) => lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`;
 
   return (
     <div className="flex flex-col gap-3">
@@ -53,6 +57,12 @@ export default function TeacherDashboard() {
           value={pendingLeave.isLoading ? "…" : (pendingLeave.data?.length ?? 0)}
           icon={Users}
           tone="neutral"
+        />
+        <StatTile
+          label="Substitute duties"
+          value={substituteDuties.isLoading ? "…" : (substituteDuties.data?.length ?? 0)}
+          icon={Users}
+          tone={(substituteDuties.data?.length ?? 0) > 0 ? "warning" : "positive"}
         />
         <StatTile
           label="Syllabus behind pace"
@@ -83,6 +93,34 @@ export default function TeacherDashboard() {
           ))}
         </CardContent>
       </Card>
+
+      {(substituteDuties.data?.length ?? 0) > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Your substitute duties</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {substituteDuties.data!.map((duty) => (
+              <div
+                key={duty.substitution_id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-elevated/40 px-3.5 py-2.5 text-sm"
+              >
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="font-medium text-ink">{subjectName(duty.subject_id)}</span>
+                  <span className="text-ink-muted">{className(duty.class_id)}</span>
+                  <span className="font-mono text-xs text-ink-muted">
+                    {DAY_LABELS[duty.day_of_week]} · Period {duty.period_number + 1}
+                  </span>
+                  <span className="text-xs text-ink-muted">
+                    covering for {teacherName(duty.original_teacher_id)} ({duty.leave_start_date} → {duty.leave_end_date})
+                  </span>
+                </div>
+                <Badge variant={duty.status === "confirmed" ? "positive" : "accent"}>{duty.status}</Badge>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <QuickLinkCard

@@ -26,9 +26,9 @@ from app.services.auth import CurrentUser, get_current_user
 ACADEMIC_YEAR = "2026-27"
 
 
-def _override_user(role: str, user_id: int = 999):
+def _override_user(role: str, user_id: int = 999, school_id: int | None = None):
     def _fake_user():
-        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role)
+        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role, school_id=school_id)
 
     app.dependency_overrides[get_current_user] = _fake_user
 
@@ -102,7 +102,7 @@ def _latest_entry(db_session, entity_type: str, entity_id: int) -> AuditLogEntry
 
 
 def test_timetable_update_writes_audit_entry(client, db_session, seed):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.put("/timetable/update", json={"slot_id": seed["slot"].id, "room_id": seed["other_room"].id})
     assert resp.status_code == 200
 
@@ -222,7 +222,9 @@ def test_risk_resolve_writes_audit_entry(client, db_session, seed, risk_flag):
 
 
 def test_document_correction_writes_audit_entry(client, db_session, seed):
-    doc = Document(uploaded_by=seed["admin_user"].id, document_type="admission_form", file_url="x", status="done")
+    doc = Document(
+        uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="admission_form", file_url="x", status="done"
+    )
     db_session.add(doc)
     db_session.flush()
     entity = ExtractedEntity(document_id=doc.id, field_name="dob", field_value="2016-04-01", confidence_score=0.4, is_low_confidence=True)
@@ -231,7 +233,11 @@ def test_document_correction_writes_audit_entry(client, db_session, seed):
     db_session.refresh(entity)
 
     _override_user("admin", user_id=seed["admin_user"].id)
-    resp = client.put(f"/admin/ocr/documents/{doc.id}/entities/{entity.id}", json={"corrected_value": "2015-04-01"})
+    resp = client.put(
+        f"/admin/ocr/documents/{doc.id}/entities/{entity.id}",
+        params={"school_id": seed["school"].id},
+        json={"corrected_value": "2015-04-01"},
+    )
     assert resp.status_code == 200
 
     entry = _latest_entry(db_session, "extracted_entities", entity.id)

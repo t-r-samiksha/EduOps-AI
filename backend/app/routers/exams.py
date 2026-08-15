@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models.enrollment import Enrollment
 from app.models.exams import Exam, ExamRoomAssignment, InvigilationAssignment, SeatingAssignment
 from app.models.role import Role
+from app.models.school import School
 from app.models.staffing import LeaveRequest
 from app.models.subject import Subject
 from app.models.class_ import SchoolClass
@@ -70,6 +71,8 @@ def create_exam(
 ):
     if body.end_time <= body.start_time:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "end_time must be after start_time")
+    if db.query(School).filter(School.id == body.school_id).one_or_none() is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown school_id {body.school_id}")
     if db.query(Subject).filter(Subject.id == body.subject_id).one_or_none() is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Subject not found")
     if db.query(SchoolClass).filter(SchoolClass.id == body.class_id).one_or_none() is None:

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CalendarClock, CalendarPlus, TrendingUp, Users } from "lucide-react";
+import { AlertTriangle, CalendarClock, CalendarPlus, ChevronDown, ChevronRight, TrendingUp } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,12 +17,14 @@ import {
   useLeaveRequests,
   useRequestLeave,
   useDecideLeaveRequest,
-  useSuggestSubstitutions,
+  useLeaveRequestSubstitutions,
   useConfirmSubstitution,
+  useMySubstituteDuties,
   useStaffingForecast,
   useSubstituteSuggestionsPreview,
 } from "@/api/hooks/useStaffing";
-import { DEFAULT_ACADEMIC_YEAR, DEMO_SCHOOL_ID, DAY_LABELS } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
+import { DEFAULT_ACADEMIC_YEAR, DAY_LABELS } from "@/lib/constants";
 import { ApiError } from "@/api/client";
 import type { LeaveRequest, Substitution } from "@/api/types";
 
@@ -39,134 +41,21 @@ function mondayOfThisWeek(): string {
   return d.toISOString().slice(0, 10);
 }
 
-function LeaveRequestsTab({ onReviewSubstitutes }: { onReviewSubstitutes: (leaveRequestId: number) => void }) {
-  const { role } = useAuthStore();
-  const isAdminLike = role === "admin" || role === "principal";
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
-  const requests = useLeaveRequests();
-  const requestLeave = useRequestLeave();
-  const decide = useDecideLeaveRequest();
-  const [decidingId, setDecidingId] = useState<string | null>(null);
+// --- Substitution card (used both standalone in the preview tool's results ---
+// --- and inline, expanded from a leave request card) ------------------------
 
-  const [teacherId, setTeacherId] = useState<string>("");
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [reason, setReason] = useState("");
-
-  function submitRequest() {
-    if (!startDate || !endDate || !reason) return;
-    requestLeave.mutate(
-      { teacher_id: isAdminLike && teacherId ? Number(teacherId) : undefined, start_date: startDate, end_date: endDate, reason },
-      { onSuccess: () => { setStartDate(""); setEndDate(""); setReason(""); setTeacherId(""); } }
-    );
-  }
-
-  function handleDecide(id: number, decision: "approve" | "reject") {
-    setDecidingId(String(id));
-    decide.mutate(
-      { leaveRequestId: id, decision, academicYear: decision === "approve" ? DEFAULT_ACADEMIC_YEAR : undefined },
-      { onSettled: () => setDecidingId(null) }
-    );
-  }
-
-  const teacherName = (id: number) => lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`;
-
-  return (
-    <div className="grid items-start gap-3 lg:grid-cols-[22rem_1fr]">
-      <Card className="h-fit">
-        <CardHeader>
-          <CardTitle>Request leave</CardTitle>
-          <CardDescription>
-            {isAdminLike ? "File on behalf of a teacher, or leave blank to file for yourself." : "Submit a leave request for approval."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          {isAdminLike && (
-            <Field label="Teacher (optional)">
-              <Select value={teacherId} onValueChange={setTeacherId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="File for myself" />
-                </SelectTrigger>
-                <SelectContent>
-                  {lookup.data?.teachers.map((t) => (
-                    <SelectItem key={t.id} value={String(t.id)}>
-                      {t.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-          )}
-          <Field label="Start date">
-            <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-          </Field>
-          <Field label="End date">
-            <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-          </Field>
-          <Field label="Reason">
-            <Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Feeling unwell" />
-          </Field>
-          <Button onClick={submitRequest} disabled={!startDate || !endDate || !reason || requestLeave.isPending} className="self-start">
-            <CalendarPlus className="h-4 w-4" />
-            {requestLeave.isPending ? "Submitting…" : "Submit request"}
-          </Button>
-          {requestLeave.isError && (
-            <p className="text-sm text-urgent">{requestLeave.error instanceof ApiError ? requestLeave.error.message : "Request failed."}</p>
-          )}
-        </CardContent>
-      </Card>
-
-      <div className="flex flex-col gap-2">
-        {requests.isLoading && <div className="h-24 animate-pulse rounded-lg bg-elevated/60" />}
-        {requests.data?.length === 0 && (
-          <Card>
-            <CardContent className="py-8 text-center text-sm text-ink-muted">No leave requests yet.</CardContent>
-          </Card>
-        )}
-        {requests.data?.map((lr: LeaveRequest) => (
-          <EntityCard
-            key={lr.id}
-            icon={CalendarClock}
-            tone={STATUS_TONE[lr.status]}
-            title={isAdminLike ? teacherName(lr.teacher_id) : `${lr.start_date} → ${lr.end_date}`}
-            badges={<Badge variant={lr.status === "pending" ? "warning" : lr.status === "approved" ? "positive" : "urgent"}>{lr.status}</Badge>}
-            message={
-              <>
-                {isAdminLike && (
-                  <span className="font-mono text-ink">
-                    {lr.start_date} → {lr.end_date}
-                  </span>
-                )}
-                {isAdminLike && " · "}
-                {lr.reason}
-              </>
-            }
-            meta={`Requested ${new Date(lr.requested_at).toLocaleDateString()}`}
-            actions={
-              isAdminLike && lr.status === "pending" ? (
-                <div className="flex gap-1.5">
-                  <Button size="sm" onClick={() => handleDecide(lr.id, "approve")} disabled={decidingId === String(lr.id)}>
-                    Approve
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => handleDecide(lr.id, "reject")} disabled={decidingId === String(lr.id)}>
-                    Reject
-                  </Button>
-                </div>
-              ) : isAdminLike && lr.status === "approved" ? (
-                <Button variant="outline" size="sm" onClick={() => onReviewSubstitutes(lr.id)}>
-                  <Users className="h-3.5 w-3.5" /> Substitutes
-                </Button>
-              ) : undefined
-            }
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SubstitutionCard({ sub, onConfirmed }: { sub: Substitution; onConfirmed: () => void }) {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+function SubstitutionCard({
+  schoolId,
+  sub,
+  onConfirmed,
+  readOnly = false,
+}: {
+  schoolId: number;
+  sub: Substitution;
+  onConfirmed: () => void;
+  readOnly?: boolean;
+}) {
+  const lookup = useReferenceLookup(schoolId);
   const confirm = useConfirmSubstitution();
   const [pickedTeacher, setPickedTeacher] = useState<string>(
     sub.substitute_teacher_id ? String(sub.substitute_teacher_id) : sub.candidates[0] ? String(sub.candidates[0].teacher_id) : ""
@@ -209,7 +98,7 @@ function SubstitutionCard({ sub, onConfirmed }: { sub: Substitution; onConfirmed
           ))}
         </div>
 
-        {!isConfirmed && sub.id && (
+        {!readOnly && !isConfirmed && sub.id && (
           <div className="flex flex-wrap items-end gap-2">
             <Field label="Confirm substitute" className="min-w-[12rem] flex-1">
               <Select value={pickedTeacher} onValueChange={setPickedTeacher}>
@@ -233,6 +122,9 @@ function SubstitutionCard({ sub, onConfirmed }: { sub: Substitution; onConfirmed
         {isConfirmed && sub.substitute_teacher_id && (
           <p className="text-sm text-positive">Confirmed: {teacherName(sub.substitute_teacher_id)}</p>
         )}
+        {!isConfirmed && readOnly && sub.substitute_teacher_id && (
+          <p className="text-sm text-ink-muted">Suggested (not yet confirmed): {teacherName(sub.substitute_teacher_id)}</p>
+        )}
         {confirm.data?.conflicts && confirm.data.conflicts.length > 0 && (
           <p className="text-sm text-urgent">{confirm.data.conflicts.map((c) => c.message).join("; ")}</p>
         )}
@@ -241,105 +133,422 @@ function SubstitutionCard({ sub, onConfirmed }: { sub: Substitution; onConfirmed
   );
 }
 
-function SubstitutionsTab({ initialLeaveRequestId }: { initialLeaveRequestId: number | null }) {
-  const [leaveRequestId, setLeaveRequestId] = useState<string>(initialLeaveRequestId ? String(initialLeaveRequestId) : "");
-  const suggest = useSuggestSubstitutions();
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
-
-  const preview = useSubstituteSuggestionsPreview();
-  const [previewTeacher, setPreviewTeacher] = useState("");
-  const [previewDate, setPreviewDate] = useState(() => new Date().toISOString().slice(0, 10));
-
-  function loadSubstitutions() {
-    if (!leaveRequestId) return;
-    suggest.mutate({ leave_request_id: Number(leaveRequestId), academic_year: DEFAULT_ACADEMIC_YEAR });
-  }
+/** Shows the real, persisted Substitution rows for a leave request directly
+ * on its card - both roles (the backend allows the owning teacher to read
+ * their own leave request's substitutions, not just admin/principal) - so
+ * neither role has to copy an id into a separate lookup to see coverage.
+ * Collapsed by default (a leave request may have many slots); the query
+ * only fires once expanded. */
+function InlineSubstitutions({
+  schoolId,
+  leaveRequestId,
+  readOnly,
+}: {
+  schoolId: number;
+  leaveRequestId: number;
+  readOnly: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const subs = useLeaveRequestSubstitutions({ leaveRequestId, academicYear: DEFAULT_ACADEMIC_YEAR, enabled: expanded });
 
   return (
-    <div className="flex flex-col gap-3">
-      <Card>
-        <CardHeader>
-          <CardTitle>Review substitutes for a leave request</CardTitle>
-          <CardDescription>
-            Pulls the persisted substitution rows auto-created on approval (one per affected timetable slot) so they can be confirmed.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-wrap items-end gap-3">
-          <Field label="Leave request ID" className="w-48">
-            <Input type="number" value={leaveRequestId} onChange={(e) => setLeaveRequestId(e.target.value)} placeholder="e.g. 12" />
-          </Field>
-          <Button onClick={loadSubstitutions} disabled={!leaveRequestId || suggest.isPending}>
-            {suggest.isPending ? "Loading…" : "Load substitutions"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      {suggest.isSuccess && suggest.data.substitutions.length === 0 && (
-        <p className="text-sm text-ink-muted">No affected timetable slots for this leave request.</p>
-      )}
-      {suggest.isSuccess && (
-        <div className="grid gap-3 md:grid-cols-2">
-          {suggest.data.substitutions.map((sub) => (
-            <SubstitutionCard key={sub.id ?? `${sub.timetable_slot_id}`} sub={sub} onConfirmed={loadSubstitutions} />
-          ))}
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((e) => !e)}
+        className="flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+      >
+        {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        {expanded ? "Hide substitutes" : "Show substitutes"}
+      </button>
+      {expanded && (
+        <div className="mt-2 flex flex-col gap-2">
+          {subs.isLoading && <div className="h-16 animate-pulse rounded-lg bg-elevated/60" />}
+          {subs.isError && (
+            <p className="text-xs text-urgent">
+              {subs.error instanceof ApiError ? subs.error.message : "Failed to load substitutes."}
+            </p>
+          )}
+          {subs.isSuccess && subs.data.substitutions.length === 0 && (
+            <p className="text-xs text-ink-muted">No affected timetable slots for this leave request.</p>
+          )}
+          {subs.isSuccess &&
+            subs.data.substitutions.map((sub) => (
+              <SubstitutionCard
+                key={sub.id ?? `${sub.timetable_slot_id}`}
+                schoolId={schoolId}
+                sub={sub}
+                onConfirmed={() => subs.refetch()}
+                readOnly={readOnly}
+              />
+            ))}
         </div>
       )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Preview coverage for a teacher/date</CardTitle>
-          <CardDescription>Read-only exploration — nothing persisted, no leave request needed.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-end gap-3">
-            <Field label="Teacher" className="w-56">
-              <Select value={previewTeacher} onValueChange={setPreviewTeacher}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select teacher" />
-                </SelectTrigger>
-                <SelectContent>
-                  {lookup.data?.teachers.map((t) => (
-                    <SelectItem key={t.id} value={String(t.id)}>
-                      {t.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field label="Date" className="w-40">
-              <Input type="date" value={previewDate} onChange={(e) => setPreviewDate(e.target.value)} />
-            </Field>
-            <Button
-              variant="outline"
-              onClick={() => previewTeacher && preview.mutate({ teacherId: Number(previewTeacher), date: previewDate, academicYear: DEFAULT_ACADEMIC_YEAR })}
-              disabled={!previewTeacher || preview.isPending}
-            >
-              {preview.isPending ? "Loading…" : "Preview"}
-            </Button>
-          </div>
-          {preview.isSuccess && preview.data.slots.length === 0 && <p className="text-xs text-ink-muted">No slots for that teacher/date.</p>}
-          {preview.isSuccess &&
-            preview.data.slots.map((slot) => (
-              <div key={slot.timetable_slot_id} className="rounded-xl border border-border bg-elevated/40 p-3.5 text-sm">
-                <span className="font-medium text-ink">Period {slot.period_number + 1}</span>
-                <div className="mt-1 flex flex-col gap-1">
-                  {slot.suggestions.map((c) => (
-                    <span key={c.teacher_id} className="font-mono text-xs text-ink-muted">
-                      {lookup.data?.teachers.find((t) => t.id === c.teacher_id)?.name ?? `Teacher #${c.teacher_id}`} — {(c.score * 100).toFixed(0)}%
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-        </CardContent>
-      </Card>
     </div>
   );
 }
 
-function ForecastTab() {
+// --- Teacher's own view: request form (unchanged) + own history -------------
+
+function TeacherLeaveView({ schoolId }: { schoolId: number }) {
+  const requests = useLeaveRequests();
+  const requestLeave = useRequestLeave();
+  const duties = useMySubstituteDuties();
+  const lookup = useReferenceLookup(schoolId);
+  const subjectName = (id: number) => lookup.data?.subjects.find((s) => s.id === id)?.name ?? `Subject #${id}`;
+  const className = (id: number) => lookup.data?.classes.find((c) => c.id === id)?.name ?? `Class #${id}`;
+  const teacherName = (id: number) => lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`;
+
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [reason, setReason] = useState("");
+
+  function submitRequest() {
+    if (!startDate || !endDate || !reason) return;
+    requestLeave.mutate(
+      { start_date: startDate, end_date: endDate, reason },
+      { onSuccess: () => { setStartDate(""); setEndDate(""); setReason(""); } }
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {(duties.data?.length ?? 0) > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Your substitute duties</CardTitle>
+            <CardDescription>Classes you're covering for another teacher's approved leave.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            {duties.data!.map((duty) => (
+              <div
+                key={duty.substitution_id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-elevated/40 px-3.5 py-2.5 text-sm"
+              >
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="font-medium text-ink">{subjectName(duty.subject_id)}</span>
+                  <span className="text-ink-muted">{className(duty.class_id)}</span>
+                  <span className="font-mono text-xs text-ink-muted">
+                    {DAY_LABELS[duty.day_of_week]} · Period {duty.period_number + 1}
+                  </span>
+                  <span className="text-xs text-ink-muted">
+                    covering for {teacherName(duty.original_teacher_id)} ({duty.leave_start_date} → {duty.leave_end_date})
+                  </span>
+                </div>
+                <Badge variant={duty.status === "confirmed" ? "positive" : "accent"}>{duty.status}</Badge>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      <div className="grid items-start gap-3 lg:grid-cols-[22rem_1fr]">
+      <Card className="h-fit">
+        <CardHeader>
+          <CardTitle>Request leave</CardTitle>
+          <CardDescription>Submit a leave request for approval.</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <Field label="Start date">
+            <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </Field>
+          <Field label="End date">
+            <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          </Field>
+          <Field label="Reason">
+            <Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Feeling unwell" />
+          </Field>
+          <Button onClick={submitRequest} disabled={!startDate || !endDate || !reason || requestLeave.isPending} className="self-start">
+            <CalendarPlus className="h-4 w-4" />
+            {requestLeave.isPending ? "Submitting…" : "Submit request"}
+          </Button>
+          {requestLeave.isError && (
+            <p className="text-sm text-urgent">{requestLeave.error instanceof ApiError ? requestLeave.error.message : "Request failed."}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="flex flex-col gap-2">
+        {requests.isLoading && <div className="h-24 animate-pulse rounded-lg bg-elevated/60" />}
+        {requests.data?.length === 0 && (
+          <Card>
+            <CardContent className="py-8 text-center text-sm text-ink-muted">No leave requests yet.</CardContent>
+          </Card>
+        )}
+        {requests.data?.map((lr: LeaveRequest) => (
+          <EntityCard
+            key={lr.id}
+            icon={CalendarClock}
+            tone={STATUS_TONE[lr.status]}
+            title={`${lr.start_date} → ${lr.end_date}`}
+            badges={<Badge variant={lr.status === "pending" ? "warning" : lr.status === "approved" ? "positive" : "urgent"}>{lr.status}</Badge>}
+            message={lr.reason}
+            meta={`Requested ${new Date(lr.requested_at).toLocaleDateString()}`}
+          >
+            {lr.status === "approved" && <InlineSubstitutions schoolId={schoolId} leaveRequestId={lr.id} readOnly />}
+          </EntityCard>
+        ))}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Admin/principal view: approval queue is the primary content ------------
+
+/** Secondary action, collapsed by default - filing on behalf of a teacher is
+ * real but deliberately not the page's main content for this role, and a
+ * teacher selection is REQUIRED (no blank/"file for myself" state is ever
+ * reachable - submit stays disabled until a real teacher is chosen), so the
+ * old "admin submits with nothing selected" 400 is now structurally
+ * unreachable from this UI, not just hidden. */
+function FileOnBehalfForm({ schoolId }: { schoolId: number }) {
+  const [open, setOpen] = useState(false);
+  const lookup = useReferenceLookup(schoolId);
+  const requestLeave = useRequestLeave();
+  const [teacherId, setTeacherId] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [reason, setReason] = useState("");
+
+  const canSubmit = !!teacherId && !!startDate && !!endDate && !!reason;
+
+  function submit() {
+    if (!canSubmit) return;
+    requestLeave.mutate(
+      { teacher_id: Number(teacherId), start_date: startDate, end_date: endDate, reason },
+      {
+        onSuccess: () => {
+          setTeacherId("");
+          setStartDate("");
+          setEndDate("");
+          setReason("");
+          setOpen(false);
+        },
+      }
+    );
+  }
+
+  if (!open) {
+    return (
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+        <CalendarPlus className="h-3.5 w-3.5" /> File leave on behalf of a teacher
+      </Button>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">File leave on behalf of a teacher</CardTitle>
+        <CardDescription>A specific teacher must be selected - this always files for a real teacher, never for yourself.</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Teacher" className="w-56">
+            <Select value={teacherId} onValueChange={setTeacherId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select a teacher" />
+              </SelectTrigger>
+              <SelectContent>
+                {lookup.data?.teachers.map((t) => (
+                  <SelectItem key={t.id} value={String(t.id)}>
+                    {t.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Start date" className="w-40">
+            <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          </Field>
+          <Field label="End date" className="w-40">
+            <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          </Field>
+          <Field label="Reason" className="w-56">
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Feeling unwell" />
+          </Field>
+          <Button size="sm" onClick={submit} disabled={!canSubmit || requestLeave.isPending}>
+            {requestLeave.isPending ? "Submitting…" : "Submit"}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+        </div>
+        {requestLeave.isError && (
+          <p className="text-sm text-urgent">{requestLeave.error instanceof ApiError ? requestLeave.error.message : "Request failed."}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function AdminLeaveApprovalView({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
+  const requests = useLeaveRequests();
+  const decide = useDecideLeaveRequest();
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+
+  function handleDecide(id: number, decision: "approve" | "reject") {
+    setDecidingId(String(id));
+    decide.mutate(
+      { leaveRequestId: id, decision, academicYear: decision === "approve" ? DEFAULT_ACADEMIC_YEAR : undefined },
+      { onSettled: () => setDecidingId(null) }
+    );
+  }
+
+  const teacherName = (id: number) => lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`;
+
+  const pending = requests.data?.filter((r) => r.status === "pending") ?? [];
+  const decided = requests.data?.filter((r) => r.status !== "pending") ?? [];
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-display text-sm font-semibold text-ink">Pending approval ({pending.length})</h3>
+        <FileOnBehalfForm schoolId={schoolId} />
+      </div>
+
+      {requests.isLoading && <div className="h-24 animate-pulse rounded-lg bg-elevated/60" />}
+      {!requests.isLoading && pending.length === 0 && (
+        <Card>
+          <CardContent className="py-8 text-center text-sm text-ink-muted">No pending leave requests.</CardContent>
+        </Card>
+      )}
+      <div className="flex flex-col gap-2">
+        {pending.map((lr) => (
+          <EntityCard
+            key={lr.id}
+            icon={CalendarClock}
+            tone="warning"
+            title={teacherName(lr.teacher_id)}
+            badges={<Badge variant="warning">pending</Badge>}
+            message={
+              <>
+                <span className="font-mono text-ink">
+                  {lr.start_date} → {lr.end_date}
+                </span>{" "}
+                · {lr.reason}
+              </>
+            }
+            meta={`Requested ${new Date(lr.requested_at).toLocaleDateString()}`}
+            actions={
+              <div className="flex gap-1.5">
+                <Button size="sm" onClick={() => handleDecide(lr.id, "approve")} disabled={decidingId === String(lr.id)}>
+                  Approve
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => handleDecide(lr.id, "reject")} disabled={decidingId === String(lr.id)}>
+                  Reject
+                </Button>
+              </div>
+            }
+          />
+        ))}
+      </div>
+
+      <div className="mt-2 flex flex-col gap-2">
+        <h3 className="font-display text-sm font-semibold text-ink-muted">Decided ({decided.length})</h3>
+        {decided.length === 0 && <p className="text-sm text-ink-faint">No decided requests yet.</p>}
+        {decided.map((lr) => (
+          <EntityCard
+            key={lr.id}
+            icon={CalendarClock}
+            tone={STATUS_TONE[lr.status]}
+            title={teacherName(lr.teacher_id)}
+            badges={<Badge variant={lr.status === "approved" ? "positive" : "urgent"}>{lr.status}</Badge>}
+            message={
+              <>
+                <span className="font-mono text-ink">
+                  {lr.start_date} → {lr.end_date}
+                </span>{" "}
+                · {lr.reason}
+              </>
+            }
+            meta={`Requested ${new Date(lr.requested_at).toLocaleDateString()}`}
+          >
+            {lr.status === "approved" && <InlineSubstitutions schoolId={schoolId} leaveRequestId={lr.id} readOnly={false} />}
+          </EntityCard>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LeaveRequestsTab({ schoolId }: { schoolId: number }) {
+  const { role } = useAuthStore();
+  const isAdminLike = role === "admin" || role === "principal";
+  return isAdminLike ? <AdminLeaveApprovalView schoolId={schoolId} /> : <TeacherLeaveView schoolId={schoolId} />;
+}
+
+// --- Coverage preview (read-only, hypothetical teacher/date exploration) ----
+
+function CoveragePreviewTab({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
+  const preview = useSubstituteSuggestionsPreview();
+  const [previewTeacher, setPreviewTeacher] = useState("");
+  const [previewDate, setPreviewDate] = useState(() => new Date().toISOString().slice(0, 10));
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Preview coverage for a teacher/date</CardTitle>
+        <CardDescription>
+          Read-only exploration — nothing persisted, no leave request needed. For a real leave request's actual
+          substitutes, expand "Show substitutes" on its card in Leave Requests instead.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-end gap-3">
+          <Field label="Teacher" className="w-56">
+            <Select value={previewTeacher} onValueChange={setPreviewTeacher}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select teacher" />
+              </SelectTrigger>
+              <SelectContent>
+                {lookup.data?.teachers.map((t) => (
+                  <SelectItem key={t.id} value={String(t.id)}>
+                    {t.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Date" className="w-40">
+            <Input type="date" value={previewDate} onChange={(e) => setPreviewDate(e.target.value)} />
+          </Field>
+          <Button
+            variant="outline"
+            onClick={() => previewTeacher && preview.mutate({ teacherId: Number(previewTeacher), date: previewDate, academicYear: DEFAULT_ACADEMIC_YEAR })}
+            disabled={!previewTeacher || preview.isPending}
+          >
+            {preview.isPending ? "Loading…" : "Preview"}
+          </Button>
+        </div>
+        {preview.isSuccess && preview.data.slots.length === 0 && <p className="text-xs text-ink-muted">No slots for that teacher/date.</p>}
+        {preview.isSuccess &&
+          preview.data.slots.map((slot) => (
+            <div key={slot.timetable_slot_id} className="rounded-xl border border-border bg-elevated/40 p-3.5 text-sm">
+              <span className="font-medium text-ink">Period {slot.period_number + 1}</span>
+              <div className="mt-1 flex flex-col gap-1">
+                {slot.suggestions.map((c) => (
+                  <span key={c.teacher_id} className="font-mono text-xs text-ink-muted">
+                    {lookup.data?.teachers.find((t) => t.id === c.teacher_id)?.name ?? `Teacher #${c.teacher_id}`} — {(c.score * 100).toFixed(0)}%
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+// --- Forecast -----------------------------------------------------------------
+
+function ForecastTab({ schoolId }: { schoolId: number }) {
   const [weekStart, setWeekStart] = useState(mondayOfThisWeek());
-  const forecast = useStaffingForecast({ schoolId: DEMO_SCHOOL_ID, weekStart });
+  const forecast = useStaffingForecast({ schoolId, weekStart });
+  const insufficientData = forecast.data?.data_sufficient === false;
 
   return (
     <Card>
@@ -352,15 +561,24 @@ function ForecastTab() {
           <Input type="date" value={weekStart} onChange={(e) => setWeekStart(e.target.value)} />
         </Field>
         {forecast.isLoading && <div className="h-24 animate-pulse rounded-lg bg-elevated/60" />}
+        {insufficientData && (
+          <div className="flex items-start gap-2 rounded-xl border border-border bg-elevated/40 px-3.5 py-2.5 text-sm text-ink-muted">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-ink-faint" />
+            <span>
+              Insufficient historical data for a confident forecast — only a handful of approved leave requests exist
+              for this school so far. The numbers below are shown for reference only, not as a reliable prediction.
+            </span>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           {forecast.data?.forecast.map((day) => (
             <StatTile
               key={day.date}
               label={new Date(day.date).toLocaleDateString(undefined, { weekday: "short", day: "numeric" })}
               value={day.predicted_absences.toFixed(1)}
-              caption={day.risk_level}
+              caption={insufficientData ? "insufficient data" : day.risk_level}
               icon={TrendingUp}
-              tone={day.risk_level === "high" ? "urgent" : day.risk_level === "medium" ? "warning" : "positive"}
+              tone={insufficientData ? "neutral" : day.risk_level === "high" ? "urgent" : day.risk_level === "medium" ? "warning" : "positive"}
             />
           ))}
         </div>
@@ -372,37 +590,36 @@ function ForecastTab() {
 export default function StaffingPage() {
   const { role } = useAuthStore();
   const isAdminLike = role === "admin" || role === "principal";
-  const [reviewLeaveId, setReviewLeaveId] = useState<number | null>(null);
   const [tab, setTab] = useState("requests");
+  const schoolId = useCurrentUser().data?.school_id;
 
   return (
     <div className="flex flex-col gap-3">
       <PageHeader title="Staffing & Substitutes" description="Leave requests, approvals, and AI-suggested substitute coverage." />
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList>
-          <TabsTrigger value="requests">Leave Requests</TabsTrigger>
-          {isAdminLike && <TabsTrigger value="substitutions">Substitutions</TabsTrigger>}
-          {isAdminLike && <TabsTrigger value="forecast">Forecast</TabsTrigger>}
-        </TabsList>
-        <TabsContent value="requests">
-          <LeaveRequestsTab
-            onReviewSubstitutes={(id) => {
-              setReviewLeaveId(id);
-              setTab("substitutions");
-            }}
-          />
-        </TabsContent>
-        {isAdminLike && (
-          <TabsContent value="substitutions">
-            <SubstitutionsTab initialLeaveRequestId={reviewLeaveId} />
+      {schoolId == null ? (
+        <div className="h-40 animate-pulse rounded-2xl bg-elevated/60" />
+      ) : (
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList>
+            <TabsTrigger value="requests">Leave Requests</TabsTrigger>
+            {isAdminLike && <TabsTrigger value="preview">Coverage Preview</TabsTrigger>}
+            {isAdminLike && <TabsTrigger value="forecast">Forecast</TabsTrigger>}
+          </TabsList>
+          <TabsContent value="requests">
+            <LeaveRequestsTab schoolId={schoolId} />
           </TabsContent>
-        )}
-        {isAdminLike && (
-          <TabsContent value="forecast">
-            <ForecastTab />
-          </TabsContent>
-        )}
-      </Tabs>
+          {isAdminLike && (
+            <TabsContent value="preview">
+              <CoveragePreviewTab schoolId={schoolId} />
+            </TabsContent>
+          )}
+          {isAdminLike && (
+            <TabsContent value="forecast">
+              <ForecastTab schoolId={schoolId} />
+            </TabsContent>
+          )}
+        </Tabs>
+      )}
     </div>
   );
 }

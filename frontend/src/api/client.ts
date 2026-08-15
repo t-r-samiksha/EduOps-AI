@@ -10,22 +10,30 @@ async function authHeaders(): Promise<HeadersInit> {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The raw parsed JSON error body (usually `{ detail: ... }`), when the
+   * response had one - callers that need structured error detail (e.g. the
+   * timetable generator's preflight/solve failure findings, not just a
+   * flattened string) should read this instead of re-parsing `message`. */
+  body: unknown;
+  constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = res.statusText;
+    let body: unknown;
     try {
-      const body = await res.json();
-      detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
+      body = await res.json();
+      const parsed = body as { detail?: unknown };
+      detail = typeof parsed.detail === "string" ? parsed.detail : JSON.stringify(parsed.detail ?? body);
     } catch {
       // no JSON body
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, detail, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -74,6 +82,14 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
     method: "PATCH",
     headers: { ...(await authHeaders()), "Content-Type": "application/json" },
     body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  return handle<T>(res);
+}
+
+export async function apiDelete<T>(path: string): Promise<T> {
+  const res = await fetch(API_BASE_URL + path, {
+    method: "DELETE",
+    headers: await authHeaders(),
   });
   return handle<T>(res);
 }

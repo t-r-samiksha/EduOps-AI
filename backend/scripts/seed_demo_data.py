@@ -105,7 +105,14 @@ from app.models.role import Role
 from app.models.school import School
 from app.models.staffing import LeaveRequest
 from app.models.subject import Subject
-from app.models.timetable import ClassSubjectRequirement, Room, SubjectRoomRequirement, TeacherSubject, TeacherUnavailability
+from app.models.timetable import (
+    ClassSubjectRequirement,
+    Room,
+    SubjectRoomRequirement,
+    TeacherProfile,
+    TeacherSubject,
+    TeacherUnavailability,
+)
 from app.models.user import User
 
 SCHOOL_NAME = "EduOps Demo School"
@@ -127,6 +134,10 @@ TEACHER_SUBJECTS = {
     5: ["Science"],
     6: ["English"],
 }
+DEFAULT_MAX_PERIODS_PER_WEEK = 24
+"""TeacherProfile default - a realistic middle-school weekly load, comfortably
+under a 5-day x 6-period=30-slot ceiling so the solver has real room to route
+around it rather than every teacher being maxed out by construction."""
 
 CLASS_NAMES = ["Class 8A", "Class 8B"]
 CLASS_TEACHER_INDEX = {"Class 8A": 1, "Class 8B": 2}
@@ -355,6 +366,14 @@ def seed(session: Session, counts: dict[str, int]) -> dict:
         track(created, "teachers")
         teachers[i] = teacher
 
+        _profile, created = get_or_create(
+            session,
+            TeacherProfile,
+            teacher_id=teacher.id,
+            defaults={"max_periods_per_week": DEFAULT_MAX_PERIODS_PER_WEEK},
+        )
+        track(created, "teacher_profiles")
+
         for subject_name in TEACHER_SUBJECTS[i]:
             _ts, created = get_or_create(
                 session, TeacherSubject, teacher_id=teacher.id, subject_id=subjects[subject_name].id
@@ -549,6 +568,7 @@ def _print_summary(session: Session, counts: dict[str, int], data: dict) -> None
         "subjects": Subject,
         "classes": SchoolClass,
         "rooms": Room,
+        "teacher_profiles": TeacherProfile,
         "teacher_subjects": TeacherSubject,
         "teacher_unavailabilities": TeacherUnavailability,
         "class_subject_requirements": ClassSubjectRequirement,

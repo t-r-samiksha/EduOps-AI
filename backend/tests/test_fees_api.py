@@ -127,6 +127,18 @@ def test_create_schedule_404_for_missing_class(client, seed):
     assert resp.status_code == 404
 
 
+def test_create_schedule_returns_clean_400_for_unknown_school_id(client, seed):
+    """Regression test: a bogus school_id used to reach the INSERT and raise an
+    unhandled IntegrityError (a real 500 in production) - see the reliability
+    audit's finding. Must now be a clean 400, not a 500/unhandled exception."""
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        "/admin/fees/schedules",
+        json={"school_id": 999999999, "academic_year": ACADEMIC_YEAR, "fee_type": "tuition", "amount": 100, "due_date": "2026-09-01"},
+    )
+    assert resp.status_code == 400
+
+
 # --- POST /admin/fees/reminders ---
 
 

@@ -13,7 +13,8 @@ import EntityCard from "@/components/shared/EntityCard";
 import StatTile from "@/components/shared/StatTile";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useFeeSchedules, useCreateFeeSchedule, useFeeStatus, useTriggerReminders, useRecordPayment } from "@/api/hooks/useFees";
-import { DEMO_SCHOOL_ID, DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
+import { useCurrentUser } from "@/api/hooks/useAuth";
+import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { ApiError } from "@/api/client";
 import type { FeeStatusItem } from "@/api/types";
 
@@ -26,9 +27,9 @@ const STATUS_TONE: Record<string, "urgent" | "positive" | "warning" | "neutral">
 
 const STATUS_FILTERS = ["all", "pending", "partial", "paid", "overdue"] as const;
 
-function SchedulesTab() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
-  const schedules = useFeeSchedules({ schoolId: DEMO_SCHOOL_ID });
+function SchedulesTab({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
+  const schedules = useFeeSchedules({ schoolId });
   const create = useCreateFeeSchedule();
 
   const [classId, setClassId] = useState("");
@@ -43,7 +44,7 @@ function SchedulesTab() {
     if (!feeType.trim() || !amount || !dueDate) return;
     create.mutate(
       {
-        school_id: DEMO_SCHOOL_ID,
+        school_id: schoolId,
         class_id: classId ? Number(classId) : undefined,
         academic_year: academicYear,
         fee_type: feeType,
@@ -167,8 +168,8 @@ function PaymentDialog({ item }: { item: FeeStatusItem }) {
   );
 }
 
-function StatusTab() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+function StatusTab({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
   const [classId, setClassId] = useState("");
   const [statusFilter, setStatusFilter] = useState<(typeof STATUS_FILTERS)[number]>("all");
   const status = useFeeStatus({ classId: classId ? Number(classId) : undefined, status: statusFilter === "all" ? undefined : statusFilter });
@@ -242,8 +243,8 @@ function StatusTab() {
   );
 }
 
-function RemindersTab() {
-  const lookup = useReferenceLookup(DEMO_SCHOOL_ID);
+function RemindersTab({ schoolId }: { schoolId: number }) {
+  const lookup = useReferenceLookup(schoolId);
   const [classId, setClassId] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(true);
   const trigger = useTriggerReminders();
@@ -302,25 +303,31 @@ function RemindersTab() {
 }
 
 export default function FeesPage() {
+  const schoolId = useCurrentUser().data?.school_id;
+
   return (
     <div className="flex flex-col gap-3">
       <PageHeader title="Fees" description="Fee schedules, per-student status, reminders, and payment reconciliation." />
-      <Tabs defaultValue="status">
-        <TabsList>
-          <TabsTrigger value="status">Status</TabsTrigger>
-          <TabsTrigger value="schedules">Schedules</TabsTrigger>
-          <TabsTrigger value="reminders">Reminders</TabsTrigger>
-        </TabsList>
-        <TabsContent value="status">
-          <StatusTab />
-        </TabsContent>
-        <TabsContent value="schedules">
-          <SchedulesTab />
-        </TabsContent>
-        <TabsContent value="reminders">
-          <RemindersTab />
-        </TabsContent>
-      </Tabs>
+      {schoolId == null ? (
+        <div className="h-40 animate-pulse rounded-2xl bg-elevated/60" />
+      ) : (
+        <Tabs defaultValue="status">
+          <TabsList>
+            <TabsTrigger value="status">Status</TabsTrigger>
+            <TabsTrigger value="schedules">Schedules</TabsTrigger>
+            <TabsTrigger value="reminders">Reminders</TabsTrigger>
+          </TabsList>
+          <TabsContent value="status">
+            <StatusTab schoolId={schoolId} />
+          </TabsContent>
+          <TabsContent value="schedules">
+            <SchedulesTab schoolId={schoolId} />
+          </TabsContent>
+          <TabsContent value="reminders">
+            <RemindersTab schoolId={schoolId} />
+          </TabsContent>
+        </Tabs>
+      )}
     </div>
   );
 }

@@ -208,6 +208,21 @@ def test_create_exam_404_for_missing_subject(client, seed):
     assert resp.status_code == 404
 
 
+def test_create_exam_returns_clean_400_for_unknown_school_id(client, seed):
+    """Regression test: subject_id/class_id were validated but school_id wasn't -
+    a bogus school_id used to reach the INSERT and raise an unhandled
+    IntegrityError (see the reliability audit's finding)."""
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        "/admin/exams",
+        json={
+            "school_id": 999999999, "subject_id": seed["subject"].id, "class_id": seed["class"].id,
+            "academic_year": ACADEMIC_YEAR, "exam_date": str(EXAM_DATE), "start_time": "09:00:00", "end_time": "11:00:00",
+        },
+    )
+    assert resp.status_code == 400
+
+
 # --- POST /admin/exams/{id}/schedules: real feasibility proof ---
 
 

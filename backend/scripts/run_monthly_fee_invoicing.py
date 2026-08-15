@@ -2,12 +2,14 @@
 FeeSchedules for a school/academic_year, then marks past-due records overdue and
 runs the reminder cadence heuristic against them.
 
-SCHEDULING - same finding as every prior session, trusted rather than re-verified
-------------------------------------------------------------------------------------
-No Celery, Dramatiq, Huey, APScheduler, or other job-scheduling infrastructure
-exists anywhere in this repo. Same dependency-free-script pattern as
-scripts/run_nightly_risk_scoring.py: `run_monthly_invoicing()` is a pure function of
-(Session, school_id, academic_year); `main()` is a thin CLI wrapper:
+SCHEDULING - now real, wired into APScheduler (was manual-only for several sessions)
+--------------------------------------------------------------------------------------
+`run_monthly_invoicing()` (below) now runs automatically at 03:00 UTC on the 1st
+of every month, for every active school/academic_year, via `app/scheduler.py`'s
+`run_monthly_fee_invoicing_job()` - started in `app/main.py`'s FastAPI lifespan.
+`run_monthly_invoicing()` itself is unchanged: still a pure function of
+(Session, school_id, academic_year); `main()` below remains a thin CLI wrapper
+for manual/on-demand invocation:
 `python -m scripts.run_monthly_fee_invoicing --school-id 41 --academic-year 2026-27`.
 
 WHAT IT DOES

@@ -161,6 +161,18 @@ def test_request_leave_403_for_student_role(client):
     assert resp.status_code == 403
 
 
+def test_request_leave_returns_404_for_unknown_teacher_id_when_filed_on_behalf(client):
+    """Regression test: an admin filing on behalf of a bogus teacher_id used to
+    reach the INSERT and raise an unhandled IntegrityError (see the reliability
+    audit's finding) instead of a clean 404."""
+    _override_user("admin")
+    resp = client.post(
+        "/staff/request_leave",
+        json={"teacher_id": 999999999, "start_date": "2026-08-10", "end_date": "2026-08-10", "reason": "sick"},
+    )
+    assert resp.status_code == 404
+
+
 def test_approve_leave_401_without_token(client):
     resp = client.put("/staff/approve_leave", json={"leave_request_id": 1, "decision": "approved"})
     assert resp.status_code == 401
@@ -177,9 +189,19 @@ def test_suggest_401_without_token(client):
     assert resp.status_code == 401
 
 
-def test_suggest_403_for_teacher_role(client):
-    _override_user("teacher")
-    resp = client.post("/substitution/suggest", json={"leave_request_id": 1})
+def test_suggest_mode_b_403_for_teacher_role(client, seed):
+    # Mode B (arbitrary teacher_id + date range) stays admin/principal-only -
+    # a teacher must not be able to probe a COLLEAGUE's schedule/candidates.
+    _override_user("teacher", user_id=seed["good_sub"].id)
+    resp = client.post(
+        "/substitution/suggest",
+        json={
+            "teacher_id": seed["original_teacher"].id,
+            "start_date": "2026-08-10",
+            "end_date": "2026-08-10",
+            "academic_year": ACADEMIC_YEAR,
+        },
+    )
     assert resp.status_code == 403
 
 
@@ -366,6 +388,46 @@ def test_suggest_requires_leave_request_id_or_full_date_range(client, seed):
     assert resp.status_code == 400
 
 
+def test_suggest_leave_request_mode_allows_the_owning_teacher(client, seed):
+    """Backs the Staffing page's inline substitutions view: a teacher must be
+    able to see who's covering their OWN approved leave, using the exact
+    same real logic the admin's inline view uses - not a stripped-down copy."""
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2026-08-10", "end_date": "2026-08-10", "reason": "sick"}
+    )
+    leave_id = resp.json()["id"]
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    client.put("/staff/approve_leave", json={"leave_request_id": leave_id, "decision": "approved", "academic_year": ACADEMIC_YEAR})
+
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post("/substitution/suggest", json={"leave_request_id": leave_id, "academic_year": ACADEMIC_YEAR})
+    assert resp.status_code == 200
+    subs = resp.json()["substitutions"]
+    assert len(subs) == 1
+    assert subs[0]["substitute_teacher_id"] == seed["good_sub"].id
+
+
+def test_suggest_leave_request_mode_404_for_a_different_teachers_leave(client, seed):
+    """Regression guard: a teacher must never be able to view a COLLEAGUE's
+    leave/substitution data by guessing/incrementing a leave_request_id -
+    same 404-not-403 pattern as other cross-tenant/cross-owner checks in this
+    codebase, so the response doesn't even confirm the id is valid."""
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2026-08-10", "end_date": "2026-08-10", "reason": "sick"}
+    )
+    leave_id = resp.json()["id"]
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    client.put("/staff/approve_leave", json={"leave_request_id": leave_id, "decision": "approved", "academic_year": ACADEMIC_YEAR})
+
+    _override_user("teacher", user_id=seed["good_sub"].id)
+    resp = client.post("/substitution/suggest", json={"leave_request_id": leave_id, "academic_year": ACADEMIC_YEAR})
+    assert resp.status_code == 404
+
+
 # --- GET /staff/leave_requests: role scoping ---
 
 
@@ -437,9 +499,32 @@ def test_forecast_returns_seven_days_and_persists(client, db_session, seed):
     for day in body["forecast"]:
         assert day["risk_level"] in ("low", "medium", "high")
         assert day["predicted_absences"] >= 0
+    # Only 1 real historical leave event - not enough for a confident forecast
+    # (see staffing_forecast.MIN_SOURCE_LEAVE_EVENTS_FOR_CONFIDENCE), even
+    # though it mathematically produces a full 7-day set of numbers.
+    assert body["data_sufficient"] is False
 
     persisted = db_session.query(StaffingForecast).filter(StaffingForecast.school_id == seed["school"].id).all()
     assert len(persisted) == 7
+
+
+def test_forecast_data_sufficient_true_with_enough_real_history(client, db_session, seed):
+    for i, d in enumerate([date(2026, 6, 5), date(2026, 6, 12), date(2026, 6, 19), date(2026, 6, 26)]):
+        db_session.add(
+            LeaveRequest(
+                teacher_id=[seed["original_teacher"], seed["good_sub"], seed["busy_sub"], seed["unavailable_sub"]][i].id,
+                start_date=d,
+                end_date=d,
+                reason="hist",
+                status="approved",
+            )
+        )
+    db_session.commit()
+
+    _override_user("admin")
+    resp = client.get("/admin/staffing/forecast", params={"school_id": seed["school"].id, "week_start": "2026-08-10"})
+    assert resp.status_code == 200
+    assert resp.json()["data_sufficient"] is True
 
 
 # --- GET /admin/staffing/substitute-suggestions ---
@@ -467,3 +552,88 @@ def test_substitute_suggestions_empty_slots_for_day_teacher_does_not_teach(clien
     )
     assert resp.status_code == 200
     assert resp.json()["slots"] == []
+
+
+# --- GET /staff/my-substitute-duties ---------------------------------------------
+# Real gap: a teacher confirmed as someone else's substitute had no way to
+# discover it anywhere in their own UI - only the leave-taker and admin/
+# principal could see Substitution rows before this endpoint existed.
+
+
+def test_my_substitute_duties_401_without_token(client):
+    resp = client.get("/staff/my-substitute-duties")
+    assert resp.status_code == 401
+
+
+def test_my_substitute_duties_403_for_admin_role(client):
+    # Only teachers can ever be assigned as a substitute - this is a
+    # teacher-only view of duties assigned TO the caller, not an admin tool.
+    _override_user("admin")
+    resp = client.get("/staff/my-substitute-duties")
+    assert resp.status_code == 403
+
+
+def test_my_substitute_duties_returns_the_confirmed_assignment(client, seed):
+    # A future Monday (matches the seed slot's day_of_week=0) - must stay in
+    # the future relative to whenever this suite runs, unlike the OTHER new
+    # test below which deliberately uses a past date.
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2026-08-17", "end_date": "2026-08-17", "reason": "sick"}
+    )
+    leave_id = resp.json()["id"]
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.put(
+        "/staff/approve_leave", json={"leave_request_id": leave_id, "decision": "approved", "academic_year": ACADEMIC_YEAR}
+    )
+    sub_id = resp.json()["substitutions"][0]["id"]
+    client.put(f"/substitution/{sub_id}/confirm", json={})
+
+    # good_sub is the one confirmed as the substitute - they must see it.
+    _override_user("teacher", user_id=seed["good_sub"].id)
+    resp = client.get("/staff/my-substitute-duties")
+    assert resp.status_code == 200
+    duties = resp.json()
+    assert len(duties) == 1
+    duty = duties[0]
+    assert duty["original_teacher_id"] == seed["original_teacher"].id
+    assert duty["subject_id"] == seed["subject"].id
+    assert duty["class_id"] == seed["class"].id
+    assert duty["status"] == "confirmed"
+    assert duty["leave_start_date"] == "2026-08-17"
+    assert duty["leave_end_date"] == "2026-08-17"
+
+
+def test_my_substitute_duties_empty_for_a_teacher_not_assigned_as_anyones_substitute(client, seed):
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2026-08-17", "end_date": "2026-08-17", "reason": "sick"}
+    )
+    leave_id = resp.json()["id"]
+    _override_user("admin", user_id=seed["admin_user"].id)
+    client.put("/staff/approve_leave", json={"leave_request_id": leave_id, "decision": "approved", "academic_year": ACADEMIC_YEAR})
+
+    # unqualified_teacher was never suggested/confirmed as anyone's substitute.
+    _override_user("teacher", user_id=seed["unqualified_teacher"].id)
+    resp = client.get("/staff/my-substitute-duties")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_my_substitute_duties_excludes_leave_that_has_already_ended(client, db_session, seed):
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2020-01-06", "end_date": "2020-01-06", "reason": "sick"}
+    )
+    leave_id = resp.json()["id"]
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.put(
+        "/staff/approve_leave", json={"leave_request_id": leave_id, "decision": "approved", "academic_year": ACADEMIC_YEAR}
+    )
+    assert len(resp.json()["substitutions"]) == 1
+
+    _override_user("teacher", user_id=seed["good_sub"].id)
+    resp = client.get("/staff/my-substitute-duties")
+    assert resp.status_code == 200
+    assert resp.json() == []

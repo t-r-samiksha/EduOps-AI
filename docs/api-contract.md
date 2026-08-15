@@ -28,7 +28,35 @@ here outside the normal "agree in this doc first" flow._
 | ------ | ----------- | ----- | ------------------------------------ |
 | GET    | `/health`   | any   | Liveness check                       |
 | GET    | `/auth/me`  | any authenticated | Current user's identity + role |
+| POST   | `/auth/signup` | **public, no auth** | Real self-serve school + admin account signup |
 | GET    | `/reference/lookup` | any authenticated | Id -> name lookup for subjects/teachers/rooms/classes |
+
+#### `POST /auth/signup`
+**Public/unauthenticated by design** - this is how a school's first admin account
+gets created, so it can't itself require already being logged in. Creates, in order:
+(1) a real, login-capable Supabase Auth account (`app_metadata.role="admin"`, via the
+same `auth.admin.create_user` mechanism `POST /admin/teachers` uses), (2) a real
+`School` row, (3) a local `User` row linking the two - then signs in immediately
+server-side and returns a real `access_token` so the frontend never needs a separate
+login step after signup.
+- **Roles:** none (public)
+- **Request:** `{ "full_name": "Asha Rao", "email": "asha@newschool.example", "password": "correct horse battery staple", "school_name": "Riverside Public School" }`
+- **Response:**
+```json
+{ "access_token": "eyJ...", "user_id": 501, "school_id": 42, "email": "asha@newschool.example", "school_name": "Riverside Public School" }
+```
+- **Errors:** `400` empty `full_name`/`school_name` or `password` under 8 characters;
+  `409` email already registered (checked locally first, then propagated if Supabase
+  Auth itself already has the email even with no local row yet); `500` if the real
+  Supabase Auth account was created but the local `School`/`User` creation then failed
+  - the local half of the operation is rolled back cleanly in that case (no orphaned
+    `School`/`User` row), but the external Supabase Auth account itself can't be
+    un-created by our own DB transaction - the same accepted edge case documented on
+    `POST /admin/teachers`.
+- **No rate-limiting exists yet** for this genuinely public endpoint (no
+  slowapi/API-gateway layer in this repo) - a real, honestly-flagged gap. Every
+  attempt (success or failure) is logged via a dedicated `eduops.signup` logger so
+  abuse is at least visible after the fact.
 
 #### `GET /reference/lookup`
 **Not in the original Phase 0 stub - added out-of-turn during Person A's frontend
@@ -41,18 +69,51 @@ without this. Deliberately homed here rather than under Person A: it resolves id
 across subjects/teachers/rooms/classes/students, i.e. every domain's entities at once,
 so it doesn't belong to any single person's section. Read-only, not role-gated beyond
 authentication (these entities carry no sensitive data themselves).
+
+**Enriched for the timetable generation form (Stage 2 of the generation overhaul)**:
+`teachers[]`/`rooms[]`/`classes[]` gained extra fields below so the frontend can build
+a real teacher/room picker without a dedicated CRUD endpoint (still none - see
+CLAUDE.md's scope note on `TeacherProfile`/`TeacherSubject`/`Room` staying seed-script-
+managed). Additive only, existing consumers reading just `id`/`name` are unaffected.
 - **Roles:** any authenticated
 - **Query:** `?school_id=` (required)
 - **Response:**
 ```json
 {
-  "subjects": [ { "id": 3, "name": "Math" } ],
-  "teachers": [ { "id": 7, "name": "Demo Teacher 1" } ],
+  "subjects": [ { "id": 3, "name": "Math", "periods_per_week": 4, "lab_required": false } ],
+  "teachers": [
+    { "id": 7, "name": "Demo Teacher 1", "max_periods_per_week": 24, "subject_ids": [3, 5] }
+  ],
   "students": [ { "id": 103, "name": "Demo Student Class 8A #01" } ],
-  "rooms": [ { "id": 1, "name": "Room 12" } ],
-  "classes": [ { "id": 41, "name": "Class 8A" } ]
+  "rooms": [ { "id": 1, "name": "Room 12", "room_type": "classroom" } ],
+  "classes": [ { "id": 41, "name": "Class 8A", "grade_level": 8, "grade_label": null, "section": "A" } ]
 }
 ```
+- `subjects[].periods_per_week`/`lab_required`: real, persisted `Subject` master-data
+  defaults (School Management's Subjects tab - new this session, `Subject` previously
+  had neither field). `POST /timetable/generate`'s per-run `subjects[].periods_per_week`/
+  `lab_required` still exist and still win for that one run (a genuine one-off override,
+  e.g. an exam-term schedule needing different periods), but the frontend now
+  pre-fills them from these real defaults instead of an arbitrary hardcoded value
+  every time.
+- `teachers[].max_periods_per_week`: this teacher's stored `TeacherProfile` cap, or
+  `null` if they somehow have no profile row (shouldn't happen for seeded teachers).
+- `teachers[].subject_ids`: this teacher's real `TeacherSubject` qualifications.
+- `rooms[].room_type`: `"classroom"` or `"lab"` (matches `POST /timetable/generate`'s
+  `subjects[].lab_required` -> `_LAB_ROOM_TYPE` mapping).
+- `classes[].grade_level`/`section`: `null` only for a class whose name the migration's
+  backfill regex couldn't parse (none in seeded demo data).
+- `classes[].grade_label`: cosmetic display label for `grade_level`, e.g. `"LKG"` for
+  `grade_level=-2` - see `SchoolClass.grade_label`'s docstring for the full
+  Nursery=-3/LKG=-2/UKG=-1/Grade N=N convention. `null` for a plain numeric grade
+  (e.g. Grade 8) - display code should fall back to `f"Grade {grade_level}"` in that
+  case, never render `grade_level` directly (`"Grade -2"` is never correct).
+
+**Updated for real master-data CRUD (see Person A's "Master Data Management" section
+below)**: every list here (`subjects`/`teachers`/`rooms`/`classes`) now excludes
+deactivated rows by default (`is_active = false`) - this is what makes deactivating a
+teacher/room/subject/class actually stop it from being offered anywhere real input is
+collected, not just flip a column nothing reads.
 
 ## Person A — AI/algorithm core + admin/ops backbone
 
@@ -62,6 +123,86 @@ exam seating._
 
 This section is Person A's to extend — add/adjust endpoints here without touching
 Person B/C's sections below.
+
+### Master Data Management (School / Class / Subject / Room / Teacher)
+
+**New this session - closes the biggest gap found by a full reliability audit**:
+every Person A feature that references a `school_id`/`class_id`/`subject_id`/
+`room_id`/`teacher_id` previously assumed the row already existed via
+`backend/scripts/seed_demo_data.py`, with zero real endpoint for an admin to create
+one. `CLAUDE.md`'s prior scope note ("seed-script-managed, no CRUD API, by explicit
+user decision") is superseded by this session's explicit build request. A real
+school can now be onboarded from a literal empty database using only these
+endpoints (see CHECKPOINT 1's empirical proof in this session's own report).
+
+**Soft-delete only** - every entity has `is_active`, never a hard DELETE.
+`GET` list endpoints default to active-only rows; pass `?include_inactive=true` to
+see everything. Deactivating actually removes an entity from `GET /reference/lookup`
+and from being a valid id for `POST /timetable/generate` (400, not silently ignored).
+
+**Roles:** admin/principal only for every mutation below (create/update/deactivate/
+reactivate/add/remove). `School` creation has no additional ownership check beyond
+the role itself - any admin/principal can create a new school, which is what makes
+cold-start bootstrapping possible (there's no existing school to check against yet).
+
+- `backend/app/routers/master_data.py`: School, SchoolClass, Subject, Room -
+  straightforward CRUD, each following the same shape:
+  - `POST /admin/schools` | `/admin/classes` | `/admin/subjects` | `/admin/rooms`
+  - `GET /admin/schools` | `/admin/classes?school_id=` | `/admin/subjects?school_id=`
+    | `/admin/rooms?school_id=` (all accept `?include_inactive=true`)
+  - `GET .../{id}`, `PUT .../{id}` (partial update, only sent fields change)
+  - `PUT .../{id}/deactivate`, `PUT .../{id}/reactivate`
+  - `Subject` gained real `periods_per_week` (default `3`) and `lab_required`
+    (default `false`) columns this session (School Management page build) - real,
+    persisted master-data defaults, settable via `POST`/`PUT /admin/subjects`.
+    `POST /timetable/generate`'s per-run `subjects[]` override still exists and
+    still wins for that one run; the frontend now pre-fills from these instead
+    of a hardcoded value every time (see `GET /reference/lookup`'s own note).
+  - Every foreign key in a request body (`school_id`, `class_teacher_id`) is
+    validated with a clean `400 Unknown <field> <id>` before any write - never an
+    unhandled `IntegrityError`/500 (a gap this session's audit found and fixed here
+    and in three other pre-existing endpoints, see the "FK validation fixes" note
+    at the end of this section).
+  - `SchoolClass` gained `home_room_id` (nullable FK to `Room`) this session (the
+    timetable solver's room-pinning fix - see "Timetable optimization" below for
+    why). Settable via `POST`/`PUT /admin/classes`; unknown room id is a `400`, and
+    a room already claimed as another ACTIVE class's home room is also a `400`
+    (deactivating that other class frees the room for reuse) - two classes sharing
+    one home room would otherwise silently double-book it every non-lab period.
+
+- `backend/app/routers/teachers.py`: Teacher is a compound entity - a real,
+  login-capable Supabase Auth account (via `services/supabase_admin.py`'s
+  `auth.admin.create_user`, the SAME real mechanism used ad-hoc for `admin@sam.in`/
+  `test.*@eduopsai.test` in earlier sessions, now wired into a real endpoint instead
+  of a one-off script) + the local `users` row + `TeacherProfile` + `TeacherSubject`
+  qualifications + `TeacherUnavailability`.
+  - `POST /admin/teachers` - body: `{ school_id, email, password, full_name?,
+    max_periods_per_week?, subject_ids: [...], unavailability: [{day_of_week,
+    period_number, academic_year}] }`. `subject_ids`/`unavailability` are a
+    cold-start convenience - creates a REAL Supabase Auth account, `409` if the
+    email is already registered (locally or in Supabase Auth itself), `502` for any
+    other Supabase-side failure. `school_id`/`subject_ids` are validated locally
+    BEFORE the external Supabase call, so a bad request never creates an orphaned
+    auth account.
+  - `GET /admin/teachers?school_id=` (`?include_inactive=true`), `GET .../{id}`
+  - `PUT /admin/teachers/{id}` - scalar fields only (`full_name`,
+    `max_periods_per_week`)
+  - `PUT .../{id}/deactivate`, `PUT .../{id}/reactivate`
+  - `POST .../{id}/subjects?subject_id=` / `DELETE .../{id}/subjects/{subject_id}` -
+    **idempotent add/remove of ONE qualification** - adding a teacher's 4th subject
+    never requires resending the other 3. This is what makes "add to a school that
+    already has some real data" actually work, not just cold-start.
+  - `POST .../{id}/unavailability` (body: `{day_of_week, period_number,
+    academic_year}`) / `DELETE .../{id}/unavailability/{unavailability_id}` - same
+    idempotent add/remove pattern.
+
+**FK validation fixes (same session)**: the audit also found 4 pre-existing
+endpoints where one sibling FK field was validated but another wasn't, risking an
+unhandled `IntegrityError`/500 on a bad id - all fixed to return a clean `400`/`404`:
+`POST /admin/fees/schedules` (`school_id`), `POST /admin/exams` (`school_id`),
+`POST /staff/request_leave` (`teacher_id` when an admin/principal files on another
+teacher's behalf), `PUT /timetable/update` (`teacher_id`/`room_id`/`subject_id`
+overrides).
 
 ### Document OCR
 
@@ -96,15 +237,31 @@ feature's own tables. Every `GET`/`reextract` response's `routing` field makes t
 explicit per-document rather than silently omitting it. Wire a real handler into
 `ocr_routing.ROUTING_TARGETS` once a target table exists - no other code changes.
 
+**`school_id` is REQUIRED on every endpoint below (a reliability-audit fix)**:
+`Document` originally had zero tenant scoping at all - `GET /admin/ocr/documents`
+returned every school's documents to any admin/principal, confirmed by an
+empirical test (two fresh schools, Admin A's list included Admin B's document).
+Every endpoint below now takes `school_id` and 404s (not 403, to avoid confirming
+a cross-tenant document's existence) on any id that doesn't belong to it -
+`GET`/`PUT .../entities/{id}`/`POST .../reextract` alike, not just the two
+originally flagged ("list/detail") - a correction/re-extract call on another
+school's `document_id` is the same leak shape and was fixed in the same pass.
+A small number of pre-existing rows predate this column and have `school_id:
+null` (their uploader's own account had no `school_id` set either - see
+`services/auth.py`); these are simply never reachable through the API now
+(not deleted, not exposed to the wrong tenant, just permanently unmatched by
+any real `school_id` filter) - see the migration's own docstring for why no
+backfill was attempted.
+
 #### `POST /admin/ocr/documents`
 Upload a document (marksheet, admission form, ID proof, ...) for OCR processing.
 - **Roles:** admin, principal
-- **Request:** `multipart/form-data` — `file` (binary) + form field `document_type` (`"marksheet" | "admission_form" | "id_proof" | "other"`)
+- **Request:** `multipart/form-data` — `file` (binary) + form fields `document_type` (`"marksheet" | "admission_form" | "id_proof" | "other"`) + `school_id`
 - **Response:**
 ```json
-{ "id": 1, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z" }
+{ "id": 1, "school_id": 41, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z" }
 ```
-- **Errors:** `400` invalid `document_type`; `422` undecodable image; `503` Tesseract binary unavailable on the server.
+- **Errors:** `400` invalid `document_type` or unknown `school_id`; `422` undecodable image; `503` Tesseract binary unavailable on the server.
 
 #### `GET /admin/ocr/documents`
 **Not in the original stub - added because the frontend's document review screen
@@ -115,11 +272,11 @@ only (no `extracted_fields`/`entities`/`raw_text`) - that detail stays on the
 single-document `GET`, same split as `GET /admin/admissions/applications` vs a
 single application's full record.
 - **Roles:** admin, principal
-- **Query:** `?status=&document_type=&page=&page_size=` (`page_size` defaults to 20)
+- **Query:** `?school_id=` (required) `&status=&document_type=&page=&page_size=` (`page_size` defaults to 20)
 - **Response:**
 ```json
 {
-  "items": [ { "id": 1, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z", "processed_at": "2026-08-11T10:00:01Z" } ],
+  "items": [ { "id": 1, "school_id": 41, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z", "processed_at": "2026-08-11T10:00:01Z" } ],
   "total": 1, "page": 1, "page_size": 20
 }
 ```
@@ -127,10 +284,12 @@ single application's full record.
 #### `GET /admin/ocr/documents/{id}`
 Fetch OCR processing status/result for a previously uploaded document.
 - **Roles:** admin, principal
+- **Query:** `?school_id=` (required)
 - **Response:**
 ```json
 {
   "id": 1,
+  "school_id": 41,
   "document_type": "admission_form",
   "status": "done",
   "uploaded_at": "2026-08-11T10:00:00Z",
@@ -148,16 +307,17 @@ Fetch OCR processing status/result for a previously uploaded document.
 `extracted_fields` uses each field's `corrected_value` where a manual correction
 exists, else its OCR `field_value` - `entities` carries the full per-field detail
 (confidence, correction state, entity `id` to `PUT` against) the flat dict can't.
-- **Errors:** `404` unknown document id.
+- **Errors:** `404` unknown document id, OR a real document id belonging to a different `school_id`.
 
 #### `PUT /admin/ocr/documents/{id}/entities/{entity_id}`
 Manual correction of an extracted field (the "manual data fix" half of the playbook's
 manual-fix-+-re-extract flow) - sets `corrected_value`/`corrected_by`/`corrected_at`
 without touching the original OCR `field_value`.
 - **Roles:** admin, principal
+- **Query:** `?school_id=` (required)
 - **Request:** `{ "corrected_value": "Priya A. Sharma" }`
 - **Response:** the updated entity, same shape as a `GET` response's `entities[]` item.
-- **Errors:** `400` empty `corrected_value`; `404` unknown document/entity id (or entity belongs to a different document).
+- **Errors:** `400` empty `corrected_value`; `404` unknown document/entity id, entity belongs to a different document, or the document belongs to a different `school_id`.
 
 #### `POST /admin/ocr/documents/{id}/reextract`
 Re-run postprocessing against the document's already-stored `raw_text` (no
@@ -167,41 +327,273 @@ word-level OCR data, not just re-copied from the overall score. **Replaces** the
 document's existing entities (and therefore any corrections made against them) -
 old field names may not even apply if `document_type` changed.
 - **Roles:** admin, principal
+- **Query:** `?school_id=` (required)
 - **Request:** `{ "document_type": "marksheet" }` (optional - omit to retry with the existing `document_type`)
 - **Response:** same shape as `GET /admin/ocr/documents/{id}`.
+- **Errors:** `404` unknown document id, OR a real document id belonging to a different `school_id`.
 - **Errors:** `400` invalid `document_type`, or no OCR result exists yet for this document; `404` unknown document id.
 
 ### Timetable optimization
 
 Backed by a CP-SAT (OR-Tools) constraint solver — hard constraints: no teacher, room,
-or class double-booked in the same period. Solver input (`TeacherSubject` = who's
-qualified to teach what, `ClassSubjectRequirement` = periods/week a class needs of a
-subject, `TeacherUnavailability`, `SubjectRoomRequirement` = e.g. Science -> lab) lives
-in `backend/app/models/timetable.py` and must be populated before `/generate` is
-called. `day_of_week` is 0-indexed (0 = Monday); `period_number` is 0-indexed within
-the day. Generation is synchronous (no run_id/polling) - small enough inputs solve in
-well under the request timeout.
+or class double-booked in the same period, plus (as of this revision) a per-teacher
+weekly load cap. `day_of_week` is 0-indexed (0 = Monday); `period_number` is 0-indexed
+within the day. Generation is synchronous (no run_id/polling) - small enough inputs
+solve in well under the request timeout.
+
+**Request shape overhaul — read before assuming the original stub's shape still
+applies.** `POST /timetable/generate` no longer reads `ClassSubjectRequirement` or
+`SubjectRoomRequirement` at all (both tables still exist in the schema and are
+unused going forward, not dropped). Every previous run's premise — that an admin
+pre-seeds those rows out-of-band, then generation just consumes whatever's already
+there — didn't match what a real generation flow needs: an admin specifying, per
+run, which grade levels/sections, which subjects need how many periods/week and
+whether they need a lab, which teachers are available/qualified for what (with a
+per-run enable/disable + load-cap override), and which rooms are usable. The new
+request captures all of that directly; nothing from it is persisted back into
+those tables — every override is scoped to the one run that submitted it. Two new
+pieces of master data back this, both seed-script-managed like everything else in
+this section (see CLAUDE.md's Commands section on `seed_demo_data.py` — **no CRUD
+API or admin UI exists for either, on purpose**, same "use the seed-script
+pattern" scope decision as `TeacherSubject`/`TeacherUnavailability`/`Room`/
+`Subject` already were):
+- `TeacherProfile` (`backend/app/models/timetable.py`) — one row per teacher,
+  currently just `max_periods_per_week` (weekly teaching-load cap, default 30 for
+  seeded demo teachers). A generation run's `teacher_selections[]` can override
+  this default for that run only.
+- `SchoolClass` gained `grade_level`/`section` columns (previously just a free-form
+  `name` like `"Class 8A"`) so `grade_levels[]`/`sections_per_grade` below can
+  resolve to real rows. Existing seeded classes were backfilled via migration
+  (`"Class 8A"` → `grade_level=8, section="A"`). **`grade_levels[]`/
+  `sections_per_grade` only ever SELECT existing `SchoolClass` rows — a grade with
+  fewer seeded sections than requested is a `400` naming exactly which grade(s)
+  are short, never silently auto-created.** Creating new class sections is real
+  class-management functionality, deliberately out of scope here (same "don't
+  build CRUD nobody asked for" boundary as teacher/room/subject master data).
+
+**Solver quality fixes (this revision) — surfaced by inspecting an actual generated
+schedule, not theoretical:**
+1. **Homeroom pinning.** `SchoolClass` gained `home_room_id` (nullable FK to `Room`,
+   settable via `POST`/`PUT /admin/classes` — see "Master Data Management" above; two
+   active classes may never share one, rejected with a `400` before it ever reaches
+   the solver). Every period of a NON-lab-required subject for a class is now hard-
+   pinned to that class's `home_room_id`, instead of freely choosing among every
+   room passed in `room_ids[]` (which is how a class ended up bounced between
+   different classrooms and even auditoriums across a single day for no subject-
+   level reason). Lab-required subjects are unaffected — they still freely choose
+   among `room_type="lab"` rooms, same as before. A class with no `home_room_id`
+   configured falls back to the old free-choice behavior for its own periods only,
+   and the response's new `warnings[]` names exactly which class(es) need one
+   configured — this never fails the request, it's a signal, not a hard block.
+2. **Same-subject-per-day spread.** A class-subject pair is now hard-capped at
+   `ceil(periods_per_week / days_per_week)` occurrences per day — 1/day in the
+   overwhelming common case (`periods_per_week <= days_per_week`), only rising above
+   1 when the numbers genuinely force it (e.g. 8 periods/week on a 5-day week forces
+   at least 3 days to carry 2). On top of that hard cap, the solver *minimizes* how
+   much of the cap actually gets used (a heavily-weighted `same_day_clustering`
+   objective term) so clustering happens on exactly the minimum number of days the
+   math requires, never more. A lighter-weighted `day_variance` objective term
+   additionally smooths out uneven day-to-day totals (e.g. "6 periods Monday, 0
+   Friday") wherever the hard constraints leave room to. Both terms' weights and
+   actual achieved values are returned in every response (see below) so they can be
+   tuned later without reading the solver's source.
+- **Reproducibility:** `random_seed` is now fixed in the solver, but
+  `num_search_workers=8` runs several CP-SAT search strategies in parallel and
+  returns whichever proves/finds a solution first — that race is real wall-clock-
+  timing-dependent, so a fixed seed alone does not guarantee bit-for-bit identical
+  output run-to-run at this parallelism. Only `num_search_workers=1` gives true
+  determinism (at a real solve-time cost on larger inputs).
 
 #### `POST /timetable/generate`
 Run the solver for a school/academic year and persist the result. Deactivates
-(`is_active=false`) any previous active slots for the same class(es)/academic_year
-before inserting the new ones - a superseding run, not additive.
+(`is_active=false`) any previous active slots for the resolved class(es)/
+academic_year before inserting the new ones - a superseding run, not additive.
 - **Roles:** admin, principal
 - **Request:**
 ```json
-{ "school_id": 1, "academic_year": "2026-27", "class_ids": [2], "days": 5, "periods_per_day": 6 }
+{
+  "school_id": 41,
+  "academic_year": "2026-27",
+  "grade_levels": [8],
+  "sections_per_grade": 2,
+  "periods_per_day": 6,
+  "days_per_week": 5,
+  "subjects": [
+    { "subject_id": 40, "periods_per_week": 4, "lab_required": false },
+    { "subject_id": 41, "periods_per_week": 3, "lab_required": true }
+  ],
+  "teacher_selections": [
+    { "teacher_id": 97, "included": true, "max_periods_per_week_override": null },
+    { "teacher_id": 98, "included": false }
+  ],
+  "room_ids": [64, 65]
+}
 ```
-`class_ids` omitted = every class in `school_id`. `days`/`periods_per_day` default to 5/6.
+- `grade_levels`/`sections_per_grade`: resolved against existing `SchoolClass` rows
+  only, per the overhaul note above. Accepts negative values for pre-Grade-1 levels
+  (Nursery=-3, LKG=-2, UKG=-1, per `SchoolClass.grade_level`'s documented convention)
+  - `grade_levels[]` has no special-cased range, `[-2]` resolves/generates exactly
+  like `[8]` (verified empirically, not just by code-read).
+- `subjects[]`: `periods_per_week` and `lab_required` apply to every resolved class
+  for this run (not persisted — see overhaul note); `lab_required: true` requires a
+  room with `room_type="lab"` among `room_ids[]`, same room-type matching the
+  solver always did, just sourced from the request now instead of
+  `SubjectRoomRequirement`.
+- `teacher_selections[]`: `included: false` **excludes** that teacher from solver
+  input entirely for this run (not passed in with an empty qualification set) - a
+  generation that would've needed them fails honestly (`422`), it never silently
+  falls back to using them anyway. `max_periods_per_week_override` omitted/`null`
+  = use that teacher's stored `TeacherProfile.max_periods_per_week`; a teacher
+  with neither an override nor a stored profile row gets `days_per_week ×
+  periods_per_day` (i.e. effectively uncapped) rather than an arbitrary number.
+  Teacher qualification (which subjects) still comes from real `TeacherSubject`
+  rows - `teacher_selections[]` doesn't grant qualifications, only opts a real
+  qualified-or-not teacher in/out of this run and optionally overrides their cap.
+- `room_ids[]`: only these rooms are usable for this run; must be real rooms
+  belonging to `school_id`.
+- **All of the above are also rejected if deactivated** (`400 Unknown or inactive
+  <field>_id(s)`): a deactivated `SchoolClass`/`Subject`/`Room`/teacher `User` (see
+  the new "Master Data Management" section above) can no longer be resolved or
+  passed into a generation run, the same way an unknown id can't.
 - **Response:**
 ```json
 {
   "academic_year": "2026-27",
   "slots_created": 14,
-  "slots": [ { "id": 101, "day_of_week": 0, "period_number": 0, "start_time": "08:00:00", "end_time": "08:45:00", "subject_id": 3, "teacher_id": 7, "class_id": 2, "room_id": 1, "academic_year": "2026-27", "is_active": true } ]
+  "slots": [ { "id": 101, "day_of_week": 0, "period_number": 0, "start_time": "08:00:00", "end_time": "08:45:00", "subject_id": 3, "teacher_id": 7, "class_id": 2, "room_id": 1, "academic_year": "2026-27", "is_active": true } ],
+  "warnings": [ "Class 2 has no home_room_id configured - its non-lab periods may be assigned to different rooms across the week. Set a home room for it in School Management's Classes tab to pin it." ],
+  "findings": [ { "severity": "warning", "code": "TEACHER_POOL_TIGHT", "subject": "english", "message": "english's teacher pool is at 34/36 (94%) capacity - technically feasible but likely to cause a slow solve or a late failure once combined with other constraints.", "numbers": { "demand": 34, "capacity": 36 }, "remedies": [], "details": null } ],
+  "objective_weights": { "same_day_clustering": 1000, "day_variance": 1 },
+  "objective_values": { "same_day_clustering": 0, "day_variance": 2 }
 }
 ```
-- **Errors:** `400` no matching classes/requirements found; `422` solver proved the
-  input infeasible (e.g. no qualified teacher, or over-constrained availability).
+- `warnings[]`: non-fatal - names every resolved class with no `home_room_id` set.
+  Empty when every resolved class has one configured.
+- `findings[]` (this revision): any `"warning"`-severity pre-flight finding for this
+  (successful) run — see "Actionable infeasibility diagnostics" below for the shape
+  and full list of finding codes. `"error"`-severity findings never reach this far;
+  they short-circuit into a `422` before the solver is ever called.
+- `objective_weights`/`objective_values`: the solver's two soft-preference terms (see
+  the "Solver quality fixes" note above) - `0` in `objective_values` means that
+  preference was fully satisfied at the returned solution.
+- **Errors:** `400` empty `grade_levels`/`subjects`/`room_ids`, `sections_per_grade
+  < 1`, a requested grade with fewer seeded sections than `sections_per_grade`,
+  an unknown `subject_id`, or an unknown `room_id` for this school; `422` (this
+  revision — see below for the full structured shape) either a pre-flight
+  arithmetic check failed (`stage: "preflight"`, before the solver ever runs) or
+  every pre-flight check passed but CP-SAT itself still proved the input infeasible
+  (`stage: "solve"`).
+
+**Cross-grade/cross-class teacher conflicts are structurally prevented BOTH within
+one `/generate` call and across separate calls (this revision fixes the latter — a
+real gap, not just a diagnostics-layer one).** Within one call, the no-double-
+booking constraint keys purely on `(teacher_id, day_of_week, period_number)` with
+no class/grade dimension at all, so a teacher assigned to *any* requirement (any
+class, any grade) at a slot already blocks every other requirement in that SAME
+call from using that same teacher+slot (confirmed by
+`test_generate_never_double_books_teacher_across_two_classes`). Generation happens
+one grade/section-batch at a time in practice (the UI only allows selecting one
+grade per run) though, and until this revision a teacher qualified across two
+SEPARATE such runs had no cross-run awareness at all — nothing stopped a later
+run from double-booking them into a slot an earlier run already gave them for a
+different class's still-active slots. `POST /timetable/generate` now also queries
+each included teacher's existing active `TimetableSlot` rows for this academic
+year (excluding the classes THIS run is about to supersede) and merges those into
+the solver's own unavailability input, so a later run correctly treats them as
+blocked (confirmed by
+`test_generate_never_double_books_a_teacher_across_two_separate_generate_calls`).
+
+### Actionable infeasibility diagnostics (this revision)
+
+Replaces the old behavior — a failed generation returning only `"No feasible
+timetable exists for the given teachers/rooms/requirements"` after up to a 30s
+solve — with specific, quantified, actionable reasons, computed in two stages.
+
+**Stage 1 — pre-flight (`backend/app/services/timetable_preflight.py`), milliseconds,
+before the solver ever runs.** Pure arithmetic (plus two small bipartite max-flow
+computations to correctly handle overlapping teacher/room pools — a naive
+independent-sum check can pass a genuinely infeasible input when, e.g., two
+subjects share their only qualified teacher). Runs ALL checks and returns every
+failure together, not just the first:
+- **Section balance** — total required periods/week vs. `periods_per_day ×
+  days_per_week`. Over-subscription is `"error"` (`SECTION_OVER_SUBSCRIBED`);
+  under-subscription is `"warning"` (`SECTION_UNDER_SUBSCRIBED` — may be
+  intentional free periods).
+- **Teacher pool capacity** — per subject, qualified-teacher capacity vs. demand,
+  overlap-aware (`TEACHER_POOL_SHORTFALL`, `"error"`); a pool above 85% utilization
+  that still technically passes gets a `TEACHER_POOL_TIGHT` `"warning"`.
+- **Room concurrency** — sections needing a room simultaneously vs. non-lab rooms
+  selected for this run, including home-room-pinning collisions (two sections
+  sharing one `home_room_id` — rejected earlier too, at the master-data layer, but
+  re-checked here defensively) (`ROOM_HOME_COLLISION`, `ROOM_CONCURRENCY_SHORTFALL`).
+- **Lab concurrency** — weekly total (`LAB_CAPACITY_SHORTFALL`) AND exact peak
+  concurrency via a 3-layer max-flow modeling per-class slot exclusivity
+  (`LAB_PEAK_CONCURRENCY_SHORTFALL`) — a single class needing two lab-required
+  subjects can still only occupy one lab at a time, however many lab rooms exist,
+  which a plain weekly-total check can't see.
+- **Per-teacher availability** — `TeacherUnavailability` vs. each teacher's assigned
+  share of demand (`TEACHER_AVAILABILITY_SHORTFALL`).
+- **Cross-run collisions** — periods already committed to previously generated
+  grades this academic year vs. periods free (`CROSS_RUN_COLLISION`) — see the
+  cross-grade/cross-class note above for the related correctness fix.
+
+Every `"error"`-severity finding carries at least one `remedies[]` entry with a
+concrete quantity (never "add more teachers" — always "add 1 teacher qualified for
+english, or reduce english by 2 periods/week"), offering alternatives (add
+capacity vs. reduce demand) where both genuinely exist.
+
+**Stage 2 — solve-time diagnosis (`timetable_solver.diagnose_infeasibility`),
+only when pre-flight passes but CP-SAT still proves infeasible** (a genuine
+constraint-interaction case pure arithmetic can't predict — e.g. a teacher's only
+free slots are real in raw count but all land on one day, tripping the same-
+subject-per-day spread cap). Rebuilds a similar model with each requirement's own
+hard constraints gated behind a dedicated CP-SAT assumption literal
+(`model.NewBoolVar` + `.OnlyEnforceIf` + `model.AddAssumptions`), leaving the
+physical double-booking constraints as always-true bedrock, never assumptions.
+On `INFEASIBLE`, `solver.SufficientAssumptionsForInfeasibility()` returns the
+minimal set of assumptions that together cause it — i.e. the SPECIFIC conflicting
+requirements — translated into a plain sentence naming them and the shared
+teacher pool they're contending for (code `SOLVE_CONSTRAINT_CONFLICT`). Falls back
+to `INFEASIBLE_NO_MAPPABLE_REQUIREMENT`/`INFEASIBLE_CORE_UNAVAILABLE` if no
+requirement had any eligible teacher/room, or the core turns out empty/unmappable.
+
+**Failure response shape** (both stages) — `POST /timetable/generate`'s `422`
+`detail`, and `POST /timetable/preflight`'s `200` body:
+```json
+{
+  "feasible": false,
+  "stage": "preflight",
+  "findings": [
+    {
+      "severity": "error",
+      "code": "TEACHER_POOL_SHORTFALL",
+      "subject": "english",
+      "message": "english needs 20 periods/week but its qualified teachers supply at most 16 periods/week total - 4 short.",
+      "numbers": { "demand": 20, "capacity": 16, "shortfall": 4, "additional_teachers_needed": 1 },
+      "remedies": [
+        { "action": "add_teachers", "quantity": 1, "detail": "1 more teacher(s) qualified for english" },
+        { "action": "reduce_periods", "quantity": 4, "detail": "reduce english by 4 period(s)/week" }
+      ],
+      "details": null
+    }
+  ]
+}
+```
+
+#### `POST /timetable/preflight`
+Read-only: runs the exact same pre-flight checks (stage 1 above) `POST /generate`
+itself gates on, without touching the database or running the solver — meant to
+be called live as the admin edits the Generate dialog (debounced client-side),
+so arithmetic problems surface before Generate is even pressed, not 30s after.
+Deliberately calls this endpoint from the frontend rather than reimplementing the
+arithmetic in TypeScript, so the live check and the real gate can never drift
+apart.
+- **Roles:** admin, principal
+- **Request:** identical shape to `POST /timetable/generate`'s request.
+- **Response:** the same `{ feasible, stage, findings }` shape shown above —
+  `stage` is `null` when `feasible: true`.
+- **Errors:** same `400`/`403` validation as `/generate` (unknown ids, school
+  mismatch, etc.) — never a `422`, since this endpoint doesn't run the solver.
 
 #### `GET /timetable/active`
 Fetch active (`is_active=true`) slots for an academic year, scoped by role: admin/
@@ -930,15 +1322,102 @@ reject decision point `GET /admin/approvals` / `POST /admin/approvals/{id}/decis
 offer. See `services/approval_aggregator.py`'s module docstring for the full
 reasoning.
 
-**Accept -> Enrollment wiring is REAL, not stubbed - with one honestly-scoped
-exception:** accepting an application (`status="accepted"`) creates a genuine
-`Enrollment` row when the caller supplies both `student_user_id` (an
-**already-existing** user) and `class_id`. Checked first: this repo has no account-
-creation flow anywhere (Supabase Auth signup is out of scope for this session) - so
-creating a brand-new student user account for a newly-accepted applicant is the one
-piece that stays a documented no-op (`enrollment_created: false` in the response),
-not silently faked. Enrollment creation itself, once a real user id exists, is fully
-real.
+**Accept -> Enrollment wiring is REAL, not stubbed:** accepting an application
+(`status="accepted"`) creates a genuine `Enrollment` row when the caller supplies both
+`student_user_id` and `class_id`. `student_user_id` must be an **already-existing**
+user - this endpoint deliberately does not create one (see "Two ways a student gets
+an Enrollment" below for where that happens instead, and why this endpoint staying
+enrollment-only rather than also growing account-creation logic is intentional, not
+an unfixed gap). Without both ids, acceptance still succeeds; enrollment creation is
+a documented no-op (`enrollment_created: false`), never a silent skip.
+
+#### Two ways a student gets an `Enrollment` - both real, neither a duplicate
+Two genuinely different real-world moments create the same `Enrollment` row, and
+this API has one endpoint for each rather than overloading one:
+- **A NEW applicant, going forward**: `POST /admin/admissions/applications` →
+  triage (`under_review`) → `PATCH .../accepted` with an already-existing
+  `student_user_id`. This is the pipeline for someone who doesn't have an account
+  yet and needs the full submitted/under_review/accepted workflow, OCR document
+  attachment, eligibility checking, etc.
+- **Onboarding a school's EXISTING roster directly** (e.g. a founding admin adding
+  the 30 students already enrolled at their school, with no "application" to
+  process): `POST /admin/students` (below) - creates the account AND optionally
+  enrolls in one call, no admissions workflow involved.
+
+Both call the exact same underlying `enroll_student_primary()` function
+(`routers/admissions.py`) for the actual `Enrollment` row - not duplicated logic,
+just two real entry points for two real situations.
+
+### Roster Onboarding (Student & Parent accounts)
+
+**New this session** - closes the gap the admissions flow's own docstring used to
+name explicitly ("this repo has no account-creation flow anywhere"). Same real
+Supabase-Auth-account-creation mechanism as `POST /admin/teachers`
+(`services/supabase_admin.py`'s `create_auth_account`), for the two remaining roles
+that had no creation path at all.
+
+#### `POST /admin/students`
+- **Roles:** admin, principal
+- **Request:** `{ "school_id": 41, "email": "priya@example.com", "password": "...", "full_name": "Priya Sharma", "class_id": 12 }` - `class_id` is optional; when given, the student is immediately primary-enrolled (same mechanism as the admissions accept flow - see above).
+- **Response:** `{ "id": 501, "email": "priya@example.com", "full_name": "Priya Sharma", "school_id": 41, "is_active": true, "class_id": 12 }`
+- **Errors:** `400` unknown `school_id`/`class_id`; `409` email already registered (locally or in Supabase Auth).
+
+#### `POST /admin/parents`
+- **Roles:** admin, principal
+- **Request:** `{ "school_id": 41, "email": "guardian@example.com", "password": "...", "full_name": "Rajesh Sharma", "student_ids": [501, 502] }` - `student_ids` are real, already-created students (via `POST /admin/students` or otherwise) to link via `ParentStudent` - the same table `GET /parent/children` reads from. Supports linking more than one child (multi-guardian, multi-child families both work - `ParentStudent` has no uniqueness constraint on either side).
+- **Response:** `{ "id": 601, "email": "guardian@example.com", "full_name": "Rajesh Sharma", "school_id": 41, "is_active": true, "student_ids": [501, 502] }`
+- **Errors:** `400` unknown `school_id` or any `student_id` (must be a real user with role=student); `409` email already registered.
+
+### Ongoing roster management (Students & Parents) - new this session
+
+**Closes the gap the "School Management" admin page build found**: `routers/students.py`/`routers/parents.py` had CREATE only - no way to list, view, edit, or deactivate an existing student/parent after onboarding, unlike Teacher (`routers/teachers.py`) and School/Class/Subject/Room (`master_data.py`), which already had the full shape. These new endpoints follow the exact same established pattern (soft-delete via `is_active`, `?include_inactive=true` on list, clean `400`/`404` on bad ids, admin/principal only) rather than inventing a new one.
+
+#### `GET /admin/students`
+- **Roles:** admin, principal
+- **Query:** `?school_id=` (required) `&include_inactive=` (default `false`)
+- **Response:** `[ { "id": 501, "email": "priya@example.com", "full_name": "Priya Sharma", "school_id": 41, "is_active": true, "class_id": 12 } ]`
+
+#### `GET /admin/students/{id}`
+- **Roles:** admin, principal
+- **Response:** same shape as one list item.
+- **Errors:** `404` unknown id, or a real id that isn't a student (e.g. a teacher's id).
+
+#### `PUT /admin/students/{id}`
+- **Roles:** admin, principal
+- **Request:** `{ "full_name": "Priya A. Sharma", "class_id": 15 }` - both optional, partial update (only sent fields change).
+- **`class_id` is a real class CHANGE, not an add** - unlike `enroll_student_primary()`'s additive-only semantics (used by the admissions accept flow and this student's own creation, neither of which ever needs to move a student OUT of a class), this endpoint first removes the student's existing primary enrollment row, then creates the new one. A student is never left primary-enrolled in two classes at once.
+- **Response:** the updated student, same shape as `GET`.
+- **Errors:** `400` unknown `class_id`; `404` unknown student id.
+
+#### `PUT /admin/students/{id}/deactivate` / `PUT /admin/students/{id}/reactivate`
+- **Roles:** admin, principal
+- Soft-delete only, same as every other master-data entity - a deactivated student stops appearing in `GET /reference/lookup` and in this list's default (active-only) view.
+
+#### `GET /admin/parents`
+- **Roles:** admin, principal
+- **Query:** `?school_id=` (required) `&include_inactive=` (default `false`)
+- **Response:** `[ { "id": 601, "email": "guardian@example.com", "full_name": "Rajesh Sharma", "school_id": 41, "is_active": true, "student_ids": [501, 502] } ]`
+
+#### `GET /admin/parents/{id}`
+- **Roles:** admin, principal
+- **Response:** same shape as one list item.
+- **Errors:** `404` unknown id, or a real id that isn't a parent.
+
+#### `PUT /admin/parents/{id}`
+- **Roles:** admin, principal
+- **Request:** `{ "full_name": "Rajesh K. Sharma" }` - name only. Linked children are managed via the add/remove sub-resource endpoints below, same idempotent one-at-a-time pattern as `teachers.py`'s subject qualifications - not a single big PUT that replaces the whole list.
+- **Response:** the updated parent, same shape as `GET`.
+- **Errors:** `404` unknown parent id.
+
+#### `POST /admin/parents/{id}/children?student_id=` / `DELETE /admin/parents/{id}/children/{student_id}`
+- **Roles:** admin, principal
+- Idempotent add/remove of ONE linked child - adding a parent's 3rd child never requires resending the other 2. `student_id` must be a real user with `role=student`.
+- **Response:** the parent, same shape as `GET`.
+- **Errors:** `400` unknown/non-student `student_id` (add only); `404` unknown parent id.
+
+#### `PUT /admin/parents/{id}/deactivate` / `PUT /admin/parents/{id}/reactivate`
+- **Roles:** admin, principal
+- Same soft-delete pattern as everywhere else.
 
 #### `POST /admin/admissions/applications`
 Submit a new admission application (typically entered by office staff, possibly pre-filled via OCR).

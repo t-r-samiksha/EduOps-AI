@@ -7,6 +7,7 @@ import {
   ClipboardList,
   FileCheck2,
   LayoutGrid,
+  School,
   ScanText,
   ScanFace,
   Users,
@@ -35,6 +36,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Fees", path: "/admin/fees", icon: Wallet },
     { label: "Admissions", path: "/admin/admissions", icon: ClipboardList },
     { label: "Exams", path: "/admin/exams", icon: Armchair },
+    { label: "School Management", path: "/admin/school-management", icon: School },
   ],
   principal: [
     { label: "Dashboard", path: "/principal", icon: LayoutGrid, end: true },
@@ -47,6 +49,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Fees", path: "/principal/fees", icon: Wallet },
     { label: "Admissions", path: "/principal/admissions", icon: ClipboardList },
     { label: "Exams", path: "/principal/exams", icon: Armchair },
+    { label: "School Management", path: "/principal/school-management", icon: School },
   ],
   teacher: [
     { label: "Dashboard", path: "/teacher", icon: LayoutGrid, end: true },

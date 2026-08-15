@@ -19,6 +19,18 @@ class Document(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    school_id: Mapped[int | None] = mapped_column(ForeignKey("schools.id"))
+    """Added by a reliability-audit fix (a cross-tenant leak: list/detail had zero
+    tenant scoping, confirmed empirically - Admin A could see Admin B's documents).
+    Nullable only for rows that predate this column (their uploader's own
+    User.school_id was also unset at the time, so there's no honest value to
+    backfill - see the migration) - every NEW upload always sets it via a required
+    `school_id` form field, matching how every other Person A endpoint scopes
+    school-specific data (CurrentUser carries no school_id of its own to derive
+    this from - see services/auth.py). A null-school_id row is invisible through
+    every school_id-scoped endpoint below (list/detail/correct/reextract), not
+    deleted - a legacy row a real admin can't reach via the API, not silently
+    exposed to the wrong tenant either."""
     document_type: Mapped[str] = mapped_column(String(20), nullable=False)
     """One of: marksheet, admission_form, id_proof, other."""
     file_url: Mapped[str] = mapped_column(String(255), nullable=False)

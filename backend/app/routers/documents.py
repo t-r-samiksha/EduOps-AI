@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.document import Document, ExtractedEntity, OcrResult
+from app.models.school import School
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
 from app.services.ocr_engine import InvalidImageError, OcrEngineError, WordConfidence, extract_text
@@ -33,6 +34,7 @@ def _metadata_to_words(metadata: dict | None) -> list[WordConfidence]:
 
 class DocumentCreateOut(BaseModel):
     id: int
+    school_id: int | None
     document_type: str
     status: str
     uploaded_at: datetime
@@ -61,6 +63,7 @@ class RoutingOut(BaseModel):
 
 class DocumentDetailOut(BaseModel):
     id: int
+    school_id: int | None
     document_type: str
     status: str
     uploaded_at: datetime
@@ -88,6 +91,7 @@ def _build_detail(db: Session, document: Document) -> DocumentDetailOut:
 
     return DocumentDetailOut(
         id=document.id,
+        school_id=document.school_id,
         document_type=document.document_type,
         status=document.status,
         uploaded_at=document.uploaded_at,
@@ -105,14 +109,17 @@ def _build_detail(db: Session, document: Document) -> DocumentDetailOut:
 async def upload_document(
     file: UploadFile = File(...),
     document_type: str = Form(...),
+    school_id: int = Form(...),
     user: CurrentUser = Depends(require_role("admin", "principal")),
     db: Session = Depends(get_db),
 ):
     if document_type not in VALID_DOCUMENT_TYPES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"document_type must be one of {VALID_DOCUMENT_TYPES}")
+    if db.query(School).filter(School.id == school_id).one_or_none() is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown school_id {school_id}")
 
     document = Document(
-        uploaded_by=user.id, document_type=document_type, file_url="pending", status="queued"
+        uploaded_by=user.id, school_id=school_id, document_type=document_type, file_url="pending", status="queued"
     )
     db.add(document)
     db.flush()
@@ -169,6 +176,7 @@ async def upload_document(
 
 class DocumentSummaryOut(BaseModel):
     id: int
+    school_id: int | None
     document_type: str
     status: str
     uploaded_at: datetime
@@ -186,6 +194,7 @@ class DocumentsListResponse(BaseModel):
 
 @router.get("/admin/ocr/documents", response_model=DocumentsListResponse)
 def list_documents(
+    school_id: int,
     status_filter: str | None = Query(None, alias="status"),
     document_type: str | None = None,
     page: int = 1,
@@ -198,11 +207,16 @@ def list_documents(
     by a known id (see GET .../{document_id} below). Summary shape only (no
     extracted_fields/entities/raw_text) - that detail stays on the single-document
     GET, same split as e.g. GET /admin/admissions/applications vs a single
-    application's full record."""
+    application's full record.
+
+    `school_id` is REQUIRED (a reliability-audit fix - this had zero tenant
+    scoping before, confirmed empirically to leak another school's documents).
+    A row with no school_id (pre-migration legacy - see the migration's docstring)
+    never matches any real school_id here, so it's simply never listed."""
     if page < 1 or page_size < 1:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "page and page_size must be positive")
 
-    query = db.query(Document)
+    query = db.query(Document).filter(Document.school_id == school_id)
     if status_filter is not None:
         query = query.filter(Document.status == status_filter)
     if document_type is not None:
@@ -224,15 +238,26 @@ def list_documents(
     )
 
 
+def _get_scoped_document_or_404(db: Session, document_id: int, school_id: int) -> Document:
+    """Same-shape 404 whether the document doesn't exist at all or exists but
+    belongs to a different school - doesn't distinguish the two, so a caller
+    can't use this to probe which document ids exist in another tenant."""
+    document = (
+        db.query(Document).filter(Document.id == document_id, Document.school_id == school_id).one_or_none()
+    )
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+    return document
+
+
 @router.get("/admin/ocr/documents/{document_id}", response_model=DocumentDetailOut)
 def get_document(
     document_id: int,
+    school_id: int,
     user: CurrentUser = Depends(require_role("admin", "principal")),
     db: Session = Depends(get_db),
 ):
-    document = db.query(Document).filter(Document.id == document_id).one_or_none()
-    if document is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+    document = _get_scoped_document_or_404(db, document_id, school_id)
     return _build_detail(db, document)
 
 
@@ -244,12 +269,14 @@ class CorrectionRequest(BaseModel):
 def correct_entity(
     document_id: int,
     entity_id: int,
+    school_id: int,
     body: CorrectionRequest,
     user: CurrentUser = Depends(require_role("admin", "principal")),
     db: Session = Depends(get_db),
 ):
     if not body.corrected_value.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "corrected_value must not be empty")
+    _get_scoped_document_or_404(db, document_id, school_id)
 
     entity = (
         db.query(ExtractedEntity)
@@ -281,13 +308,12 @@ class ReextractRequest(BaseModel):
 @router.post("/admin/ocr/documents/{document_id}/reextract", response_model=DocumentDetailOut)
 def reextract_document(
     document_id: int,
+    school_id: int,
     body: ReextractRequest,
     user: CurrentUser = Depends(require_role("admin", "principal")),
     db: Session = Depends(get_db),
 ):
-    document = db.query(Document).filter(Document.id == document_id).one_or_none()
-    if document is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+    document = _get_scoped_document_or_404(db, document_id, school_id)
 
     ocr_result = db.query(OcrResult).filter(OcrResult.document_id == document_id).one_or_none()
     if ocr_result is None:

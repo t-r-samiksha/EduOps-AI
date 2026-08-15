@@ -10,6 +10,7 @@ import PageHeader from "@/components/shared/PageHeader";
 import EntityCard from "@/components/shared/EntityCard";
 import FileDropzone from "@/components/shared/FileDropzone";
 import { useUploadDocument, useDocument, useCorrectEntity, useReextractDocument, useDocumentsList } from "@/api/hooks/useOcr";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 import { ApiError } from "@/api/client";
 import { cn } from "@/lib/utils";
 import type { DocumentType, ExtractedEntity } from "@/api/types";
@@ -30,10 +31,10 @@ const STATUS_TONE: Record<string, "urgent" | "positive" | "warning" | "neutral">
   failed: "urgent",
 };
 
-function UploadCard({ onUploaded }: { onUploaded: (documentId: number) => void }) {
+function UploadCard({ schoolId, onUploaded }: { schoolId: number; onUploaded: (documentId: number) => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [documentType, setDocumentType] = useState<DocumentType>("admission_form");
-  const upload = useUploadDocument();
+  const upload = useUploadDocument(schoolId);
 
   function submit() {
     if (!file) return;
@@ -81,10 +82,10 @@ function UploadCard({ onUploaded }: { onUploaded: (documentId: number) => void }
   );
 }
 
-function EntityRow({ documentId, entity }: { documentId: number; entity: ExtractedEntity }) {
+function EntityRow({ schoolId, documentId, entity }: { schoolId: number; documentId: number; entity: ExtractedEntity }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(entity.corrected_value ?? entity.field_value);
-  const correct = useCorrectEntity();
+  const correct = useCorrectEntity(schoolId);
 
   const displayValue = entity.corrected_value ?? entity.field_value;
 
@@ -137,9 +138,9 @@ function EntityRow({ documentId, entity }: { documentId: number; entity: Extract
   );
 }
 
-function ReviewPanel({ documentId }: { documentId: number }) {
-  const doc = useDocument(documentId);
-  const reextract = useReextractDocument();
+function ReviewPanel({ schoolId, documentId }: { schoolId: number; documentId: number }) {
+  const doc = useDocument(schoolId, documentId);
+  const reextract = useReextractDocument(schoolId);
   const [reextractType, setReextractType] = useState<DocumentType | "">("");
 
   if (doc.isLoading) return <div className="h-40 animate-pulse rounded-2xl bg-elevated/60" />;
@@ -190,7 +191,7 @@ function ReviewPanel({ documentId }: { documentId: number }) {
               )}
             </div>
             {d.entities.map((e) => (
-              <EntityRow key={e.id} documentId={d.id} entity={e} />
+              <EntityRow key={e.id} schoolId={schoolId} documentId={d.id} entity={e} />
             ))}
           </div>
         )}
@@ -242,13 +243,21 @@ function ReviewPanel({ documentId }: { documentId: number }) {
   );
 }
 
-function DocumentsListCard({ selectedId, onSelect }: { selectedId: number | null; onSelect: (id: number) => void }) {
+function DocumentsListCard({
+  schoolId,
+  selectedId,
+  onSelect,
+}: {
+  schoolId: number;
+  selectedId: number | null;
+  onSelect: (id: number) => void;
+}) {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [typeFilter, setTypeFilter] = useState<DocumentType | "">("");
   const [page, setPage] = useState(1);
   const [lookupId, setLookupId] = useState("");
 
-  const list = useDocumentsList({
+  const list = useDocumentsList(schoolId, {
     status: statusFilter || undefined,
     documentType: typeFilter || undefined,
     page,
@@ -355,6 +364,11 @@ function DocumentsListCard({ selectedId, onSelect }: { selectedId: number | null
 
 export default function OcrPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const schoolId = useCurrentUser().data?.school_id;
+
+  if (schoolId == null) {
+    return <div className="h-40 animate-pulse rounded-2xl bg-elevated/60" />;
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -365,8 +379,8 @@ export default function OcrPage() {
 
       <div className="grid items-start gap-3 lg:grid-cols-[22rem_1fr]">
         <div className="flex flex-col gap-3">
-          <UploadCard onUploaded={setSelectedId} />
-          <DocumentsListCard selectedId={selectedId} onSelect={setSelectedId} />
+          <UploadCard schoolId={schoolId} onUploaded={setSelectedId} />
+          <DocumentsListCard schoolId={schoolId} selectedId={selectedId} onSelect={setSelectedId} />
         </div>
 
         <div>
@@ -379,7 +393,7 @@ export default function OcrPage() {
               </CardContent>
             </Card>
           ) : (
-            <ReviewPanel documentId={selectedId} />
+            <ReviewPanel schoolId={schoolId} documentId={selectedId} />
           )}
         </div>
       </div>
