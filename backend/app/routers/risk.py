@@ -36,6 +36,19 @@ def _students_in_classes(db: Session, class_ids: list[int]) -> set[int]:
     }
 
 
+def _students_in_school(db: Session, school_id: int | None) -> set[int]:
+    """Every real student belonging to this school - RiskFlag has no school_id
+    of its own (only student_id), so admin/principal scoping has to go
+    through User.school_id. Without this, an admin/principal from ANY school
+    saw every OTHER school's flagged students too - a real cross-tenant leak,
+    only visible once two real schools existed in the same DB at once (see
+    routers/timetable.py's GET /timetable/active for the same class of fix
+    applied earlier)."""
+    if school_id is None:
+        return set()
+    return {row.id for row in db.query(User.id).filter(User.school_id == school_id)}
+
+
 class FlagOut(BaseModel):
     id: int
     student_id: int
@@ -145,6 +158,7 @@ def list_flagged(
     query = db.query(RiskFlag)
 
     if user.role in ("admin", "principal"):
+        query = query.filter(RiskFlag.student_id.in_(_students_in_school(db, user.school_id) or [-1]))
         if class_id is not None:
             query = query.filter(RiskFlag.student_id.in_(_students_in_classes(db, [class_id]) or [-1]))
         if student_id is not None:
@@ -310,8 +324,13 @@ def early_warning_students(
                 raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your class")
             owned_class_ids = [class_id]
         query = query.filter(RiskFlag.student_id.in_(_students_in_classes(db, owned_class_ids) or [-1]))
-    elif class_id is not None:
-        query = query.filter(RiskFlag.student_id.in_(_students_in_classes(db, [class_id]) or [-1]))
+    else:
+        # admin/principal - same real cross-tenant leak as GET /risk/flagged
+        # had (see _students_in_school's docstring): without this, an admin
+        # from ANY school saw every school's flagged students.
+        query = query.filter(RiskFlag.student_id.in_(_students_in_school(db, user.school_id) or [-1]))
+        if class_id is not None:
+            query = query.filter(RiskFlag.student_id.in_(_students_in_classes(db, [class_id]) or [-1]))
 
     if risk_level is not None:
         query = query.filter(RiskFlag.risk_level == risk_level)

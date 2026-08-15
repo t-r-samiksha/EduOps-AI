@@ -1,8 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiPostForm, apiPut } from "@/api/client";
-import type { AttendanceRecord, AttendanceSummaryResponse, EnrollResponse, MarkAttendanceResponse } from "@/api/types";
+import type {
+  AttendanceRecord,
+  AttendanceSummaryResponse,
+  EnrollmentListItem,
+  EnrollResponse,
+  MarkAttendanceResponse,
+} from "@/api/types";
 
 export function useEnrollStudent() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ studentId, file }: { studentId: number; file: File }) => {
       const form = new FormData();
@@ -10,6 +17,20 @@ export function useEnrollStudent() {
       form.append("file", file);
       return apiPostForm<EnrollResponse>("/attendance/enroll", form);
     },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["attendance-enrollments"] }),
+  });
+}
+
+/** Real, persisted enrollment state for a school - not client session memory.
+ * Refetching this (on mount, and after each successful enrollment) is what
+ * makes the Enroll tab's list survive a full page reload/logout-login: it
+ * reads the actual DB truth fresh every time, rather than remembering what
+ * happened earlier in an in-memory list that resets when the component
+ * unmounts. */
+export function useAttendanceEnrollments(schoolId: number) {
+  return useQuery({
+    queryKey: ["attendance-enrollments", schoolId],
+    queryFn: () => apiGet<EnrollmentListItem[]>("/attendance/enrollments", { school_id: schoolId }),
   });
 }
 
@@ -48,8 +69,17 @@ export function useAttendanceSummary(params: {
 export function useReviewAttendanceRecord() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ recordId, status }: { recordId: number; status: "present" | "absent" | "late" }) =>
-      apiPut<AttendanceRecord>(`/attendance/${recordId}/review`, { status }),
+    mutationFn: ({
+      recordId,
+      status,
+      studentId,
+    }: {
+      recordId: number;
+      status: "present" | "absent" | "late";
+      /** Corrects a needs_review match's identity - "this was actually
+       * <studentId>", not the student the CV pipeline originally matched. */
+      studentId?: number;
+    }) => apiPut<AttendanceRecord>(`/attendance/${recordId}/review`, { status, student_id: studentId }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["attendance-summary"] });
     },

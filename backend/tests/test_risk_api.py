@@ -15,9 +15,9 @@ from app.services.auth import CurrentUser, get_current_user
 ACADEMIC_YEAR = "2026-27"
 
 
-def _override_user(role: str, user_id: int = 999):
+def _override_user(role: str, user_id: int = 999, school_id: int | None = None):
     def _fake_user():
-        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role)
+        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role, school_id=school_id)
 
     app.dependency_overrides[get_current_user] = _fake_user
 
@@ -303,10 +303,27 @@ def test_flagged_teacher_403_for_other_class_id_filter(client, seed, existing_fl
 
 
 def test_flagged_admin_sees_all(client, seed, existing_flag):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.get("/risk/flagged")
     assert resp.status_code == 200
     assert any(f["student_id"] == seed["flagged_student"].id for f in resp.json())
+
+
+def test_flagged_admin_never_sees_a_different_schools_flags(client, db_session, seed, existing_flag):
+    """Regression test for a real cross-tenant leak: GET /risk/flagged used to
+    apply NO school scoping at all for admin/principal beyond an explicit
+    class_id/student_id filter, so any admin querying with no filters saw
+    every school's flagged students - only visible (and only actually found)
+    once two real schools existed in the same live DB at once."""
+    other_school = School(name="Other School")
+    db_session.add(other_school)
+    db_session.commit()
+    db_session.refresh(other_school)
+
+    _override_user("admin", user_id=999999, school_id=other_school.id)
+    resp = client.get("/risk/flagged")
+    assert resp.status_code == 200
+    assert resp.json() == []
 
 
 def test_flagged_linked_parent_sees_own_child(client, seed, existing_flag):
@@ -331,15 +348,13 @@ def test_flagged_parent_requires_student_id(client, seed, existing_flag):
 
 
 def test_flagged_excludes_resolved_by_default(client, db_session, seed, existing_flag):
-    # admin/principal have no school-scoping on this endpoint (documented, same
-    # simplification as Staffing's leave_requests) - a real RiskFlag from a previous
-    # session's manual validation lives permanently in this live DB, so "sees
-    # everything" queries must scope down via class_id to this test's own fixture
-    # class rather than asserting an exact total count.
+    # admin/principal are now scoped to their own school (see the cross-tenant
+    # regression test above) - this test's own fixture school/class is enough
+    # to isolate it from any other real data in this live DB.
     existing_flag.status = "resolved"
     db_session.commit()
 
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.get("/risk/flagged", params={"class_id": seed["class"].id})
     assert resp.status_code == 200
     assert resp.json() == []
@@ -354,7 +369,7 @@ def test_flagged_filters_by_risk_level(client, db_session, seed, existing_flag):
     db_session.add(low_flag)
     db_session.commit()
 
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.get("/risk/flagged", params={"class_id": seed["class"].id, "risk_level": "high"})
     assert resp.status_code == 200
     body = resp.json()
@@ -366,7 +381,7 @@ def test_flagged_filters_by_risk_level(client, db_session, seed, existing_flag):
 
 
 def test_early_warning_returns_items_shape(client, seed, existing_flag):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.get("/admin/early-warning/students", params={"class_id": seed["class"].id})
     assert resp.status_code == 200
     body = resp.json()
@@ -379,6 +394,20 @@ def test_early_warning_returns_items_shape(client, seed, existing_flag):
 
 def test_early_warning_teacher_scoped_to_own_class(client, seed, existing_flag):
     _override_user("teacher", user_id=seed["other_teacher"].id)
+    resp = client.get("/admin/early-warning/students")
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []
+
+
+def test_early_warning_admin_never_sees_a_different_schools_flags(client, db_session, seed, existing_flag):
+    """Same real cross-tenant leak as GET /risk/flagged, in this sibling
+    endpoint - admin/principal had no school scoping here either."""
+    other_school = School(name="Other School 2")
+    db_session.add(other_school)
+    db_session.commit()
+    db_session.refresh(other_school)
+
+    _override_user("admin", user_id=999999, school_id=other_school.id)
     resp = client.get("/admin/early-warning/students")
     assert resp.status_code == 200
     assert resp.json()["items"] == []

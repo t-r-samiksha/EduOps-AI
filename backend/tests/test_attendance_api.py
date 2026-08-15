@@ -188,6 +188,134 @@ def test_enroll_returns_404_for_unknown_student(client, seed):
     assert resp.status_code == 404
 
 
+# --- GET /attendance/enrollments --------------------------------------------
+# Real, persisted enrollment state - backs the Enroll tab's list so it
+# survives a full page reload (a client-only session list, by contrast,
+# deliberately does not need to - it's reading DB truth fresh each time).
+
+
+def test_enrollments_returns_401_without_token(client):
+    resp = client.get("/attendance/enrollments", params={"school_id": 1})
+    assert resp.status_code == 401
+
+
+def test_enrollments_returns_403_for_student_role(client):
+    _override_user("student")
+    resp = client.get("/attendance/enrollments", params={"school_id": 1})
+    assert resp.status_code == 403
+
+
+def test_enrollments_returns_real_persisted_enrollments_for_the_school(client, seed):
+    _override_user("admin")
+    resp1 = client.post(
+        "/attendance/enroll",
+        data={"student_id": str(seed["student1"].id)},
+        files={"file": ("a.jpg", (FIXTURES / "person_a_1.jpg").read_bytes(), "image/jpeg")},
+    )
+    assert resp1.status_code == 200
+    resp2 = client.post(
+        "/attendance/enroll",
+        data={"student_id": str(seed["student2"].id)},
+        files={"file": ("b.jpg", (FIXTURES / "person_b_1.jpg").read_bytes(), "image/jpeg")},
+    )
+    assert resp2.status_code == 200
+
+    resp = client.get("/attendance/enrollments", params={"school_id": seed["school"].id})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {item["student_id"] for item in body} == {seed["student1"].id, seed["student2"].id}
+    # Newest first.
+    assert body[0]["id"] == resp2.json()["id"]
+    assert body[1]["id"] == resp1.json()["id"]
+
+
+def test_enrollments_scoped_to_the_requested_school_only(client, seed, db_session):
+    from app.models.role import Role
+    from app.models.school import School
+
+    other_school = School(name="Other School")
+    db_session.add(other_school)
+    db_session.flush()
+    student_role = db_session.query(Role).filter(Role.name == "student").one()
+    other_student = User(
+        supabase_id=uuid.uuid4(), email=f"other-{uuid.uuid4()}@example.com", role_id=student_role.id,
+        school_id=other_school.id,
+    )
+    db_session.add(other_student)
+    db_session.commit()
+    db_session.refresh(other_student)
+
+    _override_user("admin")
+    client.post(
+        "/attendance/enroll",
+        data={"student_id": str(seed["student1"].id)},
+        files={"file": ("a.jpg", (FIXTURES / "person_a_1.jpg").read_bytes(), "image/jpeg")},
+    )
+    client.post(
+        "/attendance/enroll",
+        data={"student_id": str(other_student.id)},
+        files={"file": ("b.jpg", (FIXTURES / "person_b_1.jpg").read_bytes(), "image/jpeg")},
+    )
+
+    resp = client.get("/attendance/enrollments", params={"school_id": seed["school"].id})
+    assert resp.status_code == 200
+    assert {item["student_id"] for item in resp.json()} == {seed["student1"].id}
+
+
+def test_enroll_returns_422_for_a_real_two_face_photo(client, seed):
+    """Real (unmocked) end-to-end check that a genuinely ambiguous reference
+    photo is refused with a clear reason, not enrolled against one arbitrary
+    face - enrollment requires exactly one unambiguous face."""
+    _override_user("admin")
+    resp = client.post(
+        "/attendance/enroll",
+        data={"student_id": str(seed["student1"].id)},
+        files={"file": ("classroom.jpg", (FIXTURES / "classroom_two_faces.jpg").read_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "2" in detail  # names the actual face count found, not a generic message
+    assert "one face" in detail.lower()
+
+
+# --- POST /attendance/mark: real end-to-end multi-face recognition ---------
+# (no monkeypatch - genuine images through the real detection/matching
+# pipeline, confirming each face in a group photo is matched independently)
+
+
+def test_mark_real_group_photo_matches_both_enrolled_students(client, seed, db_session):
+    _override_user("admin")
+    resp = client.post(
+        "/attendance/enroll",
+        data={"student_id": str(seed["student1"].id)},
+        files={"file": ("a.jpg", (FIXTURES / "person_a_1.jpg").read_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 200
+    resp = client.post(
+        "/attendance/enroll",
+        data={"student_id": str(seed["student2"].id)},
+        files={"file": ("b.jpg", (FIXTURES / "person_b_1.jpg").read_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 200
+
+    _override_user("teacher", user_id=seed["teacher"].id)
+    resp = client.post(
+        "/attendance/mark",
+        data={"timetable_slot_id": str(seed["slot"].id)},
+        files={"file": ("classroom.jpg", (FIXTURES / "classroom_two_faces.jpg").read_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    matched_student_ids = {m["student_id"] for m in body["matches"]}
+    assert matched_student_ids == {seed["student1"].id, seed["student2"].id}
+    assert body["records_created"] == 2
+    assert body["unmatched_faces"] == []
+
+    records = db_session.query(AttendanceRecord).filter(AttendanceRecord.timetable_slot_id == seed["slot"].id).all()
+    assert {r.student_id for r in records} == {seed["student1"].id, seed["student2"].id}
+    assert all(r.status == "present" and r.source == "cv" for r in records)
+
+
 # --- POST /attendance/mark (recognition mocked, per task brief) ---
 
 
@@ -432,3 +560,105 @@ def test_review_returns_404_for_missing_record(client, seed):
     _override_user("admin")
     resp = client.put("/attendance/999999/review", json={"status": "present"})
     assert resp.status_code == 404
+
+
+# --- PUT /attendance/{record_id}/review: student reassignment --------------
+# A needs_review match can be wrong about WHICH student a face belongs to,
+# not just uncertain about presence - these confirm the admin can correct
+# the identity, not merely confirm/reject the original (possibly wrong) one.
+
+
+def test_review_reassigns_to_a_different_enrolled_student(client, seed, db_session):
+    record = AttendanceRecord(
+        student_id=seed["student1"].id,
+        class_id=seed["class"].id,
+        timetable_slot_id=seed["slot"].id,
+        date=date.today(),
+        status="present",
+        source="cv",
+        confidence_score=0.45,
+    )
+    db_session.add(record)
+    db_session.commit()
+    db_session.refresh(record)
+
+    # A real user id - reviewed_by is a genuine FK, unlike the plain-403/400
+    # tests elsewhere in this file that never reach the write.
+    _override_user("admin", user_id=seed["teacher"].id)
+    resp = client.put(
+        f"/attendance/{record.id}/review", json={"status": "present", "student_id": seed["student2"].id}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["student_id"] == seed["student2"].id
+    assert body["status"] == "present"
+
+    db_session.refresh(record)
+    assert record.student_id == seed["student2"].id
+
+
+def test_review_rejects_reassignment_to_a_student_not_enrolled_in_the_class(client, seed, db_session):
+    other_role_student = seed["student1"]  # stand-in; real check is against a genuinely unenrolled id
+    record = AttendanceRecord(
+        student_id=seed["student1"].id,
+        class_id=seed["class"].id,
+        timetable_slot_id=seed["slot"].id,
+        date=date.today(),
+        status="present",
+        source="cv",
+    )
+    db_session.add(record)
+    db_session.commit()
+    db_session.refresh(record)
+
+    _override_user("admin")
+    resp = client.put(f"/attendance/{record.id}/review", json={"status": "present", "student_id": 999999999})
+    assert resp.status_code == 400
+    db_session.refresh(record)
+    assert record.student_id == other_role_student.id  # unchanged
+
+
+def test_review_rejects_reassignment_that_would_collide_with_an_existing_record(client, seed, db_session):
+    record1 = AttendanceRecord(
+        student_id=seed["student1"].id,
+        class_id=seed["class"].id,
+        timetable_slot_id=seed["slot"].id,
+        date=date.today(),
+        status="present",
+        source="cv",
+    )
+    record2 = AttendanceRecord(
+        student_id=seed["student2"].id,
+        class_id=seed["class"].id,
+        timetable_slot_id=seed["slot"].id,
+        date=date.today(),
+        status="present",
+        source="cv",
+    )
+    db_session.add_all([record1, record2])
+    db_session.commit()
+    db_session.refresh(record1)
+
+    # Reassigning record1 to student2 would collide with record2's own
+    # (student2, slot, date, source) row - must be rejected, not silently
+    # create a duplicate the unique constraint would otherwise reject with an
+    # unhandled IntegrityError.
+    _override_user("admin")
+    resp = client.put(
+        f"/attendance/{record1.id}/review", json={"status": "present", "student_id": seed["student2"].id}
+    )
+    assert resp.status_code == 400
+    db_session.refresh(record1)
+    assert record1.student_id == seed["student1"].id  # unchanged
+
+
+def test_mark_response_includes_class_roster(client, seed):
+    _override_user("admin")
+    resp = client.post(
+        "/attendance/mark",
+        data={"timetable_slot_id": str(seed["slot"].id)},
+        files={"file": ("classroom.jpg", (FIXTURES / "classroom_two_faces.jpg").read_bytes(), "image/jpeg")},
+    )
+    assert resp.status_code == 200
+    roster_ids = {r["student_id"] for r in resp.json()["class_roster"]}
+    assert roster_ids == {seed["student1"].id, seed["student2"].id}

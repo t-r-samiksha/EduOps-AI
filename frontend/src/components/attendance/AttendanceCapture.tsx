@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { CheckCircle2, ClipboardCheck, ScanFace, Upload, UserPlus, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ClipboardCheck, ScanFace, Upload, UserPlus, XCircle } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -11,7 +11,13 @@ import PageHeader from "@/components/shared/PageHeader";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useTimetableActive } from "@/api/hooks/useTimetable";
-import { useEnrollStudent, useMarkAttendance, useAttendanceSummary, useReviewAttendanceRecord } from "@/api/hooks/useAttendance";
+import {
+  useEnrollStudent,
+  useAttendanceEnrollments,
+  useMarkAttendance,
+  useAttendanceSummary,
+  useReviewAttendanceRecord,
+} from "@/api/hooks/useAttendance";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { DEFAULT_ACADEMIC_YEAR, DAY_LABELS } from "@/lib/constants";
 import { ApiError } from "@/api/client";
@@ -68,15 +74,44 @@ function ConfidenceBadge({ confidence, needsReview }: { confidence: number; need
   );
 }
 
+/** Turns the backend's plain-string 422 reason into a clearer, more
+ * actionable message for this specific "exactly one face" requirement -
+ * the raw message ("Expected exactly one face in the reference photo, found
+ * 2") is accurate but easy to misread as a generic failure rather than "you
+ * picked a group photo, use single-face photos instead". */
+function describeEnrollError(message: string): string {
+  const multiMatch = message.match(/found (\d+)/i);
+  if (multiMatch) {
+    return `This photo has ${multiMatch[1]} faces - enroll each student separately with their own single-face photo.`;
+  }
+  if (/no face detected/i.test(message)) {
+    return "No face was detected in this photo. Try a clearer, well-lit photo showing just this student's face.";
+  }
+  return message;
+}
+
 function EnrollTab({ schoolId }: { schoolId: number }) {
   const lookup = useReferenceLookup(schoolId);
   const [studentId, setStudentId] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
   const enroll = useEnrollStudent();
+  // The real, persisted list - refetched on mount and after each successful
+  // enrollment, so it survives a full page reload or logout/login, unlike an
+  // in-memory session list.
+  const enrollments = useAttendanceEnrollments(schoolId);
 
   function handleSubmit() {
     if (!studentId || !file) return;
-    enroll.mutate({ studentId: Number(studentId), file });
+    enroll.mutate(
+      { studentId: Number(studentId), file },
+      {
+        onSuccess: () => {
+          // Reset so the form is ready for the next student in the same session.
+          setStudentId("");
+          setFile(null);
+        },
+      }
+    );
   }
 
   return (
@@ -87,6 +122,13 @@ function EnrollTab({ schoolId }: { schoolId: number }) {
           <CardDescription>One clear photo containing exactly one face. Stored as a face embedding for future recognition.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
+          <div className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/5 px-3.5 py-2.5 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              The photo must contain exactly one face. A group photo (e.g. two students together) will be rejected -
+              enroll each student separately with their own photo.
+            </span>
+          </div>
           <Field label="Student">
             <Select value={studentId} onValueChange={setStudentId}>
               <SelectTrigger>
@@ -108,7 +150,7 @@ function EnrollTab({ schoolId }: { schoolId: number }) {
           </Button>
           {enroll.isError && (
             <p className="text-sm text-urgent">
-              {enroll.error instanceof ApiError ? enroll.error.message : "Enrollment failed."}
+              {enroll.error instanceof ApiError ? describeEnrollError(enroll.error.message) : "Enrollment failed."}
             </p>
           )}
         </CardContent>
@@ -116,22 +158,33 @@ function EnrollTab({ schoolId }: { schoolId: number }) {
 
       <Card>
         <CardHeader>
-          <CardTitle>Result</CardTitle>
+          <CardTitle>Enrolled students</CardTitle>
+          <CardDescription>Real, persisted enrollments for this school - stays here across page reloads and logins, not just this session.</CardDescription>
         </CardHeader>
         <CardContent>
-          {enroll.isSuccess ? (
-            <div className="flex flex-col gap-1 text-sm">
-              <Badge variant="positive" className="w-fit">
-                Enrolled
-              </Badge>
-              <p className="text-ink-muted">
-                Embedding <span className="font-mono text-ink">#{enroll.data.id}</span> stored for student{" "}
-                <span className="font-mono text-ink">#{enroll.data.student_id}</span>
-              </p>
-              <p className="font-mono text-xs text-ink-muted">{new Date(enroll.data.enrolled_at).toLocaleString()}</p>
+          {enrollments.isLoading && <div className="h-24 animate-pulse rounded-lg bg-elevated/60" />}
+          {enrollments.isSuccess && enrollments.data.length === 0 && (
+            <p className="text-sm text-ink-muted">No students enrolled yet.</p>
+          )}
+          {enrollments.isSuccess && enrollments.data.length > 0 && (
+            <div className="flex flex-col gap-2">
+              {enrollments.data.map((result) => (
+                <div
+                  key={result.id}
+                  className="flex flex-col gap-1 rounded-xl border border-border bg-elevated/40 px-3.5 py-2.5 text-sm"
+                >
+                  <div className="flex items-center gap-2">
+                    <Badge variant="positive">Enrolled</Badge>
+                    <span className="font-medium text-ink">{result.student_name}</span>
+                  </div>
+                  <p className="text-xs text-ink-muted">
+                    Embedding <span className="font-mono text-ink">#{result.id}</span> stored for student{" "}
+                    <span className="font-mono text-ink">#{result.student_id}</span>
+                  </p>
+                  <p className="font-mono text-xs text-ink-muted">{new Date(result.enrolled_at).toLocaleString()}</p>
+                </div>
+              ))}
             </div>
-          ) : (
-            <p className="text-sm text-ink-muted">Nothing enrolled yet this session.</p>
           )}
         </CardContent>
       </Card>
@@ -148,6 +201,10 @@ function MarkTab({ schoolId }: { schoolId: number }) {
   const mark = useMarkAttendance();
   const review = useReviewAttendanceRecord();
   const [reviewedIds, setReviewedIds] = useState<Set<number>>(new Set());
+  // Only populated once an admin picks a DIFFERENT student than the one the
+  // CV pipeline originally matched for a needs_review row - "the system
+  // detected this face as X, but it's actually Y".
+  const [reassignments, setReassignments] = useState<Record<number, number>>({});
 
   const slotLabel = (s: TimetableSlot) => {
     const subject = lookup.data?.subjects.find((x) => x.id === s.subject_id)?.name ?? `Subject #${s.subject_id}`;
@@ -158,12 +215,15 @@ function MarkTab({ schoolId }: { schoolId: number }) {
   function handleSubmit() {
     if (!slotId || !file) return;
     setReviewedIds(new Set());
+    setReassignments({});
     mark.mutate({ timetableSlotId: Number(slotId), file, date });
   }
 
-  function handleReview(recordId: number, status: "present" | "absent") {
+  function handleReview(recordId: number, originalStudentId: number, status: "present" | "absent") {
+    const reassignedTo = reassignments[recordId];
+    const studentId = reassignedTo !== undefined && reassignedTo !== originalStudentId ? reassignedTo : undefined;
     review.mutate(
-      { recordId, status },
+      { recordId, status, studentId },
       { onSuccess: () => setReviewedIds((prev) => new Set(prev).add(recordId)) }
     );
   }
@@ -230,9 +290,33 @@ function MarkTab({ schoolId }: { schoolId: number }) {
               <TableBody>
                 {mark.data.matches.map((m) => {
                   const wasReviewed = reviewedIds.has(m.record_id);
+                  const editable = m.needs_review && !wasReviewed;
+                  const selectedStudentId = reassignments[m.record_id] ?? m.student_id;
                   return (
                     <TableRow key={m.record_id}>
-                      <TableCell className="font-medium">{studentName(m.student_id)}</TableCell>
+                      <TableCell className="font-medium">
+                        {editable ? (
+                          <Select
+                            value={String(selectedStudentId)}
+                            onValueChange={(v) => setReassignments((prev) => ({ ...prev, [m.record_id]: Number(v) }))}
+                          >
+                            <SelectTrigger className="h-8 w-40">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {mark.data.class_roster.map((s) => (
+                                <SelectItem key={s.student_id} value={String(s.student_id)}>
+                                  {s.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          // After a reassignment is confirmed, show the corrected
+                          // student - not the original (wrong) detected one.
+                          studentName(selectedStudentId)
+                        )}
+                      </TableCell>
                       <TableCell>
                         <ConfidenceBadge confidence={m.confidence} needsReview={m.needs_review} />
                       </TableCell>
@@ -241,7 +325,7 @@ function MarkTab({ schoolId }: { schoolId: number }) {
                           <span className={cn("text-xs", m.already_marked ? "text-ink-muted" : "text-positive")}>
                             {m.already_marked ? "already marked" : "newly marked"}
                           </span>
-                          {m.needs_review && !wasReviewed && (
+                          {editable && (
                             <>
                               <Badge variant="urgent">needs review</Badge>
                               <Button
@@ -249,7 +333,7 @@ function MarkTab({ schoolId }: { schoolId: number }) {
                                 size="sm"
                                 className="h-6 px-2 text-[0.6875rem]"
                                 disabled={review.isPending}
-                                onClick={() => handleReview(m.record_id, "present")}
+                                onClick={() => handleReview(m.record_id, m.student_id, "present")}
                               >
                                 <CheckCircle2 className="h-3 w-3" /> Confirm
                               </Button>
@@ -258,7 +342,7 @@ function MarkTab({ schoolId }: { schoolId: number }) {
                                 size="sm"
                                 className="h-6 px-2 text-[0.6875rem]"
                                 disabled={review.isPending}
-                                onClick={() => handleReview(m.record_id, "absent")}
+                                onClick={() => handleReview(m.record_id, m.student_id, "absent")}
                               >
                                 <XCircle className="h-3 w-3" /> Not present
                               </Button>

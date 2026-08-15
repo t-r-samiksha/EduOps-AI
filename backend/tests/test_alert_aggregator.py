@@ -12,6 +12,7 @@ from app.models.role import Role
 from app.models.school import School
 from app.models.staffing import LeaveRequest, Substitution
 from app.models.subject import Subject
+from app.models.syllabus import AnomalyFlag
 from app.models.timetable import Room, TimetableSlot
 from app.models.user import User
 from app.services.alert_aggregator import (
@@ -19,6 +20,8 @@ from app.services.alert_aggregator import (
     FEE_OVERDUE_URGENT_DAYS,
     Alert,
     aggregate_alerts,
+    alert_belongs_to_school,
+    anomaly_flag_alerts,
     attendance_reconciliation_alerts,
     document_failed_alerts,
     document_low_confidence_alerts,
@@ -61,14 +64,26 @@ def base(db_session):
 # --- risk_flag_alerts ---
 
 
-# These source functions correctly aggregate globally with no school-scoping (same
-# documented simplification as routers/risk.py and staffing.py), so a live DB with
-# real leftover rows from earlier sessions means these tests must find their own
-# alert by composite id rather than assume the table is empty or has exactly N rows.
+# Every source function defaults school_id=None ("no scoping") so these tests can
+# keep finding their own alert by composite id in a live DB with leftover rows from
+# earlier sessions, rather than assuming the table is empty or has exactly N rows -
+# see "cross-tenant school scoping" below for the real school_id filtering tests.
 
 
 def _find(alerts, alert_id):
     return next(a for a in alerts if a.id == alert_id)
+
+
+def _make_school_with_student(db_session, name):
+    school = School(name=name)
+    db_session.add(school)
+    db_session.flush()
+    student_role = db_session.query(Role).filter(Role.name == "student").one()
+    teacher_role = db_session.query(Role).filter(Role.name == "teacher").one()
+    student = _make_user(db_session, student_role, "student", school)
+    teacher = _make_user(db_session, teacher_role, "teacher", school)
+    db_session.commit()
+    return {"school": school, "student": student, "teacher": teacher}
 
 
 def test_risk_flag_high_open_is_urgent(db_session, base):
@@ -394,3 +409,163 @@ def test_real_registry_surfaces_a_real_overdue_fee(db_session, base):
 
     alerts = aggregate_alerts(db_session)  # real ALERT_SOURCES, not fakes
     assert f"fee_overdue:{record.id}" in {a.id for a in alerts}
+
+
+# --- cross-tenant school scoping ---------------------------------------------------
+# Regression tests for a real cross-tenant leak the user caught live in the running
+# app: the Command Center (GET /admin/alerts) kept showing another school's risk flag
+# even after routers/risk.py's GET /risk/flagged and GET /admin/early-warning/students
+# were fixed for the exact same class of bug, because aggregate_alerts() and every
+# per-source function here had NO school_id parameter at all. Each test below builds
+# a second, unrelated school and proves that passing school_id excludes its rows -
+# and that the pre-existing school_id=None default still includes everything (the
+# same "no scoping" behavior every test above this section already relies on).
+
+
+def _make_slot(db_session, school, teacher):
+    subject = Subject(name="Math", school_id=school.id)
+    room = Room(name="R1", capacity=30, room_type="classroom", school_id=school.id)
+    db_session.add_all([subject, room])
+    db_session.flush()
+    school_class = SchoolClass(name="8A", academic_year=ACADEMIC_YEAR, school_id=school.id, class_teacher_id=teacher.id)
+    db_session.add(school_class)
+    db_session.flush()
+    ts = TimetableSlot(
+        day_of_week=0, period_number=0, start_time=time(8, 0), end_time=time(8, 45),
+        subject_id=subject.id, teacher_id=teacher.id, class_id=school_class.id, room_id=room.id,
+        academic_year=ACADEMIC_YEAR, is_active=True,
+    )
+    db_session.add(ts)
+    db_session.commit()
+    db_session.refresh(ts)
+    return ts, school_class
+
+
+def test_risk_flag_alerts_school_scoping_excludes_other_school(db_session, base):
+    other = _make_school_with_student(db_session, "Other School A")
+    mine = RiskFlag(student_id=base["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    theirs = RiskFlag(student_id=other["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    scoped_ids = {a.id for a in risk_flag_alerts(db_session, school_id=base["school"].id)}
+    assert f"risk_flag:{mine.id}" in scoped_ids
+    assert f"risk_flag:{theirs.id}" not in scoped_ids
+
+    unscoped_ids = {a.id for a in risk_flag_alerts(db_session)}
+    assert f"risk_flag:{theirs.id}" in unscoped_ids  # default None still means "no scoping"
+
+
+def test_leave_request_alerts_school_scoping_excludes_other_school(db_session, base):
+    other = _make_school_with_student(db_session, "Other School B")
+    mine = LeaveRequest(teacher_id=base["teacher"].id, start_date=date.today(), end_date=date.today(), reason="x", status="pending")
+    theirs = LeaveRequest(teacher_id=other["teacher"].id, start_date=date.today(), end_date=date.today(), reason="x", status="pending")
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    scoped_ids = {a.id for a in leave_request_alerts(db_session, school_id=base["school"].id)}
+    assert f"leave_request:{mine.id}" in scoped_ids
+    assert f"leave_request:{theirs.id}" not in scoped_ids
+
+
+def test_substitution_alerts_school_scoping_excludes_other_school(db_session, base, slot):
+    other = _make_school_with_student(db_session, "Other School C")
+    other_slot, _ = _make_slot(db_session, other["school"], other["teacher"])
+
+    lr_mine = LeaveRequest(teacher_id=base["teacher"].id, start_date=date.today(), end_date=date.today(), reason="x", status="approved")
+    lr_theirs = LeaveRequest(teacher_id=other["teacher"].id, start_date=date.today(), end_date=date.today(), reason="x", status="approved")
+    db_session.add_all([lr_mine, lr_theirs])
+    db_session.flush()
+    sub_mine = Substitution(leave_request_id=lr_mine.id, timetable_slot_id=slot.id, original_teacher_id=base["teacher"].id, status="suggested")
+    sub_theirs = Substitution(leave_request_id=lr_theirs.id, timetable_slot_id=other_slot.id, original_teacher_id=other["teacher"].id, status="suggested")
+    db_session.add_all([sub_mine, sub_theirs])
+    db_session.commit()
+
+    scoped_ids = {a.id for a in substitution_alerts(db_session, school_id=base["school"].id)}
+    assert f"substitution:{sub_mine.id}" in scoped_ids
+    assert f"substitution:{sub_theirs.id}" not in scoped_ids
+
+
+def test_document_failed_alerts_school_scoping_excludes_other_school(db_session, base):
+    other = _make_school_with_student(db_session, "Other School D")
+    mine = Document(uploaded_by=base["student"].id, school_id=base["school"].id, document_type="admission_form", file_url="x", status="failed")
+    theirs = Document(uploaded_by=other["student"].id, school_id=other["school"].id, document_type="admission_form", file_url="x", status="failed")
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    scoped_ids = {a.id for a in document_failed_alerts(db_session, school_id=base["school"].id)}
+    assert f"document_failed:{mine.id}" in scoped_ids
+    assert f"document_failed:{theirs.id}" not in scoped_ids
+
+
+def test_attendance_reconciliation_alerts_school_scoping_excludes_other_school(db_session, base, slot):
+    other = _make_school_with_student(db_session, "Other School E")
+    other_slot, _ = _make_slot(db_session, other["school"], other["teacher"])
+
+    mine = AttendanceReconciliation(student_id=base["student"].id, timetable_slot_id=slot.id, date=date.today(), reason="cv_only", status="pending")
+    theirs = AttendanceReconciliation(student_id=other["student"].id, timetable_slot_id=other_slot.id, date=date.today(), reason="cv_only", status="pending")
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    scoped_ids = {a.id for a in attendance_reconciliation_alerts(db_session, school_id=base["school"].id)}
+    assert f"attendance_reconciliation:{mine.id}" in scoped_ids
+    assert f"attendance_reconciliation:{theirs.id}" not in scoped_ids
+
+
+def test_anomaly_flag_alerts_school_scoping_excludes_other_school_class(db_session, base):
+    other = _make_school_with_student(db_session, "Other School F")
+    _, mine_class = _make_slot(db_session, base["school"], base["teacher"])
+    _, their_class = _make_slot(db_session, other["school"], other["teacher"])
+
+    mine = AnomalyFlag(type="attendance_drop", entity_type="classes", entity_id=mine_class.id, severity="urgent", detail={"message": "m"}, status="open")
+    theirs = AnomalyFlag(type="attendance_drop", entity_type="classes", entity_id=their_class.id, severity="urgent", detail={"message": "m"}, status="open")
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    scoped_ids = {a.id for a in anomaly_flag_alerts(db_session, school_id=base["school"].id)}
+    assert f"anomaly_flag:{mine.id}" in scoped_ids
+    assert f"anomaly_flag:{theirs.id}" not in scoped_ids
+
+
+def test_fee_overdue_alerts_school_scoping_excludes_other_school(db_session, base):
+    other = _make_school_with_student(db_session, "Other School G")
+    schedule_mine = FeeSchedule(school_id=base["school"].id, academic_year=ACADEMIC_YEAR, fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=5))
+    schedule_theirs = FeeSchedule(school_id=other["school"].id, academic_year=ACADEMIC_YEAR, fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=5))
+    db_session.add_all([schedule_mine, schedule_theirs])
+    db_session.flush()
+    mine = FeeRecord(student_id=base["student"].id, fee_schedule_id=schedule_mine.id, amount_due=15000.0, amount_paid=0.0, status="overdue", due_date=schedule_mine.due_date)
+    theirs = FeeRecord(student_id=other["student"].id, fee_schedule_id=schedule_theirs.id, amount_due=15000.0, amount_paid=0.0, status="overdue", due_date=schedule_theirs.due_date)
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    scoped_ids = {a.id for a in fee_overdue_alerts(db_session, school_id=base["school"].id, today=date.today())}
+    assert f"fee_overdue:{mine.id}" in scoped_ids
+    assert f"fee_overdue:{theirs.id}" not in scoped_ids
+
+
+def test_aggregate_alerts_with_real_registry_never_leaks_another_schools_risk_flag(db_session, base):
+    """The exact bug the user caught live: an admin's Command Center feed
+    (GET /admin/alerts, backed by aggregate_alerts with the real ALERT_SOURCES
+    registry) must not include another school's flagged student."""
+    other = _make_school_with_student(db_session, "Other School H")
+    theirs = RiskFlag(student_id=other["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    db_session.add(theirs)
+    db_session.commit()
+
+    alerts = aggregate_alerts(db_session, school_id=base["school"].id)
+    assert f"risk_flag:{theirs.id}" not in {a.id for a in alerts}
+
+
+def test_alert_belongs_to_school_true_for_own_school_false_for_other(db_session, base):
+    other = _make_school_with_student(db_session, "Other School I")
+    mine = RiskFlag(student_id=base["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    theirs = RiskFlag(student_id=other["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    assert alert_belongs_to_school(db_session, "risk_flag", mine.id, base["school"].id) is True
+    assert alert_belongs_to_school(db_session, "risk_flag", theirs.id, base["school"].id) is False
+
+
+def test_alert_belongs_to_school_unknown_source_fails_closed(db_session, base):
+    assert alert_belongs_to_school(db_session, "nonexistent_source", 1, base["school"].id) is False

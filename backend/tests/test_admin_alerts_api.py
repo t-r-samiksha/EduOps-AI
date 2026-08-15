@@ -16,9 +16,9 @@ from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user
 
 
-def _override_user(role: str, user_id: int = 999):
+def _override_user(role: str, user_id: int = 999, school_id: int | None = None):
     def _fake_user():
-        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role)
+        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role, school_id=school_id)
 
     app.dependency_overrides[get_current_user] = _fake_user
 
@@ -337,3 +337,85 @@ def test_overdue_fee_appears_in_get_admin_alerts(client, db_session, seed):
     match = next(i for i in items if i["id"] == f"fee_overdue:{record.id}")
     assert match["source"] == "fee_overdue"
     assert match["entity_type"] == "fee_records"
+
+
+# --- cross-tenant school scoping: real HTTP-level regression --------------------
+# The exact bug the user caught live: GET /admin/alerts (and, discovered while fixing
+# it, POST /admin/alerts/{id}/resolve) had no school scoping at all, so an admin
+# passing a real school_id (which every real admin/principal has via
+# services/auth.get_current_user -> User.school_id) still saw/could resolve every
+# OTHER school's alerts too. These tests pass school_id explicitly via _override_user
+# (unlike every test above, which relies on the None default for single-school
+# scenarios) to exercise the real scoped code path.
+
+
+@pytest.fixture()
+def other_seed(db_session):
+    school = School(name="Other Test School")
+    db_session.add(school)
+    db_session.flush()
+    admin_role = db_session.query(Role).filter(Role.name == "admin").one()
+    student_role = db_session.query(Role).filter(Role.name == "student").one()
+    admin_user = _make_user(db_session, admin_role, "admin", school)
+    student = _make_user(db_session, student_role, "student", school)
+    db_session.commit()
+    return {"school": school, "admin_user": admin_user, "student": student}
+
+
+def test_get_alerts_with_school_id_excludes_other_schools_risk_flag(client, db_session, seed, other_seed):
+    theirs = RiskFlag(student_id=other_seed["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    db_session.add(theirs)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.get("/admin/alerts")
+    assert resp.status_code == 200
+    assert f"risk_flag:{theirs.id}" not in {i["id"] for i in resp.json()["items"]}
+
+    _override_user("admin", user_id=other_seed["admin_user"].id, school_id=other_seed["school"].id)
+    resp = client.get("/admin/alerts")
+    assert f"risk_flag:{theirs.id}" in {i["id"] for i in resp.json()["items"]}
+
+
+def test_summary_with_school_id_excludes_other_schools_risk_flag(client, db_session, seed, other_seed):
+    theirs = RiskFlag(student_id=other_seed["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    db_session.add(theirs)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.get("/admin/alerts/summary")
+    assert resp.json()["by_source"].get("risk_flag", 0) == 0
+
+
+def test_resolve_with_school_id_returns_404_for_other_schools_risk_flag(client, db_session, seed, other_seed):
+    """The write-side twin of the read-side leak above: without alert_belongs_to_school
+    guarding this endpoint, an admin from `seed`'s school could resolve a flag that
+    isn't even visible to them in GET /admin/alerts, just by knowing/guessing its id."""
+    theirs = RiskFlag(student_id=other_seed["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    db_session.add(theirs)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.post(f"/admin/alerts/risk_flag:{theirs.id}/resolve")
+    assert resp.status_code == 404
+
+    db_session.refresh(theirs)
+    assert theirs.status == "open"  # untouched
+
+    _override_user("admin", user_id=other_seed["admin_user"].id, school_id=other_seed["school"].id)
+    resp = client.post(f"/admin/alerts/risk_flag:{theirs.id}/resolve")
+    assert resp.status_code == 200
+    db_session.refresh(theirs)
+    assert theirs.status == "resolved"
+
+
+def test_stream_generator_with_school_id_excludes_other_schools_risk_flag(db_session, seed, other_seed):
+    from app.routers.admin_alerts import _alert_event_stream
+
+    theirs = RiskFlag(student_id=other_seed["student"].id, risk_level="high", score=0.8, reasons=["x"], status="open")
+    db_session.add(theirs)
+    db_session.commit()
+
+    events = asyncio.run(_collect(_alert_event_stream(db_session, school_id=seed["school"].id, max_events=1), 1))
+    payload = json.loads(events[0][len("data:") :].strip())
+    assert not any(a["id"] == f"risk_flag:{theirs.id}" for a in payload)

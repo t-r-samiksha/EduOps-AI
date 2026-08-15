@@ -86,11 +86,13 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.models.attendance import AttendanceReconciliation
+from app.models.class_ import SchoolClass
 from app.models.document import Document, ExtractedEntity
 from app.models.fees import FeeRecord
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
-from app.models.syllabus import AnomalyFlag
+from app.models.syllabus import AnomalyFlag, SyllabusPlan
+from app.models.user import User
 
 SEVERITY_LEVELS = ("normal", "urgent")
 
@@ -131,15 +133,39 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _user_ids_in_school(db: Session, school_id: int | None) -> set[int]:
+    """Every real user (student or teacher) belonging to this school - most alert
+    source tables only reach a school via a *_id FK into users.id, not a school_id
+    column of their own. Mirrors routers/risk.py's _students_in_school (same
+    underlying gap, just reused across every source below instead of one endpoint)."""
+    if school_id is None:
+        return set()
+    return {row.id for row in db.query(User.id).filter(User.school_id == school_id)}
+
+
+def _class_ids_in_school(db: Session, school_id: int | None) -> set[int]:
+    if school_id is None:
+        return set()
+    return {row.id for row in db.query(SchoolClass.id).filter(SchoolClass.school_id == school_id)}
+
+
 # --- individual alert sources ------------------------------------------------------
+# Every source below takes an optional `school_id`, defaulting to None ("no
+# scoping - return every school's rows") so the existing single-school unit tests in
+# test_alert_aggregator.py that call these directly keep working unchanged.
+# aggregate_alerts() always receives a real school_id from routers/admin_alerts.py at
+# the API boundary - the None default only matters for direct/unit-level calls.
 
 
-def risk_flag_alerts(db: Session) -> list[Alert]:
+def risk_flag_alerts(db: Session, school_id: int | None = None) -> list[Alert]:
     """Open/acknowledged high-risk students. urgent only while status="open" AND
     risk_level="high" - once acknowledged, someone is already on it, so it's
     downgraded to normal rather than continuing to shout. Resolved flags are
     excluded by the query itself (matches /risk/flagged's own convention)."""
-    flags = db.query(RiskFlag).filter(RiskFlag.status != "resolved").all()
+    query = db.query(RiskFlag).filter(RiskFlag.status != "resolved")
+    if school_id is not None:
+        query = query.filter(RiskFlag.student_id.in_(_user_ids_in_school(db, school_id) or [-1]))
+    flags = query.all()
     alerts = []
     for flag in flags:
         urgent = flag.risk_level == "high" and flag.status == "open"
@@ -159,12 +185,15 @@ def risk_flag_alerts(db: Session) -> list[Alert]:
     return alerts
 
 
-def leave_request_alerts(db: Session) -> list[Alert]:
+def leave_request_alerts(db: Session, school_id: int | None = None) -> list[Alert]:
     """Pending leave requests awaiting an approve/reject decision. Always normal
     severity per the playbook's own example - a pending leave is routine admin
     workload, not an emergency (a *near-date unconfirmed substitution* stemming from
     an approved leave is the thing that escalates - see substitution_alerts)."""
-    requests = db.query(LeaveRequest).filter(LeaveRequest.status == "pending").all()
+    query = db.query(LeaveRequest).filter(LeaveRequest.status == "pending")
+    if school_id is not None:
+        query = query.filter(LeaveRequest.teacher_id.in_(_user_ids_in_school(db, school_id) or [-1]))
+    requests = query.all()
     return [
         Alert(
             id=f"leave_request:{lr.id}",
@@ -181,19 +210,23 @@ def leave_request_alerts(db: Session) -> list[Alert]:
     ]
 
 
-def substitution_alerts(db: Session, today: date | None = None) -> list[Alert]:
+def substitution_alerts(db: Session, school_id: int | None = None, today: date | None = None) -> list[Alert]:
     """Unconfirmed (status="suggested") substitutions - no substitute teacher locked
     in yet. Escalates to urgent within SUBSTITUTION_URGENT_WINDOW_DAYS of the
     covering leave's start_date (or already past it). created_at uses the parent
     LeaveRequest.requested_at as a proxy - Substitution itself has no creation
-    timestamp of its own (see this module's docstring)."""
+    timestamp of its own (see this module's docstring). Scoped via the covering
+    LeaveRequest.teacher_id, the same anchor leave_request_alerts uses - Substitution
+    itself has no direct FK to a school either."""
     today = today or _utcnow().date()
-    subs = (
+    query = (
         db.query(Substitution, LeaveRequest)
         .join(LeaveRequest, Substitution.leave_request_id == LeaveRequest.id)
         .filter(Substitution.status == "suggested")
-        .all()
     )
+    if school_id is not None:
+        query = query.filter(LeaveRequest.teacher_id.in_(_user_ids_in_school(db, school_id) or [-1]))
+    subs = query.all()
     alerts = []
     for sub, leave in subs:
         days_until = (leave.start_date - today).days
@@ -217,13 +250,18 @@ def substitution_alerts(db: Session, today: date | None = None) -> list[Alert]:
     return alerts
 
 
-def document_failed_alerts(db: Session) -> list[Alert]:
+def document_failed_alerts(db: Session, school_id: int | None = None) -> list[Alert]:
     """Documents where OCR processing itself failed. Urgent: Document.file_url is a
     descriptive reference only (see models/document.py) - the uploaded image bytes
     are never persisted, so a failed document cannot simply be retried without
     re-uploading the original paper form again. Losing that recoverability window is
-    a real operational risk, not just a processing hiccup."""
-    docs = db.query(Document).filter(Document.status == "failed").all()
+    a real operational risk, not just a processing hiccup. Document carries its own
+    (nullable) school_id column directly - a null-school_id document stays invisible
+    here too, matching every other school_id-scoped document endpoint."""
+    query = db.query(Document).filter(Document.status == "failed")
+    if school_id is not None:
+        query = query.filter(Document.school_id == school_id)
+    docs = query.all()
     return [
         Alert(
             id=f"document_failed:{doc.id}",
@@ -240,7 +278,7 @@ def document_failed_alerts(db: Session) -> list[Alert]:
     ]
 
 
-def document_low_confidence_alerts(db: Session) -> list[Alert]:
+def document_low_confidence_alerts(db: Session, school_id: int | None = None) -> list[Alert]:
     """Documents with at least one extracted field flagged is_low_confidence and not
     yet corrected. One alert per DOCUMENT (not per field) - a document with several
     shaky fields shouldn't flood the feed with duplicates for what's really one "go
@@ -254,7 +292,10 @@ def document_low_confidence_alerts(db: Session) -> list[Alert]:
     document_ids = [r.document_id for r in rows]
     if not document_ids:
         return []
-    docs = db.query(Document).filter(Document.id.in_(document_ids)).all()
+    query = db.query(Document).filter(Document.id.in_(document_ids))
+    if school_id is not None:
+        query = query.filter(Document.school_id == school_id)
+    docs = query.all()
     return [
         Alert(
             id=f"document_low_confidence:{doc.id}",
@@ -271,7 +312,7 @@ def document_low_confidence_alerts(db: Session) -> list[Alert]:
     ]
 
 
-def attendance_reconciliation_alerts(db: Session) -> list[Alert]:
+def attendance_reconciliation_alerts(db: Session, school_id: int | None = None) -> list[Alert]:
     """Pending CV/RFID attendance mismatches awaiting manual review. Included for
     completeness (the table and its status field are real, already-shipped schema -
     see models/attendance.py), but honestly expect this to always return empty today:
@@ -280,7 +321,10 @@ def attendance_reconciliation_alerts(db: Session) -> list[Alert]:
     model's own docstring. Not a new feature - just wiring an existing empty pipe
     into the feed so it lights up automatically once that work lands, no aggregator
     changes needed then."""
-    rows = db.query(AttendanceReconciliation).filter(AttendanceReconciliation.status == "pending").all()
+    query = db.query(AttendanceReconciliation).filter(AttendanceReconciliation.status == "pending")
+    if school_id is not None:
+        query = query.filter(AttendanceReconciliation.student_id.in_(_user_ids_in_school(db, school_id) or [-1]))
+    rows = query.all()
     return [
         Alert(
             id=f"attendance_reconciliation:{r.id}",
@@ -297,7 +341,28 @@ def attendance_reconciliation_alerts(db: Session) -> list[Alert]:
     ]
 
 
-def anomaly_flag_alerts(db: Session) -> list[Alert]:
+def _anomaly_flag_in_school(db: Session, flag: AnomalyFlag, school_id: int) -> bool:
+    """AnomalyFlag.entity_id is polymorphic - which table it names depends on
+    entity_type (see that model's docstring) - so unlike every other source there's
+    no single FK to join on. entity_type is one of exactly 4 real values today
+    (services/anomaly_detector.py, scripts/run_nightly_syllabus_anomaly_scan.py):
+    "classes", "users", "documents", "syllabus_plans". Any other value fails CLOSED
+    (returns False, i.e. hidden) rather than guessing - the same "don't show it if
+    you can't prove it's yours" rule as every other source's school_id filter."""
+    if flag.entity_type == "classes":
+        return flag.entity_id in _class_ids_in_school(db, school_id)
+    if flag.entity_type == "users":
+        return flag.entity_id in _user_ids_in_school(db, school_id)
+    if flag.entity_type == "documents":
+        doc = db.query(Document.school_id).filter(Document.id == flag.entity_id).one_or_none()
+        return doc is not None and doc.school_id == school_id
+    if flag.entity_type == "syllabus_plans":
+        plan = db.query(SyllabusPlan.class_id).filter(SyllabusPlan.id == flag.entity_id).one_or_none()
+        return plan is not None and plan.class_id in _class_ids_in_school(db, school_id)
+    return False
+
+
+def anomaly_flag_alerts(db: Session, school_id: int | None = None) -> list[Alert]:
     """Open AnomalyFlag rows (services/anomaly_detector.py + syllabus_pace.py, via
     scripts/run_nightly_syllabus_anomaly_scan.py) - the 7th alert source, added in
     the Syllabus Tracking & Anomaly Detection session. `severity` is copied straight
@@ -308,6 +373,8 @@ def anomaly_flag_alerts(db: Session) -> list[Alert]:
     that script's `_upsert_flag`) - rather than re-deriving formatting logic here
     that would have to know about every anomaly `type`."""
     flags = db.query(AnomalyFlag).filter(AnomalyFlag.status != "resolved").all()
+    if school_id is not None:
+        flags = [f for f in flags if _anomaly_flag_in_school(db, f, school_id)]
     return [
         Alert(
             id=f"anomaly_flag:{flag.id}",
@@ -330,12 +397,17 @@ threshold, deliberately - "urgent" here and "escalated" there should agree on wh
 counts as seriously overdue rather than each inventing its own independent number."""
 
 
-def fee_overdue_alerts(db: Session, today: date | None = None) -> list[Alert]:
+def fee_overdue_alerts(db: Session, school_id: int | None = None, today: date | None = None) -> list[Alert]:
     """Open FeeRecord rows in status="overdue" - the 8th alert source, added in the
     Fees & Admissions session. Severity escalates at FEE_OVERDUE_URGENT_DAYS, same
-    threshold services/fee_reminder_engine.py treats as its final escalated tier."""
+    threshold services/fee_reminder_engine.py treats as its final escalated tier.
+    FeeRecord has no school_id of its own (only student_id/fee_schedule_id - see
+    models/fees.py) so scoping goes through the student, same as risk_flag."""
     today = today or _utcnow().date()
-    records = db.query(FeeRecord).filter(FeeRecord.status == "overdue").all()
+    query = db.query(FeeRecord).filter(FeeRecord.status == "overdue")
+    if school_id is not None:
+        query = query.filter(FeeRecord.student_id.in_(_user_ids_in_school(db, school_id) or [-1]))
+    records = query.all()
     alerts = []
     for r in records:
         days_overdue = (today - r.due_date).days
@@ -371,20 +443,29 @@ ALERT_SOURCES: dict[str, Callable[[Session], list[Alert]]] = {
 def aggregate_alerts(
     db: Session,
     *,
+    school_id: int | None = None,
     dismissed_ids: set[str] | None = None,
     since: datetime | None = None,
     severity: str | None = None,
-    sources: dict[str, Callable[[Session], list[Alert]]] = ALERT_SOURCES,
+    sources: dict[str, Callable[..., list[Alert]]] = ALERT_SOURCES,
 ) -> list[Alert]:
     """Runs every registered source, filters out dismissed/since/severity, and
     returns newest-first. `sources` defaults to the real registry - tests override it
     to exercise the aggregation mechanism with fake sources without depending on
-    every real table."""
+    every real table.
+
+    `school_id` is the real, previously-missing cross-tenant scope: every registered
+    source function accepts it (see each one's own docstring for how it's applied),
+    but only when passed here explicitly - routers/admin_alerts.py always passes the
+    calling admin/principal's real user.school_id. Left as None (the default) this
+    behaves exactly as before school-scoping existed, which is what lets the
+    existing single-school unit tests in test_alert_aggregator.py (and the
+    fake-source tests here, whose lambdas only take `db`) keep working unchanged."""
     dismissed_ids = dismissed_ids or set()
 
     alerts: list[Alert] = []
     for fn in sources.values():
-        alerts.extend(fn(db))
+        alerts.extend(fn(db, school_id) if school_id is not None else fn(db))
 
     alerts = [a for a in alerts if a.id not in dismissed_ids]
     if since is not None:
@@ -394,6 +475,43 @@ def aggregate_alerts(
 
     alerts.sort(key=lambda a: a.created_at, reverse=True)
     return alerts
+
+
+def alert_belongs_to_school(db: Session, source: str, entity_id: int, school_id: int) -> bool:
+    """The write-side twin of every source function's school_id filter above - used
+    by routers/admin_alerts.py's resolve endpoint so an admin can't resolve/dismiss
+    another school's alert just by guessing its "{source}:{entity_id}" id (that id is
+    handed to any admin/principal client via GET /admin/alerts, so it's guessable in
+    the sense that any admin of ANY school can construct one). Mirrors each source's
+    own school_id join rather than re-deriving one; unknown/unrecognized sources fail
+    closed (False)."""
+    if source == "risk_flag":
+        row = db.query(RiskFlag.student_id).filter(RiskFlag.id == entity_id).one_or_none()
+        return row is not None and row.student_id in _user_ids_in_school(db, school_id)
+    if source == "leave_request":
+        row = db.query(LeaveRequest.teacher_id).filter(LeaveRequest.id == entity_id).one_or_none()
+        return row is not None and row.teacher_id in _user_ids_in_school(db, school_id)
+    if source == "substitution":
+        row = (
+            db.query(LeaveRequest.teacher_id)
+            .join(Substitution, Substitution.leave_request_id == LeaveRequest.id)
+            .filter(Substitution.id == entity_id)
+            .one_or_none()
+        )
+        return row is not None and row.teacher_id in _user_ids_in_school(db, school_id)
+    if source in ("document_failed", "document_low_confidence"):
+        row = db.query(Document.school_id).filter(Document.id == entity_id).one_or_none()
+        return row is not None and row.school_id == school_id
+    if source == "attendance_reconciliation":
+        row = db.query(AttendanceReconciliation.student_id).filter(AttendanceReconciliation.id == entity_id).one_or_none()
+        return row is not None and row.student_id in _user_ids_in_school(db, school_id)
+    if source == "fee_overdue":
+        row = db.query(FeeRecord.student_id).filter(FeeRecord.id == entity_id).one_or_none()
+        return row is not None and row.student_id in _user_ids_in_school(db, school_id)
+    if source == "anomaly_flag":
+        flag = db.query(AnomalyFlag).filter(AnomalyFlag.id == entity_id).one_or_none()
+        return flag is not None and _anomaly_flag_in_school(db, flag, school_id)
+    return False
 
 
 def summarize_alerts(alerts: list[Alert]) -> dict:

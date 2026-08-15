@@ -1,12 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Users } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
+import { useParentChildren } from "@/api/hooks/useParent";
 import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
-import Field from "@/components/ui/field";
 import PageHeader from "@/components/shared/PageHeader";
 import TimetableGrid from "@/components/timetable/TimetableGrid";
 import GenerateTimetableForm from "@/components/timetable/GenerateTimetableForm";
@@ -17,10 +17,19 @@ export default function TimetablePage() {
   const schoolId = useCurrentUser().data?.school_id;
   const lookup = useReferenceLookup(schoolId);
   const [classId, setClassId] = useState<number | undefined>(undefined);
-  const [studentId, setStudentId] = useState<string>("");
+  const children = useParentChildren();
+  const [selectedChildId, setSelectedChildId] = useState<string>("");
 
   const isAdminLike = role === "admin" || role === "principal";
-  const parentStudentId = role === "parent" && studentId.trim() ? Number(studentId) : undefined;
+
+  useEffect(() => {
+    if (role === "parent" && !selectedChildId && children.data?.items.length) {
+      setSelectedChildId(String(children.data.items[0].id));
+    }
+  }, [role, children.data, selectedChildId]);
+
+  const parentStudentId = role === "parent" && selectedChildId ? Number(selectedChildId) : undefined;
+  const showChildSelect = role === "parent" && (children.data?.items.length ?? 0) > 1;
 
   const { data, isLoading, error } = useTimetableActive({
     academicYear: DEFAULT_ACADEMIC_YEAR,
@@ -74,28 +83,29 @@ export default function TimetablePage() {
 
             {isAdminLike && schoolId != null && <GenerateTimetableForm schoolId={schoolId} />}
 
-            {role === "parent" && (
-              <Field label="" className="w-40">
-                <Input
-                  type="number"
-                  value={studentId}
-                  onChange={(e) => setStudentId(e.target.value)}
-                  placeholder="Child's student ID"
-                />
-              </Field>
+            {showChildSelect && (
+              <Select value={selectedChildId} onValueChange={setSelectedChildId}>
+                <SelectTrigger className="w-56">
+                  <SelectValue placeholder="Select child" />
+                </SelectTrigger>
+                <SelectContent>
+                  {children.data?.items.map((c) => (
+                    <SelectItem key={c.id} value={String(c.id)}>
+                      {c.name} {c.class_name ? `· ${c.class_name}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
           </>
         }
       />
 
-      {role === "parent" && parentStudentId === undefined && (
+      {role === "parent" && !children.isLoading && (children.data?.items.length ?? 0) === 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Enter a student ID</CardTitle>
-            <CardDescription>
-              There's no "my linked children" lookup endpoint yet — enter your child's numeric student ID above to view
-              their timetable. This is a known gap, not a bug.
-            </CardDescription>
+            <CardTitle className="flex items-center gap-2"><Users className="h-4 w-4" /> No linked children</CardTitle>
+            <CardDescription>This account has no linked children yet.</CardDescription>
           </CardHeader>
         </Card>
       )}

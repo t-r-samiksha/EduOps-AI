@@ -95,6 +95,13 @@ export interface EnrollResponse {
   enrolled_at: string;
 }
 
+export interface EnrollmentListItem {
+  id: number;
+  student_id: number;
+  student_name: string;
+  enrolled_at: string;
+}
+
 export interface AttendanceMatch {
   student_id: number;
   confidence: number;
@@ -110,6 +117,11 @@ export interface UnmatchedFace {
   best_confidence: number;
 }
 
+export interface RosterStudent {
+  student_id: number;
+  name: string;
+}
+
 export interface MarkAttendanceResponse {
   timetable_slot_id: number;
   class_id: number;
@@ -117,6 +129,7 @@ export interface MarkAttendanceResponse {
   records_created: number;
   matches: AttendanceMatch[];
   unmatched_faces: UnmatchedFace[];
+  class_roster: RosterStudent[];
 }
 
 export interface AttendanceSummaryItem {

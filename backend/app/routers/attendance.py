@@ -56,6 +56,11 @@ class UnmatchedFaceOut(BaseModel):
     an enrolled embedding at all."""
 
 
+class RosterStudentOut(BaseModel):
+    student_id: int
+    name: str
+
+
 class MarkResponse(BaseModel):
     timetable_slot_id: int
     class_id: int
@@ -63,6 +68,12 @@ class MarkResponse(BaseModel):
     records_created: int
     matches: list[FaceMatchOut]
     unmatched_faces: list[UnmatchedFaceOut]
+    class_roster: list[RosterStudentOut]
+    """Every student enrolled in this slot's class - the same pool
+    recognize_faces compared against. Lets the UI offer a "this was actually
+    <student>" reassignment for a needs_review match without a second
+    round-trip, and without letting an admin reassign to someone who was
+    never even a candidate for this class."""
 
 
 class AttendanceRecordOut(BaseModel):
@@ -83,6 +94,12 @@ class AttendanceRecordOut(BaseModel):
 
 class ReviewRequest(BaseModel):
     status: str
+    student_id: int | None = None
+    """Set to correct a needs_review match's identity - "the system detected
+    this face as student X, but it's actually student Y". Omitted/null keeps
+    the record's existing student_id (the normal confirm/reject-only path).
+    Only ever reassigns to a student actually enrolled in the record's own
+    class - the pool recognize_faces compared against in the first place."""
 
 
 class SummaryItemOut(BaseModel):
@@ -124,6 +141,37 @@ async def enroll(
     db.refresh(row)
 
     return EmbeddingOut.model_validate(row)
+
+
+class EnrollmentListItemOut(BaseModel):
+    id: int
+    student_id: int
+    student_name: str
+    enrolled_at: datetime
+
+
+@router.get("/enrollments", response_model=list[EnrollmentListItemOut])
+def list_enrollments(
+    school_id: int,
+    user: CurrentUser = Depends(require_role("admin", "teacher")),
+    db: Session = Depends(get_db),
+):
+    """Real, persisted enrollment state for a school - not client session
+    memory. The Enroll tab's "Enrolled" list is backed by this (refetched on
+    mount and after each successful enrollment), which is what makes it
+    survive a full page reload: it's reading the actual DB truth fresh each
+    time, not remembering what happened earlier in an in-memory list."""
+    rows = (
+        db.query(FaceEmbedding, User)
+        .join(User, FaceEmbedding.student_id == User.id)
+        .filter(User.school_id == school_id)
+        .order_by(FaceEmbedding.enrolled_at.desc(), FaceEmbedding.id.desc())
+        .all()
+    )
+    return [
+        EnrollmentListItemOut(id=e.id, student_id=e.student_id, student_name=u.full_name or u.email, enrolled_at=e.enrolled_at)
+        for e, u in rows
+    ]
 
 
 @router.post("/mark", response_model=MarkResponse)
@@ -220,6 +268,13 @@ async def mark(
         for u in result.unmatched
     ]
 
+    roster_rows = (
+        db.query(User.id, User.full_name, User.email).filter(User.id.in_(enrolled_student_ids)).all()
+        if enrolled_student_ids
+        else []
+    )
+    class_roster = [RosterStudentOut(student_id=r.id, name=r.full_name or r.email) for r in roster_rows]
+
     return MarkResponse(
         timetable_slot_id=slot.id,
         class_id=slot.class_id,
@@ -227,6 +282,7 @@ async def mark(
         records_created=records_created,
         matches=matches_out,
         unmatched_faces=unmatched_out,
+        class_roster=class_roster,
     )
 
 
@@ -316,6 +372,39 @@ def review(
     if user.role == "teacher" and record.class_id not in _teacher_class_ids(db, user.id):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your class")
 
+    previous_student_id = record.student_id
+    if body.student_id is not None and body.student_id != record.student_id:
+        enrolled = (
+            db.query(Enrollment)
+            .filter(
+                Enrollment.class_id == record.class_id,
+                Enrollment.student_id == body.student_id,
+                Enrollment.is_primary.is_(True),
+            )
+            .one_or_none()
+        )
+        if enrolled is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"Student {body.student_id} is not enrolled in this record's class"
+            )
+        conflict = (
+            db.query(AttendanceRecord)
+            .filter(
+                AttendanceRecord.id != record.id,
+                AttendanceRecord.student_id == body.student_id,
+                AttendanceRecord.timetable_slot_id == record.timetable_slot_id,
+                AttendanceRecord.date == record.date,
+                AttendanceRecord.source == record.source,
+            )
+            .one_or_none()
+        )
+        if conflict is not None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Student {body.student_id} already has an attendance record for this period",
+            )
+        record.student_id = body.student_id
+
     previous_status = record.status
     record.status = body.status
     record.reviewed_by = user.id
@@ -327,7 +416,12 @@ def review(
         action="review",
         entity_type="attendance_records",
         entity_id=record.id,
-        detail={"previous_status": previous_status, "new_status": body.status},
+        detail={
+            "previous_status": previous_status,
+            "new_status": body.status,
+            "previous_student_id": previous_student_id,
+            "new_student_id": record.student_id,
+        },
     )
     db.commit()
     db.refresh(record)

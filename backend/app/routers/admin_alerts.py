@@ -15,7 +15,7 @@ from app.models.fees import FeeRecord
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
 from app.models.syllabus import AnomalyFlag
-from app.services.alert_aggregator import SEVERITY_LEVELS, aggregate_alerts, summarize_alerts
+from app.services.alert_aggregator import SEVERITY_LEVELS, aggregate_alerts, alert_belongs_to_school, summarize_alerts
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
 
@@ -96,7 +96,7 @@ def get_alerts(
     if severity is not None and severity not in SEVERITY_LEVELS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"severity must be one of {SEVERITY_LEVELS}")
 
-    alerts = aggregate_alerts(db, dismissed_ids=_dismissed_alert_ids(db), since=since, severity=severity)
+    alerts = aggregate_alerts(db, school_id=user.school_id, dismissed_ids=_dismissed_alert_ids(db), since=since, severity=severity)
     return AlertsFeedResponse(items=[AlertOut.model_validate(a) for a in alerts])
 
 
@@ -109,7 +109,7 @@ def get_alerts_summary(
     """Lightweight counts-by-severity/source, meant for a dashboard header widget.
     NOT in the original api-contract.md stub - a small, natural addition alongside
     the feed endpoint, called out explicitly here rather than silently added."""
-    alerts = aggregate_alerts(db, dismissed_ids=_dismissed_alert_ids(db), since=since)
+    alerts = aggregate_alerts(db, school_id=user.school_id, dismissed_ids=_dismissed_alert_ids(db), since=since)
     return AlertsSummaryResponse(**summarize_alerts(alerts))
 
 
@@ -128,6 +128,12 @@ def resolve_alert(
     if not sep or not raw_entity_id.isdigit():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, 'Malformed alert id - expected "source:entity_id"')
     entity_id = int(raw_entity_id)
+
+    if user.school_id is not None and not alert_belongs_to_school(db, source, entity_id, user.school_id):
+        # Same "not found" a mismatched school gets from GET /admin/alerts (the
+        # entity is invisible, full stop) - not 403, which would confirm the id is
+        # real and just belongs to someone else.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Alert's underlying {source} not found")
 
     real_status_model = _REAL_STATUS_SOURCES.get(source)
     if real_status_model is not None:
@@ -182,13 +188,15 @@ def resolve_alert(
 # session per poll, or a connection pool sized for concurrent open streams).
 
 
-def _format_sse_event(db: Session) -> str:
-    alerts = aggregate_alerts(db, dismissed_ids=_dismissed_alert_ids(db))
+def _format_sse_event(db: Session, school_id: int | None = None) -> str:
+    alerts = aggregate_alerts(db, school_id=school_id, dismissed_ids=_dismissed_alert_ids(db))
     payload = [AlertOut.model_validate(a).model_dump(mode="json") for a in alerts]
     return f"data: {json.dumps(payload)}\n\n"
 
 
-async def _alert_event_stream(db: Session, *, max_events: int | None = None, poll_interval: float = SSE_POLL_INTERVAL_SECONDS):
+async def _alert_event_stream(
+    db: Session, *, school_id: int | None = None, max_events: int | None = None, poll_interval: float = SSE_POLL_INTERVAL_SECONDS
+):
     """`max_events`/`poll_interval` exist purely for testability: an HTTP integration
     test can't cleanly cancel a genuinely-infinite generator through TestClient's
     streaming interface (there's no real network disconnect to trigger cleanup), so
@@ -198,7 +206,7 @@ async def _alert_event_stream(db: Session, *, max_events: int | None = None, pol
     parameters existed."""
     emitted = 0
     while max_events is None or emitted < max_events:
-        yield _format_sse_event(db)
+        yield _format_sse_event(db, school_id)
         emitted += 1
         if max_events is not None and emitted >= max_events:
             return
@@ -210,4 +218,4 @@ async def stream_alerts(
     user: CurrentUser = Depends(require_role("admin", "principal")),
     db: Session = Depends(get_db),
 ):
-    return StreamingResponse(_alert_event_stream(db), media_type="text/event-stream")
+    return StreamingResponse(_alert_event_stream(db, school_id=user.school_id), media_type="text/event-stream")
