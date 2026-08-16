@@ -61,3 +61,15 @@ def test_jump_straight_to_urgent_when_earlier_tiers_already_sent_out_of_a_gap():
     # earlier runs) - must send exactly the 30-day tier, not re-send 7 or 14.
     decision = determine_reminder(days_overdue=35, already_sent_reasons={REMINDER_TIERS[0][2], REMINDER_TIERS[1][2]})
     assert decision.cadence_reason == REMINDER_TIERS[2][2]
+
+
+def test_skipped_lower_tier_never_fires_after_a_higher_tier_already_sent():
+    # Regression: a record first hit the invoicing job at 15 days overdue, which
+    # correctly skipped straight to the 14-day ("second reminder") tier without
+    # ever sending the 7-day one. Running the job again the same day used to
+    # still find "7 days overdue - first reminder" absent from already_sent and
+    # fire it - an escalated reminder followed by a milder one. Must not resend
+    # any tier once a higher-index tier has already gone out, even though its
+    # own exact reason string was never logged.
+    decision = determine_reminder(days_overdue=15, already_sent_reasons={REMINDER_TIERS[1][2]})
+    assert decision.should_send is False

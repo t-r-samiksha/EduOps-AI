@@ -117,3 +117,87 @@ def test_empty_capture_group_is_skipped():
     names = {f.field_name for f in fields}
     assert "applicant_name" not in names
     assert "dob" in names
+
+
+# --- real-world date formats + the new admission_form fields (found via live testing) ---
+
+
+def test_dob_extracts_and_normalizes_the_real_document_1012_format():
+    """Regression test for a real bug found live: document #1012's actual raw OCR
+    text writes "Date of Birth: 12.04.2015" (DD.MM.YYYY, dots) - the original
+    ISO-only value pattern matched the label but the whole regex failed on the
+    value, so dob was silently skipped entirely. Must now both match AND
+    normalize to ISO."""
+    raw_text = (
+        "Applicant Name: New Student\nDate of Birth: 12.04.2015\nGender: Female\n\n"
+        "Grade Applied For: 3\n\nGuardian Name: P3\nGuardian Email: p3@sam.in\n\n"
+        "Guardian Phone: 9876543210\n"
+    )
+    fields = extract_entities(raw_text, "admission_form", [])
+    by_name = {f.field_name: f for f in fields}
+
+    assert by_name["dob"].field_value == "2015-04-12"
+    assert by_name["gender"].field_value == "Female"
+    assert by_name["grade_applied"].field_value == "3"
+    assert by_name["guardian_email"].field_value == "p3@sam.in"
+    assert by_name["guardian_name"].field_value == "P3"
+    assert by_name["guardian_phone"].field_value == "9876543210"
+    assert by_name["applicant_name"].field_value == "New Student"
+
+
+def test_dob_accepts_slash_and_hyphen_dd_mm_yyyy_formats_too():
+    slash = extract_entities("Date of Birth: 12/04/2015", "admission_form", [])
+    hyphen = extract_entities("Date of Birth: 12-04-2015", "admission_form", [])
+    assert {f.field_name: f.field_value for f in slash}["dob"] == "2015-04-12"
+    assert {f.field_name: f.field_value for f in hyphen}["dob"] == "2015-04-12"
+
+
+def test_dob_iso_format_still_works_unchanged():
+    fields = extract_entities("Date of Birth: 2015-04-01", "admission_form", [])
+    assert {f.field_name: f.field_value for f in fields}["dob"] == "2015-04-01"
+
+
+def test_date_of_birth_on_id_proof_gets_the_same_format_fix():
+    """id_proof's date_of_birth field shares the exact same ISO-only regex bug -
+    fixed identically here, not just on admission_form's dob."""
+    fields = extract_entities("Date of Birth: 12.04.2015", "id_proof", [])
+    assert {f.field_name: f.field_value for f in fields}["date_of_birth"] == "2015-04-12"
+
+
+def test_dob_confidence_is_scored_against_the_original_ocr_text_not_the_normalized_value():
+    """Regression test for a real subtlety: normalizing "12.04.2015" to
+    "2015-04-12" BEFORE confidence scoring would mean _confidence_for_value looks
+    for "2015-04-12" in the OCR word list, which never contains it (OCR actually
+    read "12.04.2015") - silently collapsing to DEFAULT_FALLBACK_CONFIDENCE
+    regardless of the real OCR read. Confidence must reflect the real word."""
+    raw_text = "Date of Birth: 12.04.2015"
+    words = _words(("Date", 0.9), ("of", 0.9), ("Birth:", 0.9), ("12.04.2015", 0.92))
+    fields = extract_entities(raw_text, "admission_form", words)
+    dob = {f.field_name: f for f in fields}["dob"]
+    assert dob.field_value == "2015-04-12"
+    assert dob.confidence_score == 0.92
+    assert dob.is_low_confidence is False
+
+
+def test_unparseable_dob_falls_back_to_the_raw_captured_value():
+    # Can't actually happen via the value pattern itself (it only matches known
+    # date shapes), but normalize_date must degrade honestly, not crash, if it
+    # ever receives something it can't parse.
+    from app.services.ocr_postprocess import normalize_date
+
+    assert normalize_date("not-a-real-date") == "not-a-real-date"
+
+
+def test_grade_applied_and_guardian_email_and_gender_are_skipped_when_absent():
+    fields = extract_entities("Applicant Name: Alex Kim\nDOB: 2010-01-01", "admission_form", [])
+    names = {f.field_name for f in fields}
+    assert "grade_applied" not in names
+    assert "guardian_email" not in names
+    assert "gender" not in names
+
+
+def test_grade_applied_matches_with_or_without_the_word_for():
+    without_for = extract_entities("Grade Applied: 6", "admission_form", [])
+    with_for = extract_entities("Grade Applied For: 6", "admission_form", [])
+    assert {f.field_name: f.field_value for f in without_for}["grade_applied"] == "6"
+    assert {f.field_name: f.field_value for f in with_for}["grade_applied"] == "6"

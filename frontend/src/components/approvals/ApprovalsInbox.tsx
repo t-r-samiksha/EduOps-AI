@@ -3,7 +3,6 @@ import { CalendarClock, FileCheck2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger } from "@/components/ui/dialog";
 import Field from "@/components/ui/field";
@@ -11,6 +10,7 @@ import PageHeader from "@/components/shared/PageHeader";
 import EntityCard from "@/components/shared/EntityCard";
 import { usePendingApprovals, useDecideApproval } from "@/api/hooks/useApprovals";
 import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
+import { gradeLevelDisplay } from "@/lib/format";
 import { timeAgo } from "@/lib/format";
 import { ApiError } from "@/api/client";
 import type { Approval } from "@/api/types";
@@ -26,7 +26,11 @@ function summarizePayload(approval: Approval): string {
     return `${p.start_date} → ${p.end_date} · ${p.reason}`;
   }
   if (approval.type === "admission_application") {
-    return `${p.applicant_name} · DOB ${p.dob} · Grade ${p.grade_applied} · ${p.guardian_email}`;
+    // grade_applied is a stringified grade LEVEL now (e.g. "3", "-2" for LKG),
+    // never a section name - see admissions_rules.py. gradeLevelDisplay handles
+    // the LKG/UKG/Nursery labels; this is also where the old "Grade Grade 3 - A"
+    // double-label bug lived (grade_applied used to already contain "Grade").
+    return `${p.applicant_name} · DOB ${p.dob} · ${gradeLevelDisplay(String(p.grade_applied))} · ${p.guardian_email}`;
   }
   return JSON.stringify(p);
 }
@@ -34,21 +38,22 @@ function summarizePayload(approval: Approval): string {
 function DecisionDialog({ approval, decision }: { approval: Approval; decision: "approve" | "reject" }) {
   const [open, setOpen] = useState(false);
   const [comment, setComment] = useState("");
-  const [studentUserId, setStudentUserId] = useState("");
-  const [classId, setClassId] = useState("");
   const decide = useDecideApproval();
 
   const isAdmission = approval.type === "admission_application";
+  // Real backend requirement (services/admissions_rules.py::check_reject_reason) -
+  // rejecting an admission application needs a real reason; other approval types
+  // don't have this requirement today.
+  const requiresReason = isAdmission && decision === "reject";
 
   function submit() {
+    if (requiresReason && !comment.trim()) return;
     decide.mutate(
       {
         id: approval.id,
         decision,
         comment: comment || undefined,
         academicYear: approval.type === "leave_request" && decision === "approve" ? DEFAULT_ACADEMIC_YEAR : undefined,
-        studentUserId: isAdmission && studentUserId ? Number(studentUserId) : undefined,
-        classId: isAdmission && classId ? Number(classId) : undefined,
       },
       { onSuccess: () => setOpen(false) }
     );
@@ -64,26 +69,19 @@ function DecisionDialog({ approval, decision }: { approval: Approval; decision: 
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{decision === "approve" ? "Approve" : "Reject"} {TYPE_LABEL[approval.type] ?? approval.type}</DialogTitle>
-          <DialogDescription>{summarizePayload(approval)}</DialogDescription>
+          <DialogDescription>
+            {summarizePayload(approval)}
+            {isAdmission && decision === "approve" && " — a section, student account, and guardian link are all assigned automatically."}
+          </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          {isAdmission && decision === "approve" && (
-            <>
-              <Field label="Student user ID" hint="Optional — required together with class ID to create a real enrollment">
-                <Input type="number" value={studentUserId} onChange={(e) => setStudentUserId(e.target.value)} />
-              </Field>
-              <Field label="Class ID" hint="Optional">
-                <Input type="number" value={classId} onChange={(e) => setClassId(e.target.value)} />
-              </Field>
-            </>
-          )}
-          <Field label="Comment (optional)">
+          <Field label={requiresReason ? "Reason (required)" : "Comment (optional)"}>
             <Textarea value={comment} onChange={(e) => setComment(e.target.value)} />
           </Field>
           {decide.isError && (
             <p className="text-sm text-urgent">{decide.error instanceof ApiError ? decide.error.message : "Decision failed."}</p>
           )}
-          <Button onClick={submit} disabled={decide.isPending} className="self-start">
+          <Button onClick={submit} disabled={decide.isPending || (requiresReason && !comment.trim())} className="self-start">
             {decide.isPending ? "Submitting…" : `Confirm ${decision}`}
           </Button>
         </div>

@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import re
 import string
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.services.ocr_engine import WordConfidence
 
@@ -32,6 +34,43 @@ review/correction rather than trusted outright."""
 DEFAULT_FALLBACK_CONFIDENCE = 0.5
 """Used only when a matched value's words can't be found in the OCR word list at
 all - an honest "we don't really know" middle value, not a fabricated high score."""
+
+_DATE_VALUE_PATTERN = r"(\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.\d{4}|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}-\d{1,2}-\d{4})"
+"""Matches a date value in ISO (YYYY-MM-DD) or common DD.MM.YYYY / DD/MM/YYYY /
+DD-MM-YYYY forms. Found live: a real uploaded admission form (document #1012)
+wrote "Date of Birth: 12.04.2015" - the original ISO-only value pattern matched
+the label fine but the whole regex.search() still failed (a regex match is all-
+or-nothing), so `dob` was silently skipped entirely, no error. Real forms are
+filled in by office staff/parents in whatever format they're used to, not
+necessarily ISO."""
+
+_DATE_INPUT_FORMATS = ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y")
+
+
+def normalize_date(value: str) -> str:
+    """Best-effort normalize a captured date value to ISO (YYYY-MM-DD) so every
+    downstream consumer (the correction UI, the admissions routing pre-fill -
+    see services/ocr_routing.py) sees one consistent format regardless of which
+    real-world format the original form used. Falls back to the raw captured
+    value, unchanged, if none of the known formats parse it - an honest
+    "couldn't normalize" rather than a fabricated/guessed date."""
+    for fmt in _DATE_INPUT_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return value
+
+
+FIELD_NORMALIZERS: dict[str, Callable[[str], str]] = {
+    "dob": normalize_date,
+    "date_of_birth": normalize_date,
+}
+"""Applied AFTER confidence scoring (see extract_entities) but before the value is
+stored - _confidence_for_value looks up the ORIGINAL OCR-recognized token, which
+would never be found post-normalization (OCR genuinely produced "12.04.2015", not
+"2015-04-12"), so normalizing first would silently collapse every dob's
+confidence to DEFAULT_FALLBACK_CONFIDENCE regardless of the real OCR read."""
 
 
 @dataclass(frozen=True)
@@ -49,10 +88,18 @@ class ExtractedField:
 EXTRACTION_RULES: dict[str, list[tuple[str, re.Pattern]]] = {
     "admission_form": [
         ("applicant_name", re.compile(r"Applicant Name:[ \t]*(.+)", re.IGNORECASE)),
-        ("dob", re.compile(r"(?:Date of Birth|DOB):[ \t]*(\d{4}-\d{2}-\d{2})", re.IGNORECASE)),
+        ("dob", re.compile(rf"(?:Date of Birth|DOB):[ \t]*{_DATE_VALUE_PATTERN}", re.IGNORECASE)),
+        ("gender", re.compile(r"Gender:[ \t]*(.+)", re.IGNORECASE)),
+        ("grade_applied", re.compile(r"Grade Applied(?: For)?:[ \t]*(.+)", re.IGNORECASE)),
         ("guardian_name", re.compile(r"Guardian Name:[ \t]*(.+)", re.IGNORECASE)),
+        ("guardian_email", re.compile(r"Guardian Email:[ \t]*(\S+@\S+)", re.IGNORECASE)),
         ("guardian_phone", re.compile(r"Guardian Phone:[ \t]*([\d\-\+ ]{8,})", re.IGNORECASE)),
     ],
+    # address/previous_school are deliberately NOT extracted yet - on a real form
+    # (see document #1012) their label and value sit on separate lines ("Address\n\n
+    # 123 MG Road...", "Previous Schoo! (if any)\n\nLittle Stars..."), which needs a
+    # genuinely different multi-line pattern shape, not a same-line "Label: value"
+    # regex like every field above - a deliberate scope cut, not an oversight.
     "marksheet": [
         ("student_name", re.compile(r"Student Name:[ \t]*(.+)", re.IGNORECASE)),
         ("roll_number", re.compile(r"Roll (?:No|Number)\.?:[ \t]*(\S+)", re.IGNORECASE)),
@@ -62,12 +109,21 @@ EXTRACTION_RULES: dict[str, list[tuple[str, re.Pattern]]] = {
     "id_proof": [
         ("full_name", re.compile(r"Name:[ \t]*(.+)", re.IGNORECASE)),
         ("id_number", re.compile(r"ID (?:No|Number)\.?:[ \t]*(\S+)", re.IGNORECASE)),
-        ("date_of_birth", re.compile(r"(?:Date of Birth|DOB):[ \t]*(\d{4}-\d{2}-\d{2})", re.IGNORECASE)),
+        ("date_of_birth", re.compile(rf"(?:Date of Birth|DOB):[ \t]*{_DATE_VALUE_PATTERN}", re.IGNORECASE)),
     ],
     "other": [],
     # No rules for "other" by design - it's an intentional catch-all for documents
     # that don't fit a known layout; extraction correctly finds nothing for it.
 }
+
+
+def expected_fields(document_type: str) -> list[str]:
+    """The full set of fields this document_type's rules look for - regardless of
+    whether OCR actually found each one on a given document. Lets a caller (the
+    manual-entry UI) show a real, editable row for a field that legitimately went
+    missing (e.g. a garbled "Total Marks" line), rather than that field silently
+    not existing anywhere."""
+    return [field_name for field_name, _ in EXTRACTION_RULES.get(document_type, [])]
 
 
 def _strip_punct(token: str) -> str:
@@ -105,7 +161,13 @@ def extract_entities(
         value = match.group(1).strip()
         if not value:
             continue
+        # Confidence must be scored against the RAW captured text - the OCR word
+        # list only ever contains what OCR actually read (e.g. "12.04.2015"), never
+        # a normalized form (see FIELD_NORMALIZERS' docstring).
         confidence = _confidence_for_value(value, words)
+        normalizer = FIELD_NORMALIZERS.get(field_name)
+        if normalizer is not None:
+            value = normalizer(value)
         results.append(
             ExtractedField(
                 field_name=field_name,

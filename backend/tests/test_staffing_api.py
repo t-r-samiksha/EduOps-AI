@@ -135,7 +135,10 @@ def seed(db_session):
         "school": school,
         "class": school_class,
         "subject": subject,
+        "other_subject": other_subject,
+        "other_class": other_class,
         "slot": slot,
+        "busy_slot": busy_slot,
         "admin_user": admin_user,
         "principal_user": principal_user,
         "original_teacher": original_teacher,
@@ -314,6 +317,64 @@ def test_approve_leave_excludes_busy_unqualified_and_unavailable_candidates(clie
     assert seed["original_teacher"].id not in candidate_ids
 
 
+def test_approve_leave_falls_back_to_unqualified_candidate_when_nobody_qualified_is_free(client, db_session, seed):
+    """Regression test for the automatic fallback tier: put the fixture's only
+    qualified+free candidate (good_sub) on leave too, so NOBODY qualified for
+    Math remains available. The system must now automatically surface
+    unqualified_teacher (free, but never qualified for Math) as a real
+    suggestion flagged qualified=False - not leave the admin with an empty
+    candidate list and nothing but a blind manual pick."""
+    db_session.add(
+        LeaveRequest(
+            teacher_id=seed["good_sub"].id, start_date=date(2026, 8, 10), end_date=date(2026, 8, 10),
+            reason="also sick", status="approved",
+        )
+    )
+    db_session.commit()
+
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2026-08-10", "end_date": "2026-08-10", "reason": "sick"}
+    )
+    leave_id = resp.json()["id"]
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.put(
+        "/staff/approve_leave", json={"leave_request_id": leave_id, "decision": "approved", "academic_year": ACADEMIC_YEAR}
+    )
+    assert resp.status_code == 200
+    sub = resp.json()["substitutions"][0]
+    assert sub["substitute_teacher_id"] == seed["unqualified_teacher"].id
+    fallback = next(c for c in sub["candidates"] if c["teacher_id"] == seed["unqualified_teacher"].id)
+    assert fallback["qualified"] is False
+    # The other genuinely unavailable teachers still never show up, even in the
+    # broadened fallback pool - busy/unavailable/on_leave are real impossibilities.
+    candidate_ids = {c["teacher_id"] for c in sub["candidates"]}
+    assert seed["busy_sub"].id not in candidate_ids
+    assert seed["unavailable_sub"].id not in candidate_ids
+    assert seed["good_sub"].id not in candidate_ids
+
+    # Confirming the fallback candidate without acknowledgment must still be
+    # blocked by the not_qualified conflict (ties into the qualification-override
+    # flow) - only with override_qualification does it actually go through.
+    resp = client.put(f"/substitution/{sub['id']}/confirm", json={"substitute_teacher_id": seed["unqualified_teacher"].id})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["substitution"] is None
+    conflict = next(c for c in body["conflicts"] if c["type"] == "not_qualified")
+    assert conflict["overridable"] is True
+
+    resp = client.put(
+        f"/substitution/{sub['id']}/confirm",
+        json={"substitute_teacher_id": seed["unqualified_teacher"].id, "override_qualification": True},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["conflicts"] == []
+    assert body["substitution"]["status"] == "confirmed"
+    assert body["substitution"]["substitute_teacher_id"] == seed["unqualified_teacher"].id
+
+
 def test_reject_leave_creates_no_substitutions(client, seed):
     _override_user("teacher", user_id=seed["original_teacher"].id)
     resp = client.post(
@@ -352,6 +413,65 @@ def test_confirm_flags_conflicts_without_applying_override(client, db_session, s
     # Not applied - status must still be "suggested" in the DB.
     row = db_session.query(Substitution).filter(Substitution.id == sub_id).one()
     assert row.status == "suggested"
+
+
+def test_confirm_prevents_double_booking_across_two_leave_requests(client, db_session, seed):
+    """Regression test for a real bug found live: original_teacher's Math slot
+    and busy_sub's Science slot share the exact same day_of_week+period_number
+    (the fixture's own busy_slot, used elsewhere to test already_busy). Neither
+    teacher has anything on their OWN real timetable at that time once good_sub
+    is made qualified for both subjects, so the old already_busy check (which
+    only looks at TimetableSlot) had nothing to catch - good_sub could be
+    confirmed for BOTH simultaneous classes. Confirming the first must now make
+    good_sub ineligible for the second."""
+    db_session.add(TeacherSubject(teacher_id=seed["good_sub"].id, subject_id=seed["other_subject"].id))
+    db_session.commit()
+
+    _override_user("teacher", user_id=seed["original_teacher"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2026-08-10", "end_date": "2026-08-10", "reason": "sick"}
+    )
+    leave1_id = resp.json()["id"]
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.put(
+        "/staff/approve_leave", json={"leave_request_id": leave1_id, "decision": "approved", "academic_year": ACADEMIC_YEAR}
+    )
+    sub1 = resp.json()["substitutions"][0]
+    assert sub1["timetable_slot_id"] == seed["slot"].id
+    assert seed["good_sub"].id in {c["teacher_id"] for c in sub1["candidates"]}
+
+    _override_user("teacher", user_id=seed["busy_sub"].id)
+    resp = client.post(
+        "/staff/request_leave", json={"start_date": "2026-08-10", "end_date": "2026-08-10", "reason": "sick"}
+    )
+    leave2_id = resp.json()["id"]
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.put(
+        "/staff/approve_leave", json={"leave_request_id": leave2_id, "decision": "approved", "academic_year": ACADEMIC_YEAR}
+    )
+    sub2 = resp.json()["substitutions"][0]
+    assert sub2["timetable_slot_id"] == seed["busy_slot"].id
+    # Before this fix, good_sub would still show up here even though they're
+    # about to be committed to a simultaneous class via the confirm below.
+    assert seed["good_sub"].id in {c["teacher_id"] for c in sub2["candidates"]}
+
+    resp = client.put(f"/substitution/{sub1['id']}/confirm", json={"substitute_teacher_id": seed["good_sub"].id})
+    assert resp.status_code == 200
+    assert resp.json()["conflicts"] == []
+    assert resp.json()["substitution"]["status"] == "confirmed"
+
+    # The critical assertion: confirming good_sub for the second, simultaneous
+    # slot must now be rejected, not silently succeed.
+    resp = client.put(f"/substitution/{sub2['id']}/confirm", json={"substitute_teacher_id": seed["good_sub"].id})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["substitution"] is None
+    assert any(c["type"] == "already_substituting" for c in body["conflicts"])
+
+    sub2_row = db_session.query(Substitution).filter(Substitution.id == sub2["id"]).one()
+    assert sub2_row.status != "confirmed"
 
 
 def test_confirm_returns_404_for_missing_substitution(client, seed):

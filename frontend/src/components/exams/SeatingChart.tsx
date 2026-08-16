@@ -1,6 +1,7 @@
 import { useMemo } from "react";
-import { DoorOpen } from "lucide-react";
-import type { SeatingItem } from "@/api/types";
+import { DoorOpen, ClipboardCheck } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import type { ExamType, SeatingItem } from "@/api/types";
 import type { LookupResponse } from "@/api/hooks/useTimetable";
 import { cn } from "@/lib/utils";
 
@@ -13,6 +14,13 @@ interface SeatingChartProps {
 
 const SEATS_PER_ROW = 6;
 
+const EXAM_TYPE_LABELS: Record<ExamType, string> = {
+  class_test: "Class test",
+  unit_test: "Unit test",
+  mid_term: "Mid term",
+  end_term: "End term",
+};
+
 /** A genuine room-by-room seat map (not a flat table) — each room renders as its own
  * card with seats laid out in real rows, echoing the same "grid = the subject matter
  * itself" idea as TimetableGrid. Seat cells fill in row-major order by seat_no. */
@@ -21,12 +29,22 @@ export default function SeatingChart({ items, lookup, highlightStudentId }: Seat
 
   // Keyed by exam_id+room_id, not room_id alone: seat_no is only unique per
   // exam/room, and the student self-lookup view (no exam_id filter) can return
-  // seats across multiple exams that happen to share a room.
+  // seats across multiple exams that happen to share a room. Exam/class/subject/
+  // invigilator details are the same for every row in a room, so just read them
+  // off the first one.
   const byRoom = useMemo(() => {
-    const map = new Map<string, { examId: number; roomName: string; seats: SeatingItem[] }>();
+    const map = new Map<
+      string,
+      { examId: number; roomName: string; subjectName: string; className: string; examDate: string; examType: ExamType | null; invigilatorName: string | null; seats: SeatingItem[] }
+    >();
     for (const item of items) {
       const key = `${item.exam_id}-${item.room_id}`;
-      if (!map.has(key)) map.set(key, { examId: item.exam_id, roomName: item.room_name, seats: [] });
+      if (!map.has(key)) {
+        map.set(key, {
+          examId: item.exam_id, roomName: item.room_name, subjectName: item.subject_name, className: item.class_name,
+          examDate: item.exam_date, examType: item.exam_type, invigilatorName: item.invigilator_name, seats: [],
+        });
+      }
       map.get(key)!.seats.push(item);
     }
     for (const room of map.values()) room.seats.sort((a, b) => a.seat_no - b.seat_no);
@@ -51,10 +69,22 @@ export default function SeatingChart({ items, lookup, highlightStudentId }: Seat
         const cols = Math.min(SEATS_PER_ROW, maxSeat);
         return (
           <div key={key} className="overflow-hidden rounded-2xl border border-border bg-card shadow-elevated">
-            <div className="flex items-center gap-2 border-b border-border bg-panel px-4 py-2.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-panel px-4 py-2.5">
               <DoorOpen className="h-4 w-4 text-ink-muted" />
               <span className="font-display text-sm font-semibold text-ink">{room.roomName}</span>
-              <span className="font-mono text-xs text-ink-muted">· Exam #{room.examId} · {room.seats.length} seat(s)</span>
+              <span className="text-xs text-ink-muted">
+                {room.subjectName} · {room.className} · {room.examDate}
+                {room.examType ? ` · ${EXAM_TYPE_LABELS[room.examType]}` : ""}
+              </span>
+              <span className="font-mono text-xs text-ink-faint">· Exam #{room.examId} · {room.seats.length} seat(s)</span>
+              <span className="ml-auto flex items-center gap-1.5 text-xs">
+                <ClipboardCheck className="h-3.5 w-3.5 text-ink-muted" />
+                {room.invigilatorName ? (
+                  <span className="text-ink-muted">{room.invigilatorName}</span>
+                ) : (
+                  <Badge variant="urgent">No invigilator</Badge>
+                )}
+              </span>
             </div>
             <div className="p-4">
               <div

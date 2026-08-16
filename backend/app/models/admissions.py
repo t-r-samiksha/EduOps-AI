@@ -12,12 +12,17 @@ class AdmissionApplication(Base):
     """A prospective student's admission application. NOT linked to a real `users`
     row while pending - the applicant isn't a student/user in the system yet. See
     services/admissions_rules.py for the legal state-transition machine, and
-    routers/admissions.py for what happens (and what's honestly stubbed) on
-    acceptance - real Enrollment creation requires an existing student user account,
-    and this repo has no account-creation flow anywhere (checked - Supabase Auth
-    signup is out of scope here), so acceptance only wires a real Enrollment when the
-    caller supplies an already-existing `student_user_id`; otherwise it's a
-    documented no-op, not a silent skip.
+    routers/admissions.py for what happens on acceptance.
+
+    Acceptance is now a REAL, fully automatic pipeline (previous note here claimed
+    "this repo has no account-creation flow anywhere" - stale the moment
+    routers/students.py::create_student and routers/parents.py::create_parent were
+    built in a later session and never wired back into this flow, found live):
+    a real student `User` account is created, a real active SchoolClass at the
+    requested grade_level with room is auto-assigned (never a specific section
+    supplied by the caller), `guardian_email` resolves to an existing real parent
+    account or creates a new one, and a real `ParentStudent` link is made - see
+    routers/admissions.py::decide_admission_application for the full pipeline.
 
     Fields beyond the base spec, each necessary rather than decorative:
       - `school_id`/`academic_year`: the task's own eligibility rule ("grade_applied
@@ -47,7 +52,24 @@ class AdmissionApplication(Base):
     applicant_name: Mapped[str] = mapped_column(String(255), nullable=False)
     dob: Mapped[date_] = mapped_column(nullable=False)
     guardian_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    guardian_name: Mapped[str | None] = mapped_column(String(255))
+    """Nullable - found live (real sam school data): the admission_form OCR
+    extraction already captures this (services/ocr_postprocess.py's
+    EXTRACTION_RULES), but it was never carried past the document into the
+    application, so every real accept created a parent account with
+    full_name=None (routers/admissions.py::_create_parent_account had no name to
+    give it). Now the real source of a new parent account's full_name."""
+    guardian_phone: Mapped[str | None] = mapped_column(String(30))
+    """Nullable - same gap/fix as guardian_name above, kept purely as a real
+    contact field (not currently used for account creation - Supabase Auth
+    accounts are keyed by email, not phone)."""
     grade_applied: Mapped[str] = mapped_column(String(20), nullable=False)
+    """A stringified `SchoolClass.grade_level` (e.g. "3", "-2" for LKG) - the grade
+    LEVEL being applied for, not a specific section name. Originally stored a real
+    section name (e.g. "Grade 3 - A"), which asked an applicant to already know
+    which section they'd end up in before applying - a real design flaw found live,
+    fixed once real section auto-assignment existed (see pick_section() in
+    services/admissions_rules.py)."""
     ocr_document_ids: Mapped[list[int]] = mapped_column(JSONB, nullable=False, server_default="[]")
     """Document.id values from the OCR session (models/document.py) - application-
     level reference only, not a DB-enforced FK array (same polymorphic-reference

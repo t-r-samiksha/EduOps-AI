@@ -83,7 +83,12 @@ class SchoolClassCreate(BaseModel):
     cosmetic, see SchoolClass.grade_label's own docstring. grade_level itself
     is still what every resolution/generation endpoint keys off."""
     section: str | None = None
-    class_teacher_id: int | None = None
+    class_teacher_id: int
+    """Required, not optional - every class must have a class teacher (school
+    policy, not a solver constraint). Existing classes created before this
+    requirement can still be missing one; POST /timetable/generate is what
+    actually enforces it (Check G, timetable_preflight.py), since blocking it
+    here too would make CREATE the wrong place to fix an already-existing gap."""
     home_room_id: int | None = None
     """This class's designated homeroom - see SchoolClass.home_room_id's own
     docstring. Two active classes may never share the same home_room_id
@@ -248,10 +253,9 @@ def reactivate_school(school_id: int, user: CurrentUser = Depends(_MUTATOR), db:
 @router.post("/admin/classes", response_model=SchoolClassOut, status_code=status.HTTP_201_CREATED)
 def create_class(body: SchoolClassCreate, user: CurrentUser = Depends(_MUTATOR), db: Session = Depends(get_db)):
     _get_school_or_400(db, body.school_id)
-    if body.class_teacher_id is not None:
-        teacher = db.query(User).filter(User.id == body.class_teacher_id).one_or_none()
-        if teacher is None:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown class_teacher_id {body.class_teacher_id}")
+    teacher = db.query(User).filter(User.id == body.class_teacher_id).one_or_none()
+    if teacher is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown class_teacher_id {body.class_teacher_id}")
     if body.home_room_id is not None:
         _validate_home_room(db, body.home_room_id, exclude_class_id=None)
 

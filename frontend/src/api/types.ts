@@ -180,6 +180,10 @@ export interface SubstitutionCandidate {
   teacher_id: number;
   score: number;
   reason: string;
+  /** False only for automatic fallback suggestions - a real teacher surfaced
+   * because nobody qualified for the subject was free at all (supervision-only
+   * cover). Render distinctly from a normal qualified candidate. */
+  qualified: boolean;
 }
 
 export interface Substitution {
@@ -223,6 +227,10 @@ export interface SuggestSubstitutionsResponse {
 export interface ConfirmSubstitutionConflict {
   type: string;
   message: string;
+  /** True only for "not_qualified" - a preference/quality concern (supervision-
+   * only cover), not a scheduling/physical impossibility. See useConfirmSubstitution's
+   * overrideQualification param. */
+  overridable: boolean;
 }
 
 export interface ConfirmSubstitutionResponse {
@@ -379,6 +387,15 @@ export interface DocumentSummary {
   status: DocumentStatus;
   uploaded_at: string;
   processed_at: string | null;
+  /** Set once this document is linked into some AdmissionApplication's
+   * ocr_document_ids - null if still unlinked. Lets the document list group/nest
+   * documents by application without a detail fetch per row. */
+  application_id: number | null;
+  /** The linked application's real applicant_name - null exactly when
+   * application_id is null. Always the one canonical name off the application
+   * itself, not this document's own extracted fields (a marksheet says
+   * student_name, an id_proof says full_name - not necessarily identical). */
+  application_applicant_name: string | null;
 }
 
 export interface DocumentsListResponse {
@@ -403,6 +420,24 @@ export interface DocumentRouting {
   routed: boolean;
   target_table: string | null;
   reason: string;
+  /** Only set when routed=true - a pre-filled POST /admin/admissions/applications
+   * body (applicant_name/dob/guardian_email/grade_applied/school_id/
+   * ocr_document_ids). Never auto-submitted - present it for a human to review
+   * and submit for real. academic_year is deliberately absent (never printed on
+   * the physical form) and must be supplied by whoever reviews this. */
+  suggested_payload: {
+    applicant_name: string;
+    dob: string;
+    guardian_email: string;
+    /** Only present when OCR actually found them (not in REQUIRED_ADMISSION_FIELDS,
+     * so a form missing these still routes) - real fix for parent accounts
+     * created with no name (see AdmissionApplication.guardian_name's docstring). */
+    guardian_name?: string;
+    guardian_phone?: string;
+    grade_applied: string;
+    school_id: number;
+    ocr_document_ids: number[];
+  } | null;
 }
 
 export interface DocumentDetail {
@@ -414,6 +449,13 @@ export interface DocumentDetail {
   processed_at: string | null;
   extracted_fields: Record<string, string>;
   entities: ExtractedEntity[];
+  /** Every field this document_type's extraction rules look for, regardless of
+   * whether OCR found it here - diff against extracted_fields's keys to find
+   * fields that are genuinely missing (not just low-confidence), e.g. a garbled
+   * "Total Marks" line that never matched at all. */
+  expected_fields: string[];
+  application_id: number | null;
+  application_applicant_name: string | null;
   raw_text: string | null;
   ocr_confidence: number | null;
   routing: DocumentRouting | null;
@@ -431,6 +473,7 @@ export interface FeeSchedule {
   amount: number;
   due_date: string;
   created_at: string;
+  records_generated: boolean;
 }
 
 export interface FeeStatusItem {
@@ -440,10 +483,17 @@ export interface FeeStatusItem {
   amount_paid: number;
   due_date: string;
   status: "pending" | "partial" | "paid" | "overdue" | string;
+  fee_type: string;
 }
 
 export interface RemindersResult {
   sent_count: number;
+}
+
+export interface InvoicingRunResult {
+  records_created: number;
+  overdue_marked: number;
+  reminders_sent: number;
 }
 
 export interface PaymentResult {
@@ -464,6 +514,14 @@ export interface AdmissionApplication {
   applicant_name: string;
   dob: string;
   guardian_email: string;
+  /** Real fields now (found live: parent accounts created without a name because
+   * these never reached that far) - optional since not every submission path
+   * captures them (the Submit tab's own form, no document involved, doesn't ask). */
+  guardian_name: string | null;
+  guardian_phone: string | null;
+  /** A stringified grade LEVEL (e.g. "3", "-2" for LKG) - never a section name.
+   * Use gradeLevelDisplay() (lib/format.ts) to render, never prefix with "Grade "
+   * yourself - see that helper's docstring for the bug this replaced. */
   grade_applied: string;
   ocr_document_ids: number[];
   status: AdmissionStatus;
@@ -473,6 +531,15 @@ export interface AdmissionApplication {
   decided_at: string | null;
   decision_justification: string | null;
   enrolled_student_id: number | null;
+}
+
+/** GET /admin/admissions/applications/{id}'s response shape - adds full detail
+ * for EVERY linked document (not just the ids in ocr_document_ids), so the
+ * applicant detail view can show the admission form, marksheet, and ID proof
+ * together without a round-trip per document. Same DocumentDetail shape
+ * GET /admin/ocr/documents/{id} returns for one document. */
+export interface AdmissionApplicationDetail extends AdmissionApplication {
+  documents: DocumentDetail[];
 }
 
 export interface AdmissionsListResponse {
@@ -486,9 +553,28 @@ export interface AdmissionDecisionResult {
   id: number;
   status: AdmissionStatus;
   enrollment_created: boolean;
+  /** Set only on a successful acceptance - the real, auto-assigned section. */
+  assigned_class_id: number | null;
+  enrolled_student_id: number | null;
+  parent_user_id: number | null;
+  /** True iff accepting created a BRAND NEW parent account (guardian_email
+   * didn't already belong to one) - False when an existing parent (e.g. a
+   * sibling's application) was found and reused instead. */
+  parent_account_created: boolean;
+}
+
+export interface GradeLevelOption {
+  grade_level: number;
+  display: string;
+}
+
+export interface GradeLevelsResponse {
+  items: GradeLevelOption[];
 }
 
 // --- Exam management ---------------------------------------------------------------
+
+export type ExamType = "class_test" | "unit_test" | "mid_term" | "end_term";
 
 export interface Exam {
   id: number;
@@ -496,6 +582,7 @@ export interface Exam {
   subject_id: number;
   class_id: number;
   academic_year: string;
+  exam_type: ExamType | null;
   exam_date: string;
   start_time: string;
   end_time: string;
@@ -508,9 +595,23 @@ export interface ExamListItem {
   subject_id: number;
   class_id: number;
   academic_year: string;
+  exam_type: ExamType | null;
   exam_date: string;
   start_time: string;
   end_time: string;
+}
+
+export interface RoomSuggestionItem {
+  room_id: number;
+  room_name: string;
+  capacity: number;
+}
+
+export interface RoomSuggestionsResult {
+  exam_id: number;
+  headcount: number;
+  available_rooms: RoomSuggestionItem[];
+  suggested_room_ids: number[];
 }
 
 export interface ExamsListResponse {
@@ -545,6 +646,14 @@ export interface SeatingItem {
   room_id: number;
   room_name: string;
   seat_no: number;
+  subject_id: number;
+  subject_name: string;
+  exam_type: ExamType | null;
+  exam_date: string;
+  class_id: number;
+  class_name: string;
+  invigilator_teacher_id: number | null;
+  invigilator_name: string | null;
 }
 
 export interface SeatingResponse {

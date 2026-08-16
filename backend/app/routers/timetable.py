@@ -423,7 +423,7 @@ def _run_preflight_for_request(
         db, [s.id for s in gen_input.subjects], [t.id for t in gen_input.teachers]
     )
     class_names = {c.id: c.name for c in resolved_classes}
-    class_infos = [ClassInfo(id=c.id, name=c.name, home_room_id=c.home_room_id) for c in resolved_classes]
+    class_infos = [ClassInfo(id=c.id, name=c.name, home_room_id=c.home_room_id, class_teacher_id=c.class_teacher_id) for c in resolved_classes]
 
     findings = run_preflight_checks(
         teachers=gen_input.teachers,

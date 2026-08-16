@@ -58,17 +58,20 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Staffing", path: "/teacher/staffing", icon: Users },
     { label: "Early-Warning", path: "/teacher/risk", icon: AlertTriangle },
     { label: "Syllabus", path: "/teacher/syllabus", icon: BookOpenCheck },
+    { label: "Fees", path: "/teacher/fees", icon: Wallet },
     { label: "Exam Duties", path: "/teacher/exams", icon: Armchair },
   ],
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
     { label: "Timetable", path: "/student/timetable", icon: CalendarClock },
+    { label: "Fees", path: "/student/fees", icon: Wallet },
     { label: "Exam Seats", path: "/student/exams", icon: Armchair },
   ],
   parent: [
     { label: "Dashboard", path: "/parent", icon: LayoutGrid, end: true },
     { label: "Timetable", path: "/parent/timetable", icon: CalendarClock },
     { label: "Early-Warning", path: "/parent/risk", icon: AlertTriangle },
+    { label: "Fees", path: "/parent/fees", icon: Wallet },
   ],
 };
 

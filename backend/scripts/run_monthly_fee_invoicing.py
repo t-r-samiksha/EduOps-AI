@@ -31,9 +31,16 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+AUTO_GENERATE_WINDOW_DAYS = 7
+"""How close a schedule's due_date must be before records generate on their own
+(schedule creation, nightly job) - further out than this, generation is manual-
+only (POST /admin/fees/schedules/{id}/generate) until the window is entered.
+Manual paths (this script's CLI, POST /admin/fees/invoicing/run, the per-schedule
+endpoint) never apply this - they're an explicit human "do it now", ungated."""
 
 from dotenv import load_dotenv
 
@@ -57,29 +64,52 @@ def _students_for_schedule(session: Session, schedule: FeeSchedule, school_id: i
     return {row.student_id for row in query}
 
 
-def generate_fee_records(session: Session, school_id: int, academic_year: str) -> int:
+def _generate_records_for_one_schedule(session: Session, schedule: FeeSchedule) -> int:
+    created = 0
+    for student_id in _students_for_schedule(session, schedule, schedule.school_id, schedule.academic_year):
+        existing = (
+            session.query(FeeRecord)
+            .filter(FeeRecord.student_id == student_id, FeeRecord.fee_schedule_id == schedule.id)
+            .one_or_none()
+        )
+        if existing is not None:
+            continue
+        session.add(
+            FeeRecord(
+                student_id=student_id, fee_schedule_id=schedule.id, amount_due=schedule.amount,
+                amount_paid=0.0, status="pending", due_date=schedule.due_date,
+            )
+        )
+        created += 1
+    return created
+
+
+def generate_fee_records_for_schedule(session: Session, schedule: FeeSchedule) -> int:
+    """Generates records for exactly ONE schedule, regardless of due_date - the
+    manual per-schedule "Generate records now" action (POST /admin/fees/schedules/
+    {id}/generate), always ungated since it's an explicit admin choice to do this
+    early rather than wait for the auto-generate window."""
+    created = _generate_records_for_one_schedule(session, schedule)
+    session.flush()
+    return created
+
+
+def generate_fee_records(session: Session, school_id: int, academic_year: str, due_within_days: int | None = None) -> int:
+    """`due_within_days`, when given, skips any schedule whose due_date is further
+    out than that - used by the automatic paths (schedule creation, the nightly
+    job) so a fee due in 2 months doesn't materialize the moment its schedule is
+    created. Manual callers (this script's CLI, POST /admin/fees/invoicing/run)
+    leave this None - an explicit "generate everything now" stays ungated."""
     schedules = (
         session.query(FeeSchedule)
         .filter(FeeSchedule.school_id == school_id, FeeSchedule.academic_year == academic_year)
         .all()
     )
-    created = 0
-    for schedule in schedules:
-        for student_id in _students_for_schedule(session, schedule, school_id, academic_year):
-            existing = (
-                session.query(FeeRecord)
-                .filter(FeeRecord.student_id == student_id, FeeRecord.fee_schedule_id == schedule.id)
-                .one_or_none()
-            )
-            if existing is not None:
-                continue
-            session.add(
-                FeeRecord(
-                    student_id=student_id, fee_schedule_id=schedule.id, amount_due=schedule.amount,
-                    amount_paid=0.0, status="pending", due_date=schedule.due_date,
-                )
-            )
-            created += 1
+    if due_within_days is not None:
+        cutoff = date.today() + timedelta(days=due_within_days)
+        schedules = [s for s in schedules if s.due_date <= cutoff]
+
+    created = sum(_generate_records_for_one_schedule(session, schedule) for schedule in schedules)
 
     # Explicit flush, not relying on autoflush: app.database.SessionLocal sets
     # autoflush=False, so without this, mark_overdue_and_send_reminders()'s query
@@ -129,9 +159,11 @@ def mark_overdue_and_send_reminders(session: Session, school_id: int, academic_y
     return {"overdue_marked": len(newly_overdue), "reminders_sent": reminders_sent}
 
 
-def run_monthly_invoicing(session: Session, school_id: int, academic_year: str) -> dict:
+def run_monthly_invoicing(
+    session: Session, school_id: int, academic_year: str, generate_only_due_within_days: int | None = None
+) -> dict:
     today = date.today()
-    records_created = generate_fee_records(session, school_id, academic_year)
+    records_created = generate_fee_records(session, school_id, academic_year, due_within_days=generate_only_due_within_days)
     reminder_summary = mark_overdue_and_send_reminders(session, school_id, academic_year, today)
     session.commit()
     return {"records_created": records_created, **reminder_summary}

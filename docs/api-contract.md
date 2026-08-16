@@ -86,7 +86,7 @@ managed). Additive only, existing consumers reading just `id`/`name` are unaffec
   ],
   "students": [ { "id": 103, "name": "Demo Student Class 8A #01" } ],
   "rooms": [ { "id": 1, "name": "Room 12", "room_type": "classroom" } ],
-  "classes": [ { "id": 41, "name": "Class 8A", "grade_level": 8, "grade_label": null, "section": "A" } ]
+  "classes": [ { "id": 41, "name": "Class 8A", "grade_level": 8, "grade_label": null, "section": "A", "class_teacher_id": 7 } ]
 }
 ```
 - `subjects[].periods_per_week`/`lab_required`: real, persisted `Subject` master-data
@@ -108,6 +108,10 @@ managed). Additive only, existing consumers reading just `id`/`name` are unaffec
   Nursery=-3/LKG=-2/UKG=-1/Grade N=N convention. `null` for a plain numeric grade
   (e.g. Grade 8) - display code should fall back to `f"Grade {grade_level}"` in that
   case, never render `grade_level` directly (`"Grade -2"` is never correct).
+- `classes[].class_teacher_id`: added this session - lets a teacher viewing this same
+  non-role-gated lookup identify which class(es), if any, they're the class teacher
+  of (e.g. `admin/fees` Fees page's teacher view) without needing the admin-only
+  `GET /admin/classes`. `null` for a class with none assigned.
 
 **Updated for real master-data CRUD (see Person A's "Master Data Management" section
 below)**: every list here (`subjects`/`teachers`/`rooms`/`classes`) now excludes
@@ -169,6 +173,15 @@ cold-start bootstrapping possible (there's no existing school to check against y
     a room already claimed as another ACTIVE class's home room is also a `400`
     (deactivating that other class frees the room for reuse) - two classes sharing
     one home room would otherwise silently double-book it every non-lab period.
+  - `class_teacher_id` is **required** on `POST /admin/classes` (was optional) -
+    every class must have a class teacher, a school-policy decision, not a schema
+    one: the DB column itself stays nullable (existing classes created before this
+    requirement may still have none), but creating a NEW class without one is now
+    a `422`. `PUT /admin/classes/{id}` still can't be used to un-assign one once
+    set (unchanged - `class_teacher_id` in the update body only ever sets, never
+    clears). The real enforcement teeth are in `POST /timetable/generate` (Check G,
+    below) - a class missing a class teacher blocks generation, not just class
+    creation.
 
 - `backend/app/routers/teachers.py`: Teacher is a compound entity - a real,
   login-capable Supabase Auth account (via `services/supabase_admin.py`'s
@@ -276,10 +289,19 @@ single application's full record.
 - **Response:**
 ```json
 {
-  "items": [ { "id": 1, "school_id": 41, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z", "processed_at": "2026-08-11T10:00:01Z" } ],
+  "items": [ { "id": 1, "school_id": 41, "document_type": "admission_form", "status": "done", "uploaded_at": "2026-08-11T10:00:00Z", "processed_at": "2026-08-11T10:00:01Z", "application_id": 575, "application_applicant_name": "Priya Sharma" } ],
   "total": 1, "page": 1, "page_size": 20
 }
 ```
+`application_id` is `null` until this document is linked into some
+`AdmissionApplication.ocr_document_ids` (via that document's own routing pre-fill, or
+via `POST /admin/admissions/applications/{id}/documents`) - lets the document list
+group/nest documents by the application they already belong to without a detail
+fetch per row. `application_applicant_name` is the linked application's own real
+`applicant_name` (null exactly when `application_id` is null) - not derived from
+this document's own extracted fields, since a marksheet's `student_name` and an
+id_proof's `full_name` aren't guaranteed to match the application's canonical name
+verbatim; the board always shows the one real name off the application itself.
 
 #### `GET /admin/ocr/documents/{id}`
 Fetch OCR processing status/result for a previously uploaded document.
@@ -294,19 +316,62 @@ Fetch OCR processing status/result for a previously uploaded document.
   "status": "done",
   "uploaded_at": "2026-08-11T10:00:00Z",
   "processed_at": "2026-08-11T10:00:01Z",
-  "extracted_fields": { "applicant_name": "Priya Sharma", "dob": "2015-04-01", "guardian_name": "Rajesh Sharma", "guardian_phone": "9876543210" },
+  "extracted_fields": { "applicant_name": "Priya Sharma", "dob": "2015-04-01", "gender": "Female", "grade_applied": "6", "guardian_name": "Rajesh Sharma", "guardian_email": "rajesh@example.com", "guardian_phone": "9876543210" },
   "entities": [
     { "id": 5, "field_name": "applicant_name", "field_value": "Priya Sharma", "confidence_score": 0.96, "is_low_confidence": false, "corrected_value": null, "corrected_by": null, "corrected_at": null }
   ],
-  "raw_text": "Applicant Name: Priya Sharma\nDate of Birth: 2015-04-01\n...",
+  "expected_fields": ["applicant_name", "dob", "gender", "grade_applied", "guardian_name", "guardian_email", "guardian_phone"],
+  "application_id": null,
+  "application_applicant_name": null,
+  "raw_text": "Applicant Name: Priya Sharma\nDate of Birth: 01.04.2015\n...",
   "ocr_confidence": 0.96,
-  "routing": { "routed": false, "target_table": null, "reason": "No 'admissions/applications' table exists yet for document_type='admission_form' - extraction is persisted as ExtractedEntity rows, routing is a documented stub" },
+  "routing": {
+    "routed": true,
+    "target_table": "admission_applications",
+    "reason": "Ready to pre-fill a new admission application from this document's extracted fields.",
+    "suggested_payload": { "applicant_name": "Priya Sharma", "dob": "2015-04-01", "guardian_email": "rajesh@example.com", "guardian_name": "Rajesh Sharma", "guardian_phone": "9876543210", "grade_applied": "6", "school_id": 41, "ocr_document_ids": [1] }
+  },
   "error": null
 }
 ```
+`suggested_payload`'s `guardian_name`/`guardian_phone` are only present when OCR
+actually found them (they're NOT in the required-to-route field set, so a form
+missing them still routes) - when present, they flow through to the real
+`POST /admin/admissions/applications` submission and become the real guardian
+account's `full_name` once accepted (see that endpoint's own note on this).
 `extracted_fields` uses each field's `corrected_value` where a manual correction
 exists, else its OCR `field_value` - `entities` carries the full per-field detail
 (confidence, correction state, entity `id` to `PUT` against) the flat dict can't.
+
+`expected_fields` is every field this `document_type`'s extraction rules look for
+(`services/ocr_postprocess.py::EXTRACTION_RULES`), regardless of whether OCR actually
+found each one on THIS document - a field can genuinely go missing (not merely
+low-confidence) when OCR garbles the source line badly enough that the regex never
+matches at all (found live: a real marksheet's "Total Marks:" line came back as
+"otal Mark:", so no entity was ever created for `total_marks`). Diffing
+`expected_fields` against `extracted_fields`'s keys tells a caller which fields have
+no value AT ALL, as distinct from a low-confidence one - see
+`POST .../entities` below for how to fill one in.
+
+`application_id` - see `GET /admin/ocr/documents`'s own note above; same meaning here.
+
+`dob` is extracted from any of ISO (`YYYY-MM-DD`) or common `DD.MM.YYYY`/`DD/MM/YYYY`/
+`DD-MM-YYYY` forms and always normalized to ISO before storage - real forms are filled
+in by office staff/parents in whatever format they're used to, not necessarily ISO
+(found live: a real uploaded form wrote "12.04.2015", which the original ISO-only
+extractor silently failed to match at all).
+
+`routing` reflects `services/ocr_routing.py`'s real (not stubbed) `admission_form`
+handler: once `applicant_name`/`dob`/`guardian_email`/`grade_applied` are ALL
+extracted (or corrected), `routed` is `true` and `suggested_payload` is a ready-to-
+review `POST /admin/admissions/applications` body (see that endpoint below) -
+`school_id`/`ocr_document_ids` come from this Document row, `academic_year` is left
+for a human to supply (never printed on the physical form). This is a PRE-FILL, never
+silent auto-creation - the frontend surfaces it as a "Create application from this
+document" action that still lands on the real endpoint for review/submit. When any
+required field is missing, `routed` stays `false` and `suggested_payload` is `null`,
+same as `marksheet`/`id_proof`/`other`, which remain honest stubs (no grades table or
+generic document-subject linkage exists yet).
 - **Errors:** `404` unknown document id, OR a real document id belonging to a different `school_id`.
 
 #### `PUT /admin/ocr/documents/{id}/entities/{entity_id}`
@@ -318,6 +383,23 @@ without touching the original OCR `field_value`.
 - **Request:** `{ "corrected_value": "Priya A. Sharma" }`
 - **Response:** the updated entity, same shape as a `GET` response's `entities[]` item.
 - **Errors:** `400` empty `corrected_value`; `404` unknown document/entity id, entity belongs to a different document, or the document belongs to a different `school_id`.
+
+#### `POST /admin/ocr/documents/{id}/entities`
+Manually supply a value for a field OCR never found at all - genuinely different
+from `PUT .../entities/{entity_id}` above, which corrects an EXISTING (if wrong or
+low-confidence) entity. When OCR garbles a line badly enough that the field's regex
+never matches, no entity is ever created for it - there's no `entity_id` to `PUT`
+to, so this creates one instead. Human-entered, so trusted outright:
+`confidence_score: 1.0`, `is_low_confidence: false`, no `corrected_value` (nothing
+to correct - this value IS the record).
+- **Roles:** admin, principal
+- **Query:** `?school_id=` (required)
+- **Request:** `{ "field_name": "total_marks", "value": "450" }`
+- **Response:** the full updated document detail, same shape as `GET /admin/ocr/documents/{id}`.
+- **Errors:** `400` empty `field_name`/`value`, or `field_name` isn't one of this
+  document's `expected_fields`; `409` this `field_name` already has a value on this
+  document - use `PUT .../entities/{entity_id}` to correct it instead; `404` unknown
+  document id, or the document belongs to a different `school_id`.
 
 #### `POST /admin/ocr/documents/{id}/reextract`
 Re-run postprocessing against the document's already-stored `raw_text` (no
@@ -536,6 +618,11 @@ failure together, not just the first:
 - **Cross-run collisions** — periods already committed to previously generated
   grades this academic year vs. periods free (`CROSS_RUN_COLLISION`) — see the
   cross-grade/cross-class note above for the related correctness fix.
+- **Class teacher assigned** — every section in this run must have a
+  `SchoolClass.class_teacher_id` set (`CLASS_TEACHER_MISSING`, `"error"`) — a
+  school-operations policy gate (added this session), not a solver-feasibility
+  one; lists every section still missing one together in one finding, not just
+  the first. Fix in School Management → Classes → Edit → Class teacher.
 
 Every `"error"`-severity finding carries at least one `remedies[]` entry with a
 concrete quantity (never "add more teachers" — always "add 1 teacher qualified for
@@ -1241,12 +1328,40 @@ Backed by `backend/app/models/fees.py` (`FeeSchedule` -> `FeeRecord` -> `FeeRemi
 and `backend/app/services/fee_reminder_engine.py`'s cadence heuristic. `FeeSchedule`
 is class-scoped (`class_id` nullable = school-wide, e.g. transport; set = class-
 specific, e.g. tiered tuition) - matches how real fee structures vary by grade far
-more than by individual student. `scripts/run_monthly_fee_invoicing.py` generates
-`FeeRecord` rows from active schedules and marks past-due ones overdue; overdue
-records are the 8th `alert_aggregator.ALERT_SOURCES` entry (`fee_overdue`), so they
-surface in `GET /admin/alerts` automatically. Resolving a `fee_overdue` alert via
-`POST /admin/alerts/fee_overdue:{id}/resolve` only dismisses it from the feed - a
-fee's real resolution is a payment (below), not a generic resolve.
+more than by individual student. `scripts/run_monthly_fee_invoicing.py`'s
+`run_monthly_invoicing()` generates `FeeRecord` rows from active schedules and marks
+past-due ones overdue; overdue records are the 8th `alert_aggregator.ALERT_SOURCES`
+entry (`fee_overdue`), so they surface in `GET /admin/alerts` automatically.
+Resolving a `fee_overdue` alert via `POST /admin/alerts/fee_overdue:{id}/resolve`
+only dismisses it from the feed - a fee's real resolution is a payment (below), not
+a generic resolve.
+
+**Generation is automatic, but gated by due date** - `AUTO_GENERATE_WINDOW_DAYS = 7`
+(`scripts/run_monthly_fee_invoicing.py`): a schedule due more than a week out does
+NOT get its `FeeRecord`s the moment it's created - a fee due in two months
+shouldn't materialize immediately. Two automatic paths, both respecting the
+window:
+1. `POST /admin/fees/schedules` calls `run_monthly_invoicing(...,
+   generate_only_due_within_days=7)` synchronously right after creating the
+   schedule - so a schedule due soon gets its records immediately, one due far out
+   doesn't (yet).
+2. `app/scheduler.py` also runs the same gated call **nightly** (02:45 UTC) for
+   every active school/year - changed from monthly this session, since a monthly
+   cadence left a mid-month-due fee un-marked-overdue (and un-reminded) for weeks.
+   This is also what eventually generates a far-out schedule's records once its
+   due date enters the 7-day window, with zero admin action needed.
+
+Two manual, **ungated** overrides exist for "I don't want to wait":
+- `POST /admin/fees/schedules/{id}/generate` - one schedule, right now, regardless
+  of due date (the "Generate now" button on that schedule's own card).
+- `POST /admin/fees/invoicing/run` - every schedule in the school+year, right now
+  (the bulk button - mainly for backfilling students enrolled after their class's
+  schedule already existed).
+
+All of the above are idempotent - re-running never creates duplicate `FeeRecord`s
+(`UniqueConstraint`), and reminders never re-fire once sent (tier-by-index
+tracking, see `fee_reminder_engine.py`), so calling any combination of these
+repeatedly is always safe.
 
 **Reminder cadence, per playbook's "heuristic engine":** 7/14/30 days overdue,
 escalating to `urgent` severity at 30 (matching the alert feed's own threshold) -
@@ -1256,16 +1371,42 @@ anywhere in this repo (same finding as Command Center's briefing email) - a row 
 means "the system determined a reminder was due," not "an email was delivered."
 
 #### `POST /admin/fees/schedules`
-Create a fee schedule.
+Create a fee schedule. Immediately generates this school+year's `FeeRecord`s
+afterward, but ONLY if `due_date` is within `AUTO_GENERATE_WINDOW_DAYS` (7) - see
+"Generation is automatic, but gated by due date" above. Check the response's
+`records_generated` to know which happened.
 - **Roles:** admin, principal
 - **Request:** `{ "school_id": 41, "class_id": 41, "academic_year": "2026-27", "fee_type": "tuition", "amount": 15000, "due_date": "2026-09-01" }`
-- **Response:** the created schedule, including `id`/`created_at`.
+- **Response:** the created schedule, including `id`/`created_at`/`records_generated`.
 - **Errors:** `400` non-positive `amount` or empty `fee_type`; `404` unknown `class_id`.
 
 #### `GET /admin/fees/schedules`
-List fee schedules.
+List fee schedules, **sorted ascending by due date** (soonest first).
 - **Roles:** admin, principal
 - **Query:** `?school_id=&academic_year=`
+- **Response:** each item includes `records_generated: bool` - false means it's
+  still waiting for the auto-generate window (or an explicit `.../generate` call).
+
+#### `POST /admin/fees/schedules/{id}/generate`
+The per-schedule manual override - generates THIS schedule's records right now,
+regardless of due date. Scoped to the caller's own school.
+- **Roles:** admin, principal
+- **Response:** the schedule, with `records_generated` now `true`.
+- **Errors:** `404` unknown schedule, or one belonging to another school.
+
+#### `POST /admin/fees/invoicing/run`
+The bulk manual override - generates EVERY schedule's records for the given
+academic year in the caller's school, right now, regardless of due date (unlike
+the automatic paths, unaffected by `AUTO_GENERATE_WINDOW_DAYS`). Also marks
+past-due records overdue and logs reminders. Mainly useful for backfilling
+students enrolled after their class's schedule already existed - nothing else
+re-checks that until the next nightly run or an explicit call here.
+Idempotent - re-running never creates duplicate `FeeRecord`s (same `UniqueConstraint`
+the nightly job relies on). Scoped to `user.school_id` (not a body param) - always
+the caller's own school.
+- **Roles:** admin, principal
+- **Request:** `{ "academic_year": "2026-27" }`
+- **Response:** `{ "records_created": 10, "overdue_marked": 0, "reminders_sent": 0 }`
 
 #### `POST /admin/fees/reminders`
 Trigger a batch fee-reminder send - runs the cadence heuristic against matching
@@ -1275,34 +1416,76 @@ Trigger a batch fee-reminder send - runs the cadence heuristic against matching
 - **Response:** `{ "sent_count": 24 }`
 
 #### `GET /admin/fees/status`
-Fetch fee status across students (admin view — see also Person C's parent-scoped `/parent/children/{student_id}/fees`).
-- **Roles:** admin, principal
-- **Query:** `?class_id=&status=`
+Fetch fee status - **one shared endpoint across all 5 roles**, scoped differently per
+caller, same pattern as `GET /risk/flagged`. Kept at this one path (superseding the
+never-built `/parent/children/{student_id}/fees` stub this section previously
+pointed to - that separate endpoint was never implemented; this is what actually
+ships) rather than one variant per role, so admin/teacher/parent/student all read
+from the same live data with no separate sync path to drift.
+- **Roles:** admin, principal, teacher, parent, student
+- **Query:** `?class_id=&student_id=&status=`
+- **Scoping per role:**
+  - admin/principal: every record in their own school. `class_id` filters by the
+    record's `FeeSchedule.class_id` (which class the fee was raised for - not the
+    student's current enrollment, so a fee stays under "Grade 8A" even if the
+    student later transfers). `student_id` filters to one student.
+  - teacher: only their own class(es) (`SchoolClass.class_teacher_id`). Passing a
+    `class_id` they don't teach → `403`.
+  - parent: `student_id` is **required** (`400` if omitted) and must be one of the
+    caller's own linked children (`ParentStudent`) → `403` otherwise.
+  - student: always their own records; `class_id`/`student_id` are ignored.
 - **Response:**
 ```json
-{ "items": [ { "student_id": 15, "fee_record_id": 9, "amount_due": 5000, "amount_paid": 0, "due_date": "2026-08-15", "status": "overdue" } ] }
+{ "items": [ { "student_id": 15, "fee_record_id": 9, "amount_due": 5000, "amount_paid": 0, "due_date": "2026-08-15", "status": "overdue", "fee_type": "tuition" } ] }
 ```
 
 #### `POST /admin/fees/records/{id}/payment`
-Record a payment against a fee record, however it was collected - the frontend
-payment-collection UI itself is Person C's parent-portal territory; this only
-persists the outcome. Recomputes `status` (`partial` if `0 < amount_paid <
-amount_due`, `paid` if `amount_paid >= amount_due`).
+Record a payment against a fee record, however it was collected (cash at the office,
+bank transfer, etc.) - this only persists the outcome, not a real payment gateway.
+Recomputes `status` (`partial` if `0 < amount_paid < amount_due`, `paid` if
+`amount_paid >= amount_due`). Scoped to the caller's own school (via the record's
+student) - previously unscoped, a real cross-tenant gap fixed this session.
 - **Roles:** admin, principal
 - **Request:** `{ "amount": 5000, "paid_at": null }`
 - **Response:** `{ "fee_record_id": 9, "amount_paid": 5000, "amount_due": 5000, "status": "paid" }`
-- **Errors:** `400` non-positive `amount`; `404` unknown fee record.
+- **Errors:** `400` non-positive `amount`; `404` unknown fee record, or one outside the caller's school.
+
+#### `PATCH /admin/fees/records/{id}/mark-paid`
+The class teacher's lightweight counterpart to `.../payment` above: a plain
+paid/not-paid toggle rather than an amount-reconciliation tool - a class teacher
+tracking "who in my class still owes the event fee" needs a checkbox, not to enter
+partial payment amounts (that stays admin/principal-only, via the endpoint above).
+`paid: true` sets `amount_paid = amount_due` and `status = "paid"`; `paid: false`
+resets `amount_paid = 0` and recomputes `status` as `overdue`/`pending` from
+`due_date`. Scoped to the teacher's own class (`SchoolClass.class_teacher_id`) -
+marking a student outside it is `404`, not `403` (doesn't reveal the record exists).
+- **Roles:** teacher
+- **Request:** `{ "paid": true }`
+- **Response:** same shape as `.../payment`'s.
+- **Errors:** `404` if the fee record doesn't belong to a student in the caller's
+  own class.
 
 ### Admissions
 
 Backed by `backend/app/models/admissions.py` (`AdmissionApplication`) and
-`backend/app/services/admissions_rules.py` (state machine + eligibility).
-`AdmissionApplication` carries `school_id`/`academic_year`/`submitted_by` beyond the
-original stub's field list - necessary, not decorative: eligibility checking ("is
-`grade_applied` offered by the school") is meaningless without knowing which school/
-year to check against, and `submitted_by` is the real user id behind
-`PendingApproval.requested_by` once registered below (the applicant has no user row
-of their own).
+`backend/app/services/admissions_rules.py` (state machine + eligibility + section
+assignment). `AdmissionApplication` carries `school_id`/`academic_year`/
+`submitted_by` beyond the original stub's field list - necessary, not decorative:
+eligibility checking ("is `grade_applied` offered by the school") is meaningless
+without knowing which school/year to check against, and `submitted_by` is the real
+user id behind `PendingApproval.requested_by` once registered below (the applicant
+has no user row of their own).
+
+**`grade_applied` is a grade LEVEL, not a section name - a real bug fix.** Originally
+stored (and validated against) a specific `SchoolClass.name` (e.g. `"Grade 3 - A"`) -
+found live: this asked an applicant/admin to already know which exact section they'd
+end up in before applying, which no real admission process works like. Now a
+stringified `SchoolClass.grade_level` (e.g. `"3"`, `"-2"` for LKG/`"-1"` for
+UKG/`"-3"` for Nursery - see that column's own docstring for the negative-int
+convention), checked against every grade level offered by at least one real ACTIVE
+section for the target academic year. **Which specific section** is a separate
+concern, resolved automatically only at acceptance time (see below) - never supplied
+by the caller.
 
 **State machine - legal transitions only:**
 ```
@@ -1312,7 +1495,9 @@ accepted, rejected -> (terminal - no further transitions)
 ```
 `submitted -> accepted` directly is explicitly illegal (must pass through
 `under_review`); `PATCH` rejects illegal transitions with `400` and a clear reason
-rather than silently allowing them.
+rather than silently allowing them. **Rejecting requires a real, non-empty
+`decision_justification`** - no reason, no reject (accepting has no such
+requirement - the pipeline below succeeding is itself the affirmative justification).
 
 **Registered as the 2nd real source in `approval_aggregator.APPROVAL_SOURCES`** (up
 from 1/7 last session, now 2/8) - but only for `status="under_review"`, not
@@ -1322,23 +1507,47 @@ reject decision point `GET /admin/approvals` / `POST /admin/approvals/{id}/decis
 offer. See `services/approval_aggregator.py`'s module docstring for the full
 reasoning.
 
-**Accept -> Enrollment wiring is REAL, not stubbed:** accepting an application
-(`status="accepted"`) creates a genuine `Enrollment` row when the caller supplies both
-`student_user_id` and `class_id`. `student_user_id` must be an **already-existing**
-user - this endpoint deliberately does not create one (see "Two ways a student gets
-an Enrollment" below for where that happens instead, and why this endpoint staying
-enrollment-only rather than also growing account-creation logic is intentional, not
-an unfixed gap). Without both ids, acceptance still succeeds; enrollment creation is
-a documented no-op (`enrollment_created: false`), never a silent skip.
+**Accepting is a REAL, fully automatic pipeline now - not stubbed, not manual.**
+Previously required the caller to already have an existing `student_user_id` (this
+repo genuinely had no account-creation flow anywhere when that was written - true
+at the time, stale the moment `routers/students.py::create_student` and
+`routers/parents.py::create_parent` were built in a later session and never wired
+back into this flow; found live). `PATCH .../accepted` (and the equivalent unified
+`POST /admin/approvals/{id}/decision`) now, in order:
+1. **Auto-assigns the least-filled real active section** at the requested
+   `grade_level` with room (comparing real current primary-enrollment headcount
+   against `Room.capacity` via the section's `home_room_id`, or a default of 30 if
+   none is set) - `400` with a specific reason (`"No available seats in Grade 3 for
+   2026-27 - all sections full"`) if none have room; never silently overfills, never
+   invents a new section.
+2. **Creates a real, genuinely login-capable student account** (Supabase Auth +
+   local `User` row, `role=student`) - a brand-new applicant always needs one. Since
+   nothing on an admission form captures the future student's own email (correctly -
+   a new LKG applicant wouldn't have one), a synthetic-but-unique one is generated
+   (`<slug>.<application_id>@eduops-student.local`) together with a real random
+   password - genuinely real credentials, just no email-sending infrastructure
+   exists anywhere in this repo to deliver that password to anyone (same honest
+   limitation as `FeeReminder.sent_at` staying null elsewhere).
+3. **Resolves `guardian_email`** to an existing real parent account (a returning
+   family's second child) or creates a new one - checked and validated BEFORE any
+   real account is created, so a guardian-email conflict (the email already belongs
+   to a real non-parent account) never leaves an orphaned Supabase Auth account
+   behind.
+4. **Links them via a real `ParentStudent` row.**
+5. **Enrolls** the new student in the assigned section (`enroll_student_primary`).
+
+Every check that can still fail (transition legality, reject reason, `grade_applied`
+parses as a real int, a section has room, guardian-email conflict) runs BEFORE any
+mutation - the application's own `status`/`decided_by`/`decided_at` is only set once
+none of those can fail anymore, so a failed accept (e.g. no seats available) never
+leaves the application half-decided.
 
 #### Two ways a student gets an `Enrollment` - both real, neither a duplicate
 Two genuinely different real-world moments create the same `Enrollment` row, and
 this API has one endpoint for each rather than overloading one:
 - **A NEW applicant, going forward**: `POST /admin/admissions/applications` →
-  triage (`under_review`) → `PATCH .../accepted` with an already-existing
-  `student_user_id`. This is the pipeline for someone who doesn't have an account
-  yet and needs the full submitted/under_review/accepted workflow, OCR document
-  attachment, eligibility checking, etc.
+  triage (`under_review`) → `PATCH .../accepted`. The full automatic pipeline above
+  creates the student account and enrolls them - no existing account needed.
 - **Onboarding a school's EXISTING roster directly** (e.g. a founding admin adding
   the 30 students already enrolled at their school, with no "application" to
   process): `POST /admin/students` (below) - creates the account AND optionally
@@ -1364,8 +1573,8 @@ that had no creation path at all.
 
 #### `POST /admin/parents`
 - **Roles:** admin, principal
-- **Request:** `{ "school_id": 41, "email": "guardian@example.com", "password": "...", "full_name": "Rajesh Sharma", "student_ids": [501, 502] }` - `student_ids` are real, already-created students (via `POST /admin/students` or otherwise) to link via `ParentStudent` - the same table `GET /parent/children` reads from. Supports linking more than one child (multi-guardian, multi-child families both work - `ParentStudent` has no uniqueness constraint on either side).
-- **Response:** `{ "id": 601, "email": "guardian@example.com", "full_name": "Rajesh Sharma", "school_id": 41, "is_active": true, "student_ids": [501, 502] }`
+- **Request:** `{ "school_id": 41, "email": "guardian@example.com", "password": "...", "full_name": "Rajesh Sharma", "phone": "9876543210", "student_ids": [501, 502] }` - `student_ids` are real, already-created students (via `POST /admin/students` or otherwise) to link via `ParentStudent` - the same table `GET /parent/children` reads from. Supports linking more than one child (multi-guardian, multi-child families both work - `ParentStudent` has no uniqueness constraint on either side). `phone` is optional - a real gap found live: School Management's Parents tab had no contact number for a guardian at all (`AdmissionApplication.guardian_phone` existed but belongs to the application, never carried into the parent's own account - see that field's own note above).
+- **Response:** `{ "id": 601, "email": "guardian@example.com", "full_name": "Rajesh Sharma", "phone": "9876543210", "school_id": 41, "is_active": true, "student_ids": [501, 502] }`
 - **Errors:** `400` unknown `school_id` or any `student_id` (must be a real user with role=student); `409` email already registered.
 
 ### Ongoing roster management (Students & Parents) - new this session
@@ -1396,7 +1605,7 @@ that had no creation path at all.
 #### `GET /admin/parents`
 - **Roles:** admin, principal
 - **Query:** `?school_id=` (required) `&include_inactive=` (default `false`)
-- **Response:** `[ { "id": 601, "email": "guardian@example.com", "full_name": "Rajesh Sharma", "school_id": 41, "is_active": true, "student_ids": [501, 502] } ]`
+- **Response:** `[ { "id": 601, "email": "guardian@example.com", "full_name": "Rajesh Sharma", "phone": "9876543210", "school_id": 41, "is_active": true, "student_ids": [501, 502] } ]`
 
 #### `GET /admin/parents/{id}`
 - **Roles:** admin, principal
@@ -1405,7 +1614,7 @@ that had no creation path at all.
 
 #### `PUT /admin/parents/{id}`
 - **Roles:** admin, principal
-- **Request:** `{ "full_name": "Rajesh K. Sharma" }` - name only. Linked children are managed via the add/remove sub-resource endpoints below, same idempotent one-at-a-time pattern as `teachers.py`'s subject qualifications - not a single big PUT that replaces the whole list.
+- **Request:** `{ "full_name": "Rajesh K. Sharma", "phone": "9123456789" }` - both optional, partial update (only sent fields change). Linked children are managed via the add/remove sub-resource endpoints below, same idempotent one-at-a-time pattern as `teachers.py`'s subject qualifications - not a single big PUT that replaces the whole list.
 - **Response:** the updated parent, same shape as `GET`.
 - **Errors:** `404` unknown parent id.
 
@@ -1424,10 +1633,23 @@ Submit a new admission application (typically entered by office staff, possibly 
 - **Roles:** admin
 - **Request:**
 ```json
-{ "school_id": 41, "academic_year": "2026-27", "applicant_name": "Jane Doe", "dob": "2015-04-01", "guardian_email": "guardian@example.com", "grade_applied": "6", "ocr_document_ids": [1] }
+{ "school_id": 41, "academic_year": "2026-27", "applicant_name": "Jane Doe", "dob": "2015-04-01", "guardian_email": "guardian@example.com", "guardian_name": "Rajesh Sharma", "guardian_phone": "9876543210", "grade_applied": "6", "ocr_document_ids": [1] }
 ```
+  `grade_applied` is a stringified grade LEVEL (`SchoolClass.grade_level`), not a section
+  name - `"6"` means "Grade 6, any section," `"-2"`/`"-1"`/`"-3"` for LKG/UKG/Nursery.
+  `ocr_document_ids` is optional - populated when the application was created via the
+  OCR routing pre-fill flow (`documents.py`'s admissions routing), empty otherwise.
+  `guardian_name`/`guardian_phone` are optional (not every submission path has them -
+  the OCR routing pre-fill includes them when the admission_form extracted them, the
+  Submit tab's own form asks for them directly, but neither is forced) - `guardian_name`
+  becomes the real `full_name` on the guardian's account once this application is
+  accepted (a real gap found live: parent accounts created with `full_name: null`
+  because this never reached that far before).
 - **Response:** the created application (`id`, `status: "submitted"`, etc).
-- **Errors:** `400` empty `applicant_name`, or `grade_applied` not offered by the school for that academic_year.
+- **Errors:** `400` empty `applicant_name`, or `grade_applied` isn't offered by any real
+  active section at this school for that academic_year (message lists what IS offered,
+  using friendly labels, e.g. `"Grade 13 is not offered by this school for this
+  academic year (offered: ['LKG', 'UKG', 'Grade 1'])"`).
 
 #### `GET /admin/admissions/applications`
 List/search admission applications.
@@ -1438,13 +1660,115 @@ List/search admission applications.
 { "items": [ { "id": 3, "applicant_name": "Jane Doe", "grade_applied": "6", "status": "under_review" } ], "total": 1, "page": 1, "page_size": 20 }
 ```
 
+#### `GET /admin/admissions/applications/{id}`
+Single-application detail fetch - backs the admin's full applicant detail view (was
+previously nonexistent; clicking an application card did nothing).
+- **Roles:** admin, principal
+- **Response:** the full application row, including `ocr_document_ids`,
+  `decision_justification`, `enrolled_student_id`, `decided_by`, `decided_at`, plus a
+  **`documents` array** - full per-document detail (`document_type`,
+  `extracted_fields`, `entities` with confidence flags, `routing`, etc. - the exact
+  same shape `GET /admin/ocr/documents/{id}` returns for one document) for EVERY id
+  in `ocr_document_ids`, not just their bare ids. A real admission process involves
+  multiple supporting documents per applicant (admission form + marksheet + ID
+  proof) - this lets the detail view show all of them together without a
+  round-trip per document. Any id that no longer resolves to a real document in
+  this school (e.g. deleted after linking) is silently skipped, never a 500.
+- **Errors:** `404` unknown application id.
+
+#### `POST /admin/admissions/applications/{id}/documents`
+Attach an already-uploaded OCR document to an existing application - the missing
+link for marksheet/id_proof, which have no routing handler of their own (see
+`ocr_routing.py`'s module docstring) and were otherwise permanently orphaned
+regardless of intent. `admission_form` still gets its first document linked via the
+routing pre-fill at submission time (`POST /admin/admissions/applications`'s
+`ocr_document_ids`) - this endpoint is for every document after the first, of any
+type, attached after the fact.
+- **Roles:** admin, principal
+- **Request:** `{ "document_id": 42 }`
+- **Response:** same enriched shape as `GET /admin/admissions/applications/{id}`
+  above (the application plus every linked document's full detail) - so the
+  frontend can refresh its whole detail view from this one response.
+- **Idempotent:** attaching a `document_id` already present in `ocr_document_ids`
+  is a no-op (200, no duplicate, no audit log entry) - not an error.
+- **No restriction on application status** - attaching is record-keeping (evidence
+  for a decision), not a decision itself, unlike accept/reject which the state
+  machine gates. A late-arriving ID proof for an already-accepted student can still
+  be attached.
+- **Errors:** `404` unknown application id, or an id belonging to another school
+  (same-shape 404 either way - doesn't leak which); `404` unknown `document_id`, or
+  a document belonging to a different school than the application (reuses
+  `GET /admin/ocr/documents/{id}`'s own scoped lookup, not a second check).
+
+#### `GET /admin/admissions/grade-levels`
+Real grade levels offered by this school for this academic year - backs the
+submission form's grade dropdown (previously free-text, which is how a section-name
+value like `"Grade 3 - A"` could ever get typed in as `grade_applied` in the first
+place).
+- **Roles:** admin
+- **Query:** `?school_id=&academic_year=` (both required)
+- **Response:** `{ "items": [ { "grade_level": -2, "display": "LKG" }, { "grade_level": 1, "display": "Grade 1" } ] }`
+  - only grade levels with at least one real ACTIVE section this academic year.
+
 #### `PATCH /admin/admissions/applications/{id}`
 Update an application's status via the state machine above.
 - **Roles:** admin, principal
-- **Request:** `{ "status": "accepted", "decision_justification": null, "student_user_id": null, "class_id": null }`
-  (`student_user_id`/`class_id` are **additions beyond the original stub** - see "Accept -> Enrollment wiring" above; both required together to wire a real Enrollment on acceptance, both optional otherwise)
-- **Response:** `{ "id": 3, "status": "accepted", "enrollment_created": true }`
-- **Errors:** `400` illegal state transition (message names the required intermediate step, e.g. "must pass through 'under_review' first"); `404` unknown application id, or `student_user_id`/`class_id` don't refer to real rows.
+- **Request:** `{ "status": "accepted", "decision_justification": null }`
+  - `decision_justification` is **required, non-empty** when `status: "rejected"` - no
+    reason, no reject. Never required for `accepted`/`under_review`.
+  - **No `student_user_id`/`class_id` anymore** - accepting is now a fully automatic
+    pipeline (real section auto-assignment + real student account + real guardian
+    resolution + real `Enrollment`) - see "Accepting is a REAL, fully automatic
+    pipeline" above. Supplying them is simply ignored (not a validation error) since
+    they're no longer part of the schema at all.
+- **Response:**
+```json
+{ "id": 3, "status": "accepted", "enrollment_created": true, "assigned_class_id": 12, "enrolled_student_id": 501, "parent_user_id": 601, "parent_account_created": true }
+```
+  `assigned_class_id`/`enrolled_student_id`/`parent_user_id`/`parent_account_created`
+  are all `null`/`false` for a reject (or for accept in the impossible case
+  `enrollment_created` is false).
+- **Errors:** `400` illegal state transition (message names the required intermediate
+  step, e.g. "must pass through 'under_review' first"); `400` rejecting without a
+  real `decision_justification`; `400` accepting when a real marksheet and id_proof
+  aren't BOTH already linked (`REQUIRED_DOCUMENT_TYPES_FOR_ACCEPTANCE` - a real hard
+  requirement, e.g. `"Cannot accept: missing required document(s) - id_proof.
+  Attach them (Document OCR page) before accepting."` - names only the genuinely
+  missing type(s), checked before every other accept-time check); `400` accepting
+  when `grade_applied` doesn't parse as a real int (a pre-existing application from
+  before this fix, still stored as a section name); `400` accepting when zero active
+  sections at the requested grade level have room (`"No available seats in Grade 3
+  for 2026-27 - all sections full"` - never silently overfills, never auto-creates a
+  new section); `400` accepting when `guardian_email` already belongs to a real
+  non-parent account; `404` unknown application id.
+  Rejecting has NO document requirement - an application with zero linked documents
+  can still be rejected (there's no reason to demand evidence for a decision not to
+  admit someone).
+
+#### `PATCH /admin/admissions/applications/{id}/details`
+Corrects the application's OWN declared details after submission - genuinely
+separate from `PUT /admin/ocr/documents/{id}/entities/{entity_id}` (correcting a
+linked OCR document's extracted field), which never flows back into an application
+already created from it. Found live: an admin corrected a document's
+`applicant_name` and expected the application to update too - it doesn't, by
+design (the application is the human-confirmed submitted record, not a live
+mirror of one document's OCR state). This is the real, explicit, audited way to
+fix a mistake in the application's own record instead.
+- **Roles:** admin, principal
+- **Request:** `{ "applicant_name": "Jane A. Doe" }` - partial update, every field
+  optional (`applicant_name`, `dob`, `guardian_email`, `guardian_name`,
+  `guardian_phone`); only supplied fields change.
+- **Response:** the full updated application, same enriched shape as
+  `GET /admin/admissions/applications/{id}` (includes `documents`).
+- **Blocked once `status: "accepted"`** - a real student/parent account and
+  `Enrollment` already exist based on these exact values by that point; editing
+  them afterward would silently diverge the application's own record from the
+  real accounts already created from it. Editing while
+  `submitted`/`under_review`/`rejected` is fine - none of those states have
+  created anything real from this data (or, for `rejected`, ever will).
+- **Errors:** `400` empty `applicant_name`/`guardian_email` when supplied; `400`
+  application is already `accepted`; `404` unknown application id, or a real id
+  belonging to a different school.
 
 ### Exam management
 
@@ -1485,13 +1809,41 @@ admin can immediately act on it, instead of routed through an async alert. See
 `alert_aggregator.py`'s module docstring for the full reasoning.
 
 #### `POST /admin/exams`
-Create an exam. **Not in the original stub** - added because `POST /admin/exams/
-{id}/schedules` has nothing to generate a schedule for without an `Exam` already
-existing. Flagged here, same pattern as every prior session's necessary additions.
+Create an exam for one class/section. **Not in the original stub** - added because
+`POST /admin/exams/{id}/schedules` has nothing to generate a schedule for without an
+`Exam` already existing. Flagged here, same pattern as every prior session's
+necessary additions. `exam_type` (added this session) is validated against a fixed
+preset list, not free text - `class_test`/`unit_test`/`mid_term`/`end_term` - since
+(unlike `FeeSchedule.fee_type`) there's no real reason an admin needs an arbitrary
+value here.
 - **Roles:** admin, principal
-- **Request:** `{ "school_id": 41, "subject_id": 40, "class_id": 41, "academic_year": "2026-27", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00", "total_marks": 100 }`
+- **Request:** `{ "school_id": 41, "subject_id": 40, "class_id": 41, "academic_year": "2026-27", "exam_type": "mid_term", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00", "total_marks": 100 }` (`exam_type` optional)
 - **Response:** the created exam, including `id`/`created_at`.
-- **Errors:** `400` `end_time<=start_time`; `404` unknown `subject_id`/`class_id`.
+- **Errors:** `403` `school_id` doesn't match the caller's own school; `400` `end_time<=start_time`, or `exam_type` not one of the fixed presets; `404` unknown `subject_id`/`class_id`.
+
+**Cross-tenant scoping fixed this session** - found live, against real data, during
+this session's own walkthrough: an admin from one school could see (`GET /admin/
+exams`), and could have generated/overwritten (`POST .../schedules`), another
+school's real exam. None of `POST /admin/exams`, `POST .../bulk-by-grade`,
+`GET /admin/exams`, `GET .../room-suggestions`, `POST .../schedules`, or
+`GET /admin/exams/seating` (admin/principal/teacher branch) had any `school_id`
+check before this - same class of gap fixed earlier this session in
+`fees.py`/`master_data.py`, and in `timetable.py`/`admissions.py` in prior
+sessions. All now scope to `user.school_id`; a mismatch is `403` on the two create
+endpoints (client-supplied `school_id`, mirroring `timetable.py`'s
+`_validate_generate_request`) and `404` everywhere an `exam_id` is resolved first
+(doesn't reveal whether the id exists at all).
+
+#### `POST /admin/exams/bulk-by-grade`
+Grade-wide creation, added this session - creates one `Exam` per active section in
+`grade_level` (same subject/date/time/type/marks for all), in a single call. A
+separate endpoint rather than a mode on `POST /admin/exams`, so that endpoint's
+original single-class contract stays exactly as every existing caller expects -
+this only adds a new capability.
+- **Roles:** admin, principal
+- **Request:** `{ "school_id": 41, "subject_id": 40, "grade_level": 8, "academic_year": "2026-27", "exam_type": "unit_test", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00" }`
+- **Response:** `{ "created": [ { "id": 5, ... }, { "id": 6, ... } ] }` - one exam per active section found.
+- **Errors:** same as `POST /admin/exams`, plus `404` if no active class matches `grade_level` for that school/year.
 
 #### `GET /admin/exams`
 **Not in the original stub - added because the frontend's exam management screen
@@ -1507,10 +1859,22 @@ same scoping as their seat-lookup.
 - **Response:**
 ```json
 {
-  "items": [ { "id": 5, "subject_id": 40, "class_id": 41, "academic_year": "2026-27", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00" } ],
+  "items": [ { "id": 5, "subject_id": 40, "class_id": 41, "academic_year": "2026-27", "exam_type": "mid_term", "exam_date": "2026-08-26", "start_time": "09:00:00", "end_time": "11:00:00" } ],
   "total": 1, "page": 1, "page_size": 20
 }
 ```
+
+#### `GET /admin/exams/{id}/room-suggestions`
+Added this session - "room selection must suggest the best one based on
+availability." Excludes any room already booked (`ExamRoomAssignment`) for a
+DIFFERENT exam whose date+time overlaps this one, then picks the smallest-waste
+subset of what's left to seat this exam's real enrolled headcount (prefers one
+room that fits everyone; falls back to combining rooms largest-first). A
+suggestion, not a forced choice - every available room is returned too, so the
+caller can override.
+- **Roles:** admin, principal
+- **Response:** `{ "exam_id": 5, "headcount": 28, "available_rooms": [ { "room_id": 5, "room_name": "Room 204", "capacity": 30 } ], "suggested_room_ids": [5] }`
+- **Errors:** `404` unknown `exam_id`.
 
 #### `POST /admin/exams/{id}/schedules`
 Generate a complete seating chart + invigilation schedule for an exam - supersedes
@@ -1519,8 +1883,16 @@ any previous generation for this exam (not additive), same convention as
 (`POST /admin/exams/seating/generate` with `exam_id` in the body) to put the id in
 the path, matching every other `.../{id}/...` action endpoint in this codebase -
 flagged, not silently changed.
+
+**HITL preview/confirm, added this session:** `dry_run` (default `false`, so every
+caller written before this session keeps its old immediate-persist behavior
+unchanged) - when `true`, computes and returns the exact same seating/invigilator
+result WITHOUT writing anything (`status: "preview"`); the admin reviews it, then
+calls again with `dry_run: false` to actually persist (`status: "generated"`). The
+frontend always does the two-step version now; the single-step (`dry_run` omitted)
+path still exists for any other caller.
 - **Roles:** admin, principal
-- **Request:** `{ "rooms": [ { "room_id": 5, "capacity": 30 } ] }`
+- **Request:** `{ "rooms": [ { "room_id": 5, "capacity": 30 } ], "dry_run": true }`
 - **Response:**
 ```json
 {
@@ -1530,17 +1902,61 @@ flagged, not silently changed.
   "unassigned_rooms": []
 }
 ```
+(`status` is `"preview"` when `dry_run: true` was sent, `"generated"` otherwise.)
 - **Errors:** `400` no `rooms` given; `404` unknown `exam_id` or `room_id`; `422` total room capacity is less than the class's enrolled student count.
 
+**Invigilator assignment already accounted for real teacher availability** before
+this session (excludes anyone with a genuinely overlapping `TimetableSlot`, anyone
+on approved leave covering the exam date, never double-books one teacher across two
+rooms of the SAME exam) - this session adds a **3-tier priority** among whoever
+passes those hard filters:
+1. **Preferred** - whoever normally has THIS exact class at this exact day/time
+   slot (any subject). The natural first pick: that period is being replaced BY
+   the exam, so they were already going to be with this class then. (This also
+   fixes a bug: their own regular slot for this class used to be wrongly counted
+   as a "conflict" and excluded them entirely - only a DIFFERENT class's
+   overlapping slot is a real conflict now.)
+2. **Normal** - anyone else free, ranked by current invigilation workload (fewer
+   existing duties scores higher) - the original behavior, for anyone not in tier
+   1 or 3.
+3. **Deprioritized, last resort** - whoever normally teaches this exam's OWN
+   subject to this class (e.g. the English teacher for an English exam) - used
+   only if nobody from tier 1/2 is eligible, to avoid a subject teacher
+   invigilating their own subject's test. Wins over tier 1 if a candidate is in
+   both (their regular slot for this class happens to BE this subject) - the bias
+   concern applies regardless of scheduling convenience.
+
+The first non-empty tier is used entirely (workload-ranking only breaks ties
+within it) - see `services/exam_scheduler.py`'s module docstring for the full
+filter+rank walkthrough.
+
 #### `GET /admin/exams/seating`
-Fetch a generated seating plan. A student sees only their own seat - any
-`student_id` they pass is ignored in favor of their own id (same scoping pattern as
-attendance/risk's student-facing GETs).
+Fetch a generated seating plan. **Changed this session** two ways:
+1. A student used to see only their own single row; now they see every seat in
+   the SAME room they're actually placed in (per exam), so the frontend can
+   render the real room layout with their own seat highlighted instead of an
+   isolated seat. Any `student_id` a student passes is still ignored in favor of
+   their own id (only decides whose room(s) to resolve, never lets them view a
+   room they're not in).
+2. Every item now also carries the exam's own details (`subject_name`,
+   `exam_type`, `exam_date`, `class_name`) and that room's invigilator
+   (`invigilator_teacher_id`/`invigilator_name`, both `null` if the room has none
+   yet) - so a bare "Exam #5" is never the only thing shown, and looking up who's
+   invigilating a given class no longer requires re-running generation.
 - **Roles:** admin, principal, teacher, student
-- **Query:** `?exam_id=&student_id=` (both optional - a student with neither set sees all their own seats across every exam)
+- **Query:** `?exam_id=&student_id=` (both optional - a student with neither set sees every room they're seated in, across every exam)
 - **Response:**
 ```json
-{ "exam_id": 5, "items": [ { "exam_id": 5, "student_id": 15, "room_id": 5, "room_name": "Room 204", "seat_no": 1 } ] }
+{
+  "exam_id": 5,
+  "items": [
+    {
+      "exam_id": 5, "student_id": 15, "room_id": 5, "room_name": "Room 204", "seat_no": 1,
+      "subject_id": 40, "subject_name": "Math", "exam_type": "mid_term", "exam_date": "2026-08-26",
+      "class_id": 41, "class_name": "Class 8A", "invigilator_teacher_id": 97, "invigilator_name": "T. Rao"
+    }
+  ]
+}
 ```
 
 #### `GET /admin/exams/invigilations/me`
@@ -1846,10 +2262,10 @@ Child's attendance record.
 - **Query:** `?from=&to=`
 - **Response:** `{ "student_id": 15, "items": [ { "date": "2026-08-09", "status": "present" } ] }`
 
-#### `GET /parent/children/{student_id}/fees`
-Child's fee status. Mirrors Person A's `/admin/fees/status` but scoped to one child.
-- **Roles:** parent (own child only)
-- **Response:** `{ "student_id": 15, "items": [ { "amount_due": 5000, "due_date": "2026-08-15", "status": "overdue" } ] }`
+#### ~~`GET /parent/children/{student_id}/fees`~~ - superseded, never built
+This stub was never implemented as its own endpoint. A parent's fee view instead
+lives on the shared `GET /admin/fees/status?student_id={id}` (see the Fees section
+above) - same data, no separate parent-only copy to keep in sync.
 
 #### `POST /parent/messages`
 Send a message from a parent to a teacher/school.

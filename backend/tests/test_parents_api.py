@@ -116,6 +116,30 @@ def test_create_parent_returns_400_for_a_non_student_id(client, db_session, seed
     mock_create.assert_not_called()
 
 
+def test_create_parent_stores_phone(client, seed):
+    _override_user("admin")
+    with patch("app.routers.parents.create_auth_account", return_value=uuid.uuid4()):
+        resp = client.post(
+            "/admin/parents",
+            json={
+                "school_id": seed["school"].id, "email": "withphone@example.com", "password": "Sup3rSecret!",
+                "full_name": "Rajesh Sharma", "phone": "9876543210",
+            },
+        )
+    assert resp.status_code == 201
+    assert resp.json()["phone"] == "9876543210"
+
+
+def test_create_parent_allows_omitting_phone(client, seed):
+    _override_user("admin")
+    with patch("app.routers.parents.create_auth_account", return_value=uuid.uuid4()):
+        resp = client.post(
+            "/admin/parents", json={"school_id": seed["school"].id, "email": "nophone@example.com", "password": "Sup3rSecret!"}
+        )
+    assert resp.status_code == 201
+    assert resp.json()["phone"] is None
+
+
 def test_create_parent_with_no_students_succeeds(client, seed):
     _override_user("principal")
     with patch("app.routers.parents.create_auth_account", return_value=uuid.uuid4()):
@@ -190,6 +214,15 @@ def test_update_parent_full_name(client, existing_parent):
     resp = client.put(f"/admin/parents/{existing_parent.id}", json={"full_name": "Renamed Parent"})
     assert resp.status_code == 200
     assert resp.json()["full_name"] == "Renamed Parent"
+
+
+def test_update_parent_phone(client, existing_parent):
+    _override_user("admin")
+    resp = client.put(f"/admin/parents/{existing_parent.id}", json={"phone": "9123456789"})
+    assert resp.status_code == 200
+    assert resp.json()["phone"] == "9123456789"
+    # full_name untouched by a phone-only partial update
+    assert resp.json()["full_name"] == "Existing Parent"
 
 
 def test_update_parent_returns_404_for_unknown_id(client):

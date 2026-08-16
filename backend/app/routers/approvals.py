@@ -42,17 +42,27 @@ def _decide_leave_request(db: Session, entity_id: int, decision: str, body: "Dec
 
 
 def _decide_admission_application(db: Session, entity_id: int, decision: str, body: "DecisionRequest", user: CurrentUser) -> str:
-    application = db.query(AdmissionApplication).filter(AdmissionApplication.id == entity_id).one_or_none()
+    # Scoped to the caller's own school - same fix as the dedicated PATCH endpoint
+    # in admissions.py (found live via this session's cross-school walkthrough
+    # test); without it, this second entry point to the exact same decide function
+    # would have let an admin from ANY school accept/reject another school's
+    # application even after the dedicated endpoint was locked down.
+    application = (
+        db.query(AdmissionApplication)
+        .filter(AdmissionApplication.id == entity_id, AdmissionApplication.school_id == user.school_id)
+        .one_or_none()
+    )
     if application is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Admission application not found")
 
     db_decision = "accepted" if decision == "approve" else "rejected"
-    enrollment_created = decide_admission_application(
-        db, application, db_decision, user.id, body.comment, body.student_user_id, body.class_id
-    )
+    outcome = decide_admission_application(db, application, db_decision, user.id, body.comment)
     write_audit_log(
         db, actor_id=user.id, action=decision, entity_type="admission_applications", entity_id=application.id,
-        detail={"comment": body.comment, "via": "unified_approvals_inbox", "enrollment_created": enrollment_created},
+        detail={
+            "comment": body.comment, "via": "unified_approvals_inbox",
+            "enrollment_created": outcome.enrollment_created, "assigned_class_id": outcome.assigned_class_id,
+        },
     )
     return application.status
 
@@ -119,14 +129,6 @@ class DecisionRequest(BaseModel):
     leave_request-type approval with decision="approve" (needed to resolve affected
     timetable slots for substitute-finding, exactly like PUT /staff/approve_leave
     already requires)."""
-    student_user_id: int | None = None
-    """ADDITION - an already-existing user id to enroll when accepting an
-    admission_application-type approval. See decide_admission_application()'s
-    docstring in routers/admissions.py for why creating a new account is out of
-    scope. Ignored by every other type."""
-    class_id: int | None = None
-    """ADDITION - required alongside student_user_id to wire a real Enrollment when
-    accepting an admission_application. Ignored by every other type."""
 
 
 class DecisionResponse(BaseModel):

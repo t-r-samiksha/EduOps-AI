@@ -1,4 +1,4 @@
-from app.services.substitute_solver import SubstituteCandidate, find_substitutes
+from app.services.substitute_solver import SubstituteCandidate, find_fallback_substitutes, find_substitutes
 
 MATH = 1
 ORIGINAL_TEACHER = 100
@@ -12,6 +12,7 @@ def _candidate(teacher_id: int, **overrides) -> SubstituteCandidate:
         unavailable=False,
         on_leave=False,
         current_workload=5,
+        already_substituting=False,
     )
     defaults.update(overrides)
     return SubstituteCandidate(**defaults)
@@ -52,6 +53,17 @@ def test_excludes_unavailable_teacher():
 
 def test_excludes_teacher_on_approved_leave():
     candidates = [_candidate(1, on_leave=True)]
+    suggestions = find_substitutes(subject_id=MATH, original_teacher_id=ORIGINAL_TEACHER, candidates=candidates)
+    assert suggestions == []
+
+
+def test_excludes_teacher_already_confirmed_substituting_elsewhere():
+    """Regression test for a real double-booking bug: a teacher with nothing on
+    their own real timetable at this day/period (already_busy=False) could still
+    already be CONFIRMED as someone else's substitute for a different class at
+    that exact same day/period - this must be excluded too, not just their own
+    static timetable."""
+    candidates = [_candidate(1, already_substituting=True)]
     suggestions = find_substitutes(subject_id=MATH, original_teacher_id=ORIGINAL_TEACHER, candidates=candidates)
     assert suggestions == []
 
@@ -97,3 +109,47 @@ def test_all_scores_within_expected_range():
     suggestions = find_substitutes(subject_id=MATH, original_teacher_id=ORIGINAL_TEACHER, candidates=candidates)
     for s in suggestions:
         assert 0.7 <= s.score <= 1.0
+
+
+# --- find_fallback_substitutes (real-world "nobody qualified" escalation) ---
+
+
+def test_fallback_surfaces_unqualified_but_free_teacher():
+    """Regression test for the automatic fallback tier: a teacher who fails the
+    subject-qualification filter must still be surfaced (flagged
+    qualified=False) as a supervision-only suggestion, since find_substitutes()
+    would otherwise leave the admin with nothing but a blind manual pick."""
+    candidates = [_candidate(1, qualified_subject_ids=frozenset({999}))]  # not qualified for MATH
+    suggestions = find_fallback_substitutes(original_teacher_id=ORIGINAL_TEACHER, candidates=candidates)
+
+    assert len(suggestions) == 1
+    assert suggestions[0].teacher_id == 1
+    assert suggestions[0].qualified is False
+    assert "not qualified" in suggestions[0].reason.lower()
+
+
+def test_fallback_still_excludes_original_teacher():
+    candidates = [_candidate(ORIGINAL_TEACHER, qualified_subject_ids=frozenset())]
+    suggestions = find_fallback_substitutes(original_teacher_id=ORIGINAL_TEACHER, candidates=candidates)
+    assert suggestions == []
+
+
+def test_fallback_still_excludes_busy_unavailable_on_leave_and_already_substituting():
+    """The fallback tier waives ONLY the subject-qualification filter - every
+    other hard filter (real scheduling/physical impossibilities) still applies
+    unchanged."""
+    candidates = [
+        _candidate(1, already_busy=True),
+        _candidate(2, unavailable=True),
+        _candidate(3, on_leave=True),
+        _candidate(4, already_substituting=True),
+    ]
+    suggestions = find_fallback_substitutes(original_teacher_id=ORIGINAL_TEACHER, candidates=candidates)
+    assert suggestions == []
+
+
+def test_fallback_ranks_by_workload_same_as_normal_suggestions():
+    candidates = [_candidate(1, current_workload=20), _candidate(2, current_workload=2)]
+    suggestions = find_fallback_substitutes(original_teacher_id=ORIGINAL_TEACHER, candidates=candidates)
+    assert [s.teacher_id for s in suggestions] == [2, 1]
+    assert all(s.qualified is False for s in suggestions)

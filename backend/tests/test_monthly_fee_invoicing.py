@@ -9,7 +9,7 @@ from app.models.fees import FeeRecord, FeeReminder, FeeSchedule
 from app.models.role import Role
 from app.models.school import School
 from app.models.user import User
-from scripts.run_monthly_fee_invoicing import run_monthly_invoicing
+from scripts.run_monthly_fee_invoicing import generate_fee_records_for_schedule, run_monthly_invoicing
 
 ACADEMIC_YEAR = "2026-27"
 
@@ -148,3 +148,60 @@ def test_rerunning_does_not_duplicate_the_same_reminder_tier(db_session, seed):
         .all()
     )
     assert len(reminders) == 2  # still just one per student, not four
+
+
+# --- generate_only_due_within_days (auto-generate window) --------------------
+
+
+def test_due_within_days_skips_a_schedule_due_far_in_the_future(db_session, seed):
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=60),
+    )
+    db_session.add(schedule)
+    db_session.commit()
+
+    summary = run_monthly_invoicing(db_session, seed["school"].id, ACADEMIC_YEAR, generate_only_due_within_days=7)
+    assert summary["records_created"] == 0
+    assert db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule.id).count() == 0
+
+
+def test_due_within_days_still_generates_a_schedule_due_soon(db_session, seed):
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=3),
+    )
+    db_session.add(schedule)
+    db_session.commit()
+
+    summary = run_monthly_invoicing(db_session, seed["school"].id, ACADEMIC_YEAR, generate_only_due_within_days=7)
+    assert summary["records_created"] == 2
+
+
+def test_due_within_days_still_generates_an_already_overdue_schedule(db_session, seed):
+    """A schedule already past due is obviously "within" any forward-looking
+    window - must not be skipped just because it's negative days away."""
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=5),
+    )
+    db_session.add(schedule)
+    db_session.commit()
+
+    summary = run_monthly_invoicing(db_session, seed["school"].id, ACADEMIC_YEAR, generate_only_due_within_days=7)
+    assert summary["records_created"] == 2
+
+
+def test_generate_fee_records_for_schedule_ignores_the_window_entirely(db_session, seed):
+    """The per-schedule manual override always generates, regardless of how
+    far out due_date is - there's no gating parameter to even pass."""
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=90),
+    )
+    db_session.add(schedule)
+    db_session.commit()
+
+    created = generate_fee_records_for_schedule(db_session, schedule)
+    assert created == 2
+    assert db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule.id).count() == 2

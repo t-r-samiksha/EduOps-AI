@@ -5,12 +5,13 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.admissions import AdmissionApplication
 from app.models.document import Document, ExtractedEntity, OcrResult
 from app.models.school import School
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
 from app.services.ocr_engine import InvalidImageError, OcrEngineError, WordConfidence, extract_text
-from app.services.ocr_postprocess import extract_entities
+from app.services.ocr_postprocess import expected_fields, extract_entities
 from app.services.ocr_routing import route_entities
 
 router = APIRouter(tags=["document-ocr"])
@@ -59,6 +60,41 @@ class RoutingOut(BaseModel):
     routed: bool
     target_table: str | None
     reason: str
+    suggested_payload: dict[str, str | int | list[int]] | None = None
+    """Only set when routed=True - a pre-filled request body for the real
+    downstream endpoint (e.g. POST /admin/admissions/applications), merging
+    services/ocr_routing.py's extracted-field subset with school_id/
+    ocr_document_ids from this Document row. Never auto-submitted anywhere - the
+    frontend shows this as an editable, pre-filled form for a human to review and
+    submit for real (see ocr_routing.py's module docstring for why)."""
+
+
+def _linked_application_for_document(db: Session, document: Document) -> tuple[int, str] | None:
+    """Which AdmissionApplication (if any) already has this document linked via its
+    ocr_document_ids - the JSONB `@>` containment operator, not a Python-side scan.
+    Powers the OCR page's drag-and-drop linking (a document can only be a valid drop
+    TARGET, i.e. gain other documents attached to it, once some application already
+    references it - see routers/admissions.py's attach_document), lets the frontend
+    show which application any already-linked document belongs to, and returns the
+    applicant's real name too - the board shows this next to every card in a group
+    (not just the admission_form's own extracted fields, which a marksheet/id_proof
+    don't share the same field names for anyway) so every card names whose file it
+    actually is.
+
+    Uses `.first()`, NOT `.scalar()` - found live (real sam school data, a document
+    linked to two applications from before attach_document rejected double-linking)
+    that `.scalar()` raises `MultipleResultsFound` the moment more than one
+    application references the same document, 500ing the entire document list.
+    Ordered by id so which one "wins" is at least deterministic (the oldest/first
+    application to have claimed this document), not query-plan-dependent."""
+    row = (
+        db.query(AdmissionApplication.id, AdmissionApplication.applicant_name)
+        .filter(AdmissionApplication.school_id == document.school_id, AdmissionApplication.ocr_document_ids.contains([document.id]))
+        .order_by(AdmissionApplication.id)
+        .limit(1)
+        .first()
+    )
+    return (row.id, row.applicant_name) if row is not None else None
 
 
 class DocumentDetailOut(BaseModel):
@@ -74,6 +110,19 @@ class DocumentDetailOut(BaseModel):
     entities: list[EntityOut]
     """Full per-field detail (confidence, correction state) for the correction UI -
     an addition beyond the original stub, needed to know which entity_id to PUT to."""
+    expected_fields: list[str]
+    """Every field this document_type's extraction rules look for, regardless of
+    whether OCR actually found it here - lets the review UI show a real, editable
+    row for a field that's genuinely missing (e.g. a garbled "Total Marks" line)
+    instead of that field just not existing anywhere on the page."""
+    application_id: int | None
+    """Set once this document is linked into some AdmissionApplication's
+    ocr_document_ids - null if it's still unlinked. See _linked_application_for_document."""
+    application_applicant_name: str | None
+    """The linked application's real applicant_name - null exactly when application_id
+    is null. Not derived from this document's OWN extracted fields (a marksheet says
+    student_name, an id_proof says full_name, not necessarily identical strings) -
+    always the one canonical name off the application itself."""
     raw_text: str | None
     ocr_confidence: float | None
     routing: RoutingOut | None
@@ -85,9 +134,22 @@ class DocumentDetailOut(BaseModel):
 def _build_detail(db: Session, document: Document) -> DocumentDetailOut:
     ocr_result = db.query(OcrResult).filter(OcrResult.document_id == document.id).one_or_none()
     entities = db.query(ExtractedEntity).filter(ExtractedEntity.document_id == document.id).all()
+    linked_application = _linked_application_for_document(db, document)
 
     extracted_fields = {e.field_name: (e.corrected_value if e.corrected_value is not None else e.field_value) for e in entities}
     routing = route_entities(document.document_type, extracted_fields) if entities else None
+
+    suggested_payload = None
+    if routing and routing.routed and routing.suggested_payload is not None:
+        # ocr_routing.py only ever sees the extracted-field dict, not the Document
+        # row - it has no opinion on school_id/ocr_document_ids. Those two ARE
+        # fully derivable here (unlike academic_year, which only a human can
+        # supply), so this is the one place they're merged in.
+        suggested_payload = {
+            **routing.suggested_payload,
+            "school_id": document.school_id,
+            "ocr_document_ids": [document.id],
+        }
 
     return DocumentDetailOut(
         id=document.id,
@@ -98,9 +160,21 @@ def _build_detail(db: Session, document: Document) -> DocumentDetailOut:
         processed_at=document.processed_at,
         extracted_fields=extracted_fields,
         entities=[EntityOut.model_validate(e) for e in entities],
+        expected_fields=expected_fields(document.document_type),
+        application_id=linked_application[0] if linked_application else None,
+        application_applicant_name=linked_application[1] if linked_application else None,
         raw_text=ocr_result.raw_text if ocr_result else None,
         ocr_confidence=ocr_result.confidence_score if ocr_result else None,
-        routing=RoutingOut(routed=routing.routed, target_table=routing.target_table, reason=routing.reason) if routing else None,
+        routing=(
+            RoutingOut(
+                routed=routing.routed,
+                target_table=routing.target_table,
+                reason=routing.reason,
+                suggested_payload=suggested_payload,
+            )
+            if routing
+            else None
+        ),
         error="OCR processing failed for this document" if document.status == "failed" else None,
     )
 
@@ -181,8 +255,13 @@ class DocumentSummaryOut(BaseModel):
     status: str
     uploaded_at: datetime
     processed_at: datetime | None
-
-    model_config = ConfigDict(from_attributes=True)
+    application_id: int | None
+    """Same meaning as DocumentDetailOut's own field - lets the list view group/nest
+    documents by the application they're already linked to without a separate
+    detail fetch per row."""
+    application_applicant_name: str | None
+    """Same meaning as DocumentDetailOut's own field - the board shows this next to
+    every card in a group so an admin sees whose file it is at a glance."""
 
 
 class DocumentsListResponse(BaseModel):
@@ -233,9 +312,17 @@ def list_documents(
         .limit(page_size)
         .all()
     )
-    return DocumentsListResponse(
-        items=[DocumentSummaryOut.model_validate(d) for d in rows], total=total, page=page, page_size=page_size
-    )
+    def _summary(d: Document) -> DocumentSummaryOut:
+        linked_application = _linked_application_for_document(db, d)
+        return DocumentSummaryOut(
+            id=d.id, school_id=d.school_id, document_type=d.document_type, status=d.status,
+            uploaded_at=d.uploaded_at, processed_at=d.processed_at,
+            application_id=linked_application[0] if linked_application else None,
+            application_applicant_name=linked_application[1] if linked_application else None,
+        )
+
+    items = [_summary(d) for d in rows]
+    return DocumentsListResponse(items=items, total=total, page=page, page_size=page_size)
 
 
 def _get_scoped_document_or_404(db: Session, document_id: int, school_id: int) -> Document:
@@ -297,6 +384,62 @@ def correct_entity(
     db.commit()
     db.refresh(entity)
     return EntityOut.model_validate(entity)
+
+
+class ManualEntityRequest(BaseModel):
+    field_name: str
+    value: str
+
+
+@router.post("/admin/ocr/documents/{document_id}/entities", response_model=DocumentDetailOut)
+def add_manual_entity(
+    document_id: int,
+    school_id: int,
+    body: ManualEntityRequest,
+    user: CurrentUser = Depends(require_role("admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """For a field OCR never found at all (no ExtractedEntity row exists yet) -
+    genuinely different from PUT .../entities/{entity_id} above, which corrects an
+    EXISTING (if wrong/low-confidence) value. A garbled marksheet can lose a field
+    entirely (see the real "Total Marks" -> "otal Mark" OCR failure this was built
+    for) - there is no entity id to PUT to in that case, so this creates one.
+    Human-entered, so trusted outright: confidence_score=1.0, is_low_confidence=False,
+    no corrected_value (nothing to correct - this value IS the record)."""
+    document = _get_scoped_document_or_404(db, document_id, school_id)
+
+    if not body.field_name.strip() or not body.value.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "field_name and value must not be empty")
+    if body.field_name not in expected_fields(document.document_type):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"'{body.field_name}' is not a field this document_type ({document.document_type}) extracts",
+        )
+
+    existing = (
+        db.query(ExtractedEntity)
+        .filter(ExtractedEntity.document_id == document_id, ExtractedEntity.field_name == body.field_name)
+        .one_or_none()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"'{body.field_name}' already has a value on this document - use PUT .../entities/{{entity_id}} to correct it instead",
+        )
+
+    entity = ExtractedEntity(
+        document_id=document_id, field_name=body.field_name, field_value=body.value.strip(),
+        confidence_score=1.0, is_low_confidence=False,
+    )
+    db.add(entity)
+    db.flush()  # need entity.id for the audit log entry below
+    write_audit_log(
+        db, actor_id=user.id, action="manual_entry", entity_type="extracted_entities", entity_id=entity.id,
+        detail={"document_id": document_id, "field_name": body.field_name, "value": body.value.strip()},
+    )
+    db.commit()
+    db.refresh(document)
+    return _build_detail(db, document)
 
 
 class ReextractRequest(BaseModel):

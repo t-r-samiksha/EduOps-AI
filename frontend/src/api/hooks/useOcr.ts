@@ -67,6 +67,24 @@ export function useCorrectEntity(schoolId: number) {
   });
 }
 
+/** For a field OCR never found at all (no entity exists yet) - genuinely different
+ * from useCorrectEntity, which corrects an EXISTING (if wrong/low-confidence)
+ * value. See DocumentDetail.expected_fields' docstring for why a field can go
+ * missing entirely, not just low-confidence. */
+export function useAddManualEntity(schoolId: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ documentId, fieldName, value }: { documentId: number; fieldName: string; value: string }) =>
+      apiPost<DocumentDetail>(`/admin/ocr/documents/${documentId}/entities?school_id=${schoolId}`, {
+        field_name: fieldName,
+        value,
+      }),
+    onSuccess: (_result, { documentId }) => {
+      queryClient.invalidateQueries({ queryKey: ["ocr-document", documentId] });
+    },
+  });
+}
+
 export function useReextractDocument(schoolId: number) {
   const queryClient = useQueryClient();
   return useMutation({

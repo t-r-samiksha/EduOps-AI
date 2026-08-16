@@ -17,7 +17,7 @@ from app.models.user import User
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.staffing_forecast import HistoricalGapObservation, forecast_staffing_gaps, has_sufficient_data
-from app.services.substitute_solver import SubstituteCandidate, SubstituteSuggestion, find_substitutes
+from app.services.substitute_solver import SubstituteCandidate, SubstituteSuggestion, find_fallback_substitutes, find_substitutes
 
 router = APIRouter(tags=["staffing"])
 
@@ -52,39 +52,81 @@ def _distinct_slots_for_leave(
     )
 
 
-def _build_substitute_candidates(
+def _teachers_confirmed_substitutes_at(
     db: Session,
     *,
-    subject_id: int,
     day_of_week: int,
     period_number: int,
     academic_year: str,
-    exclude_teacher_id: int,
+    exclude_substitution_id: int | None = None,
+) -> set[int]:
+    """Teachers already CONFIRMED (Substitution.status == "confirmed") to cover a
+    DIFFERENT class at this exact day/period/academic_year - the check that was
+    missing everywhere (see substitute_solver.py's module docstring for the real
+    double-booking this closes): a teacher confirmed as substitute for one class
+    at a given day/period has nothing on their own real TimetableSlot at that
+    time, so the pre-existing `already_busy` check (which only looks at
+    TimetableSlot) never caught them being newly unavailable. `exclude_substitution_id`
+    excludes a substitution's own row so re-evaluating candidates/conflicts for
+    THAT row doesn't see its own already-confirmed substitute as "someone else
+    already there"."""
+    query = (
+        db.query(Substitution.substitute_teacher_id)
+        .join(TimetableSlot, Substitution.timetable_slot_id == TimetableSlot.id)
+        .filter(
+            Substitution.status == "confirmed",
+            Substitution.substitute_teacher_id.isnot(None),
+            TimetableSlot.day_of_week == day_of_week,
+            TimetableSlot.period_number == period_number,
+            TimetableSlot.academic_year == academic_year,
+        )
+    )
+    if exclude_substitution_id is not None:
+        query = query.filter(Substitution.id != exclude_substitution_id)
+    return {row.substitute_teacher_id for row in query}
+
+
+def _candidates_for_pool(
+    db: Session,
+    *,
+    teacher_pool_ids: set[int],
+    qualified_subject_ids: frozenset[int],
+    day_of_week: int,
+    period_number: int,
+    academic_year: str,
     leave_start: date_,
     leave_end: date_,
+    exclude_substitution_id: int | None,
 ) -> list[SubstituteCandidate]:
-    qualified_teacher_ids = {
-        row.teacher_id
-        for row in db.query(TeacherSubject.teacher_id).filter(TeacherSubject.subject_id == subject_id)
-        if row.teacher_id != exclude_teacher_id
-    }
-    if not qualified_teacher_ids:
+    """Shared busy/unavailable/on_leave/already_substituting/workload computation
+    for any pool of teacher ids - used both for the real qualified-candidate pool
+    (_build_substitute_candidates) and the broader "everyone in the school"
+    fallback pool (_build_fallback_candidates), so "available" means the same
+    thing in both places."""
+    if not teacher_pool_ids:
         return []
 
     busy_teacher_ids = {
         row.teacher_id
         for row in db.query(TimetableSlot.teacher_id).filter(
-            TimetableSlot.teacher_id.in_(qualified_teacher_ids),
+            TimetableSlot.teacher_id.in_(teacher_pool_ids),
             TimetableSlot.day_of_week == day_of_week,
             TimetableSlot.period_number == period_number,
             TimetableSlot.academic_year == academic_year,
             TimetableSlot.is_active.is_(True),
         )
     }
+    already_substituting_teacher_ids = _teachers_confirmed_substitutes_at(
+        db,
+        day_of_week=day_of_week,
+        period_number=period_number,
+        academic_year=academic_year,
+        exclude_substitution_id=exclude_substitution_id,
+    )
     unavailable_teacher_ids = {
         row.teacher_id
         for row in db.query(TeacherUnavailability.teacher_id).filter(
-            TeacherUnavailability.teacher_id.in_(qualified_teacher_ids),
+            TeacherUnavailability.teacher_id.in_(teacher_pool_ids),
             TeacherUnavailability.day_of_week == day_of_week,
             TeacherUnavailability.period_number == period_number,
             TeacherUnavailability.academic_year == academic_year,
@@ -93,7 +135,7 @@ def _build_substitute_candidates(
     on_leave_teacher_ids = {
         row.teacher_id
         for row in db.query(LeaveRequest.teacher_id).filter(
-            LeaveRequest.teacher_id.in_(qualified_teacher_ids),
+            LeaveRequest.teacher_id.in_(teacher_pool_ids),
             LeaveRequest.status == "approved",
             LeaveRequest.start_date <= leave_end,
             LeaveRequest.end_date >= leave_start,
@@ -102,7 +144,7 @@ def _build_substitute_candidates(
     workload_by_teacher = dict(
         db.query(TimetableSlot.teacher_id, func.count(TimetableSlot.id))
         .filter(
-            TimetableSlot.teacher_id.in_(qualified_teacher_ids),
+            TimetableSlot.teacher_id.in_(teacher_pool_ids),
             TimetableSlot.academic_year == academic_year,
             TimetableSlot.is_active.is_(True),
         )
@@ -113,20 +155,150 @@ def _build_substitute_candidates(
     return [
         SubstituteCandidate(
             teacher_id=teacher_id,
-            qualified_subject_ids=frozenset({subject_id}),
+            qualified_subject_ids=qualified_subject_ids,
             already_busy=teacher_id in busy_teacher_ids,
             unavailable=teacher_id in unavailable_teacher_ids,
             on_leave=teacher_id in on_leave_teacher_ids,
             current_workload=workload_by_teacher.get(teacher_id, 0),
+            already_substituting=teacher_id in already_substituting_teacher_ids,
         )
-        for teacher_id in qualified_teacher_ids
+        for teacher_id in teacher_pool_ids
     ]
+
+
+def _build_substitute_candidates(
+    db: Session,
+    *,
+    subject_id: int,
+    day_of_week: int,
+    period_number: int,
+    academic_year: str,
+    exclude_teacher_id: int,
+    leave_start: date_,
+    leave_end: date_,
+    exclude_substitution_id: int | None = None,
+) -> list[SubstituteCandidate]:
+    qualified_teacher_ids = {
+        row.teacher_id
+        for row in db.query(TeacherSubject.teacher_id).filter(TeacherSubject.subject_id == subject_id)
+        if row.teacher_id != exclude_teacher_id
+    }
+    return _candidates_for_pool(
+        db,
+        teacher_pool_ids=qualified_teacher_ids,
+        qualified_subject_ids=frozenset({subject_id}),
+        day_of_week=day_of_week,
+        period_number=period_number,
+        academic_year=academic_year,
+        leave_start=leave_start,
+        leave_end=leave_end,
+        exclude_substitution_id=exclude_substitution_id,
+    )
+
+
+def _build_fallback_candidates(
+    db: Session,
+    *,
+    school_id: int | None,
+    day_of_week: int,
+    period_number: int,
+    academic_year: str,
+    exclude_teacher_id: int,
+    leave_start: date_,
+    leave_end: date_,
+    exclude_substitution_id: int | None = None,
+) -> list[SubstituteCandidate]:
+    """The real-world escalation when NO qualified candidate exists at all
+    (find_substitutes() returned nothing): every OTHER teacher in the school,
+    regardless of subject qualification - a genuine "put anyone free in the room
+    for supervision" pool. Only called as a fallback (see decide_leave_request/
+    suggest_substitutions/get_substitute_suggestions), never instead of the real
+    qualified pool. qualified_subject_ids is deliberately left empty for every
+    candidate here - find_fallback_substitutes() never checks it, unlike
+    find_substitutes()."""
+    if school_id is None:
+        return []
+    teacher_role_id = db.query(Role.id).filter(Role.name == "teacher").scalar_subquery()
+    school_teacher_ids = {
+        row.id
+        for row in db.query(User.id).filter(User.school_id == school_id, User.role_id == teacher_role_id)
+        if row.id != exclude_teacher_id
+    }
+    return _candidates_for_pool(
+        db,
+        teacher_pool_ids=school_teacher_ids,
+        qualified_subject_ids=frozenset(),
+        day_of_week=day_of_week,
+        period_number=period_number,
+        academic_year=academic_year,
+        leave_start=leave_start,
+        leave_end=leave_end,
+        exclude_substitution_id=exclude_substitution_id,
+    )
+
+
+def _school_id_for_teacher(db: Session, teacher_id: int) -> int | None:
+    return db.query(User.school_id).filter(User.id == teacher_id).scalar()
+
+
+def _find_substitutes_with_fallback(
+    db: Session,
+    *,
+    subject_id: int,
+    day_of_week: int,
+    period_number: int,
+    academic_year: str,
+    exclude_teacher_id: int,
+    leave_start: date_,
+    leave_end: date_,
+    exclude_substitution_id: int | None = None,
+) -> list[SubstituteSuggestion]:
+    """The real suggestion pipeline for one slot: try the qualified pool first;
+    only when that's genuinely empty, automatically surface the broader
+    "everyone free, regardless of subject" fallback tier (each one flagged
+    qualified=False) instead of leaving the admin with nothing but a raw manual
+    teacher picker. The raw picker (routers stay silent here; see
+    frontend's StaffingPage) is the true last resort - only reached when even
+    THIS fallback tier comes back empty."""
+    candidates = _build_substitute_candidates(
+        db,
+        subject_id=subject_id,
+        day_of_week=day_of_week,
+        period_number=period_number,
+        academic_year=academic_year,
+        exclude_teacher_id=exclude_teacher_id,
+        leave_start=leave_start,
+        leave_end=leave_end,
+        exclude_substitution_id=exclude_substitution_id,
+    )
+    suggestions = find_substitutes(subject_id=subject_id, original_teacher_id=exclude_teacher_id, candidates=candidates)
+    if suggestions:
+        return suggestions
+
+    fallback_candidates = _build_fallback_candidates(
+        db,
+        school_id=_school_id_for_teacher(db, exclude_teacher_id),
+        day_of_week=day_of_week,
+        period_number=period_number,
+        academic_year=academic_year,
+        exclude_teacher_id=exclude_teacher_id,
+        leave_start=leave_start,
+        leave_end=leave_end,
+        exclude_substitution_id=exclude_substitution_id,
+    )
+    return find_fallback_substitutes(original_teacher_id=exclude_teacher_id, candidates=fallback_candidates)
 
 
 class CandidateOut(BaseModel):
     teacher_id: int
     score: float
     reason: str
+    qualified: bool = True
+    """False only for fallback suggestions (see find_fallback_substitutes) -
+    real teachers surfaced automatically when nobody qualified was available,
+    for supervision-only cover. The frontend renders these with an explicit
+    warning; confirming one still goes through the same not_qualified conflict
+    check as any manually-picked unqualified teacher."""
 
 
 class SubstitutionOut(BaseModel):
@@ -169,7 +341,9 @@ def _substitution_out(
         class_id=slot.class_id,
         day_of_week=slot.day_of_week,
         period_number=slot.period_number,
-        candidates=[CandidateOut(teacher_id=s.teacher_id, score=s.score, reason=s.reason) for s in suggestions],
+        candidates=[
+            CandidateOut(teacher_id=s.teacher_id, score=s.score, reason=s.reason, qualified=s.qualified) for s in suggestions
+        ],
     )
 
 
@@ -271,7 +445,12 @@ def decide_leave_request(
 
         slots = _distinct_slots_for_leave(db, leave.teacher_id, leave.start_date, leave.end_date, academic_year)
         for slot in slots:
-            candidates = _build_substitute_candidates(
+            existing_sub = (
+                db.query(Substitution)
+                .filter(Substitution.leave_request_id == leave.id, Substitution.timetable_slot_id == slot.id)
+                .one_or_none()
+            )
+            suggestions = _find_substitutes_with_fallback(
                 db,
                 subject_id=slot.subject_id,
                 day_of_week=slot.day_of_week,
@@ -280,17 +459,11 @@ def decide_leave_request(
                 exclude_teacher_id=leave.teacher_id,
                 leave_start=leave.start_date,
                 leave_end=leave.end_date,
-            )
-            suggestions = find_substitutes(
-                subject_id=slot.subject_id, original_teacher_id=leave.teacher_id, candidates=candidates
+                exclude_substitution_id=existing_sub.id if existing_sub else None,
             )
             top = suggestions[0] if suggestions else None
 
-            sub = (
-                db.query(Substitution)
-                .filter(Substitution.leave_request_id == leave.id, Substitution.timetable_slot_id == slot.id)
-                .one_or_none()
-            )
+            sub = existing_sub
             if sub is None:
                 sub = Substitution(
                     leave_request_id=leave.id,
@@ -385,7 +558,7 @@ def suggest_substitutions(
         results = []
         for sub in db.query(Substitution).filter(Substitution.leave_request_id == leave.id).all():
             slot = db.query(TimetableSlot).filter(TimetableSlot.id == sub.timetable_slot_id).one()
-            candidates = _build_substitute_candidates(
+            suggestions = _find_substitutes_with_fallback(
                 db,
                 subject_id=slot.subject_id,
                 day_of_week=slot.day_of_week,
@@ -394,9 +567,7 @@ def suggest_substitutions(
                 exclude_teacher_id=leave.teacher_id,
                 leave_start=leave.start_date,
                 leave_end=leave.end_date,
-            )
-            suggestions = find_substitutes(
-                subject_id=slot.subject_id, original_teacher_id=leave.teacher_id, candidates=candidates
+                exclude_substitution_id=sub.id,
             )
             top = suggestions[0] if suggestions else None
             sub.substitute_teacher_id = top.teacher_id if top else None
@@ -418,7 +589,7 @@ def suggest_substitutions(
     slots = _distinct_slots_for_leave(db, body.teacher_id, body.start_date, body.end_date, body.academic_year)
     results = []
     for slot in slots:
-        candidates = _build_substitute_candidates(
+        suggestions = _find_substitutes_with_fallback(
             db,
             subject_id=slot.subject_id,
             day_of_week=slot.day_of_week,
@@ -428,7 +599,6 @@ def suggest_substitutions(
             leave_start=body.start_date,
             leave_end=body.end_date,
         )
-        suggestions = find_substitutes(subject_id=slot.subject_id, original_teacher_id=body.teacher_id, candidates=candidates)
         results.append(_substitution_out(slot, suggestions, original_teacher_id=body.teacher_id))
 
     return SuggestResponse(substitutions=results)
@@ -440,12 +610,26 @@ def suggest_substitutions(
 class ConfirmRequest(BaseModel):
     substitute_teacher_id: int | None = None
     """Omit to confirm the currently-suggested substitute; provide to override with a different teacher."""
+    override_qualification: bool = False
+    """Explicit admin acknowledgment to confirm a teacher NOT qualified for this
+    subject anyway (real-world escalation when there's genuinely no qualified
+    substitute left - supervision-only cover). This is the ONE conflict type
+    that's a preference/quality concern rather than a scheduling/physical
+    impossibility, so it's the only one this flag can waive - already_busy,
+    already_substituting, unavailable, on_leave, and is_original_teacher stay
+    absolute hard blocks regardless of this flag; a teacher genuinely can't be
+    in two places at once no matter how badly a school needs coverage."""
 
 
 class ConflictOut(BaseModel):
     type: str
-    """One of: not_qualified, already_busy, unavailable, on_leave, is_original_teacher."""
+    """One of: not_qualified, already_busy, unavailable, on_leave, is_original_teacher,
+    already_substituting."""
     message: str
+    overridable: bool = False
+    """True only for not_qualified - see ConfirmRequest.override_qualification.
+    Lets the frontend show an acknowledgment control for exactly this one
+    conflict type without hardcoding the string "not_qualified" a second time."""
 
 
 class ConfirmResponse(BaseModel):
@@ -464,7 +648,7 @@ class ConfirmResponse(BaseModel):
 
 
 def _check_confirm_conflicts(
-    db: Session, *, slot: TimetableSlot, leave: LeaveRequest, target_teacher_id: int
+    db: Session, *, slot: TimetableSlot, leave: LeaveRequest, target_teacher_id: int, substitution_id: int
 ) -> list[ConflictOut]:
     conflicts: list[ConflictOut] = []
 
@@ -477,7 +661,9 @@ def _check_confirm_conflicts(
         .one_or_none()
     )
     if qualified is None:
-        conflicts.append(ConflictOut(type="not_qualified", message="Teacher is not qualified for this subject"))
+        conflicts.append(
+            ConflictOut(type="not_qualified", message="Teacher is not qualified for this subject", overridable=True)
+        )
 
     busy = (
         db.query(TimetableSlot)
@@ -519,6 +705,26 @@ def _check_confirm_conflicts(
     if on_leave is not None:
         conflicts.append(ConflictOut(type="on_leave", message="Teacher is themselves on approved leave during this period"))
 
+    already_substituting_ids = _teachers_confirmed_substitutes_at(
+        db,
+        day_of_week=slot.day_of_week,
+        period_number=slot.period_number,
+        academic_year=slot.academic_year,
+        exclude_substitution_id=substitution_id,
+    )
+    if target_teacher_id in already_substituting_ids:
+        # The real double-booking gap this closes: `busy` above only looks at the
+        # teacher's own real TimetableSlot rows, which is empty for a substitute -
+        # nothing previously checked whether they were ALREADY CONFIRMED to cover
+        # a DIFFERENT class at this exact day/period, so the same teacher could be
+        # confirmed twice for two simultaneous slots with no error at all.
+        conflicts.append(
+            ConflictOut(
+                type="already_substituting",
+                message="Teacher is already confirmed as a substitute for a different class at this exact day/period",
+            )
+        )
+
     return conflicts
 
 
@@ -540,8 +746,17 @@ def confirm_substitution(
     if target_teacher_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No substitute_teacher_id given and none currently suggested")
 
-    conflicts = _check_confirm_conflicts(db, slot=slot, leave=leave, target_teacher_id=target_teacher_id)
-    if conflicts:
+    conflicts = _check_confirm_conflicts(db, slot=slot, leave=leave, target_teacher_id=target_teacher_id, substitution_id=sub.id)
+    hard_conflicts = [c for c in conflicts if not c.overridable]
+    if hard_conflicts:
+        # A real impossibility (double-booked, on leave, etc.) - never waivable,
+        # regardless of override_qualification.
+        return ConfirmResponse(substitution=None, conflicts=conflicts)
+    if conflicts and not body.override_qualification:
+        # Only the not_qualified conflict remains, but the admin hasn't explicitly
+        # acknowledged it yet - still block, so an accidental unqualified pick
+        # doesn't silently go through. The frontend uses `overridable` on the
+        # returned conflict to show an acknowledgment control at this point.
         return ConfirmResponse(substitution=None, conflicts=conflicts)
 
     sub.substitute_teacher_id = target_teacher_id
@@ -553,7 +768,7 @@ def confirm_substitution(
         action="confirm",
         entity_type="substitutions",
         entity_id=sub.id,
-        detail={"substitute_teacher_id": target_teacher_id},
+        detail={"substitute_teacher_id": target_teacher_id, "qualification_overridden": bool(conflicts)},
     )
     db.commit()
     db.refresh(sub)
@@ -791,7 +1006,7 @@ def get_substitute_suggestions(
 
     slot_outs = []
     for slot in slots:
-        candidates = _build_substitute_candidates(
+        suggestions = _find_substitutes_with_fallback(
             db,
             subject_id=slot.subject_id,
             day_of_week=slot.day_of_week,
@@ -801,14 +1016,16 @@ def get_substitute_suggestions(
             leave_start=date,
             leave_end=date,
         )
-        suggestions = find_substitutes(subject_id=slot.subject_id, original_teacher_id=teacher_id, candidates=candidates)
         slot_outs.append(
             SlotSuggestionOut(
                 timetable_slot_id=slot.id,
                 subject_id=slot.subject_id,
                 class_id=slot.class_id,
                 period_number=slot.period_number,
-                suggestions=[CandidateOut(teacher_id=s.teacher_id, score=s.score, reason=s.reason) for s in suggestions],
+                suggestions=[
+                    CandidateOut(teacher_id=s.teacher_id, score=s.score, reason=s.reason, qualified=s.qualified)
+                    for s in suggestions
+                ],
             )
         )
 

@@ -29,16 +29,23 @@ interface EntityCardProps {
   meta?: ReactNode;
   actions?: ReactNode;
   children?: ReactNode;
+  className?: string;
+  /** Visually recedes the whole card (reduced opacity + desaturated) - for a
+   * "this is done, nothing to act on" state (e.g. a fully-paid fee) where the
+   * item should stay visible for the record but not compete for attention. */
+  muted?: boolean;
 }
 
 /** The shared alert/approval/risk-flag row shape — one visual language reused
  * across the Command Center, Approvals inbox, and Risk dashboard. */
-export default function EntityCard({ icon: Icon, tone = "neutral", title, badges, message, meta, actions, children }: EntityCardProps) {
+export default function EntityCard({ icon: Icon, tone = "neutral", title, badges, message, meta, actions, children, className, muted }: EntityCardProps) {
   return (
     <div
       className={cn(
         "flex items-start gap-3 rounded-2xl border-l-4 border-y border-r border-border bg-card px-4 py-3 shadow-elevated transition-shadow hover:shadow-floating",
-        TONE_BORDER[tone]
+        TONE_BORDER[tone],
+        muted && "opacity-60 grayscale-[0.4] hover:shadow-elevated",
+        className
       )}
     >
       <div className={cn("mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", TONE_CHIP[tone])}>

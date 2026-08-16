@@ -13,9 +13,9 @@ from app.services.auth import CurrentUser, get_current_user
 FIXTURES = Path(__file__).parent / "fixtures" / "documents"
 
 
-def _override_user(role: str, user_id: int = 999):
+def _override_user(role: str, user_id: int = 999, school_id: int | None = None):
     def _fake_user():
-        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role)
+        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role, school_id=school_id)
 
     app.dependency_overrides[get_current_user] = _fake_user
 
@@ -144,7 +144,15 @@ def test_full_document_lifecycle(client, db_session, seed):
     assert detail["extracted_fields"]["dob"] == "2015-04-01"
     assert detail["raw_text"] is not None
     assert detail["ocr_confidence"] > 0.85
-    assert detail["routing"]["routed"] is False  # no admissions table exists yet - documented stub
+    # admission_form now DOES route for real (AdmissionApplication exists) - but
+    # this fixture (see SOURCES.md: "applicant name, DOB, guardian name/phone"
+    # only) never contained guardian_email/grade_applied, so it's still correctly
+    # not routed - just for a real "missing fields" reason now, not the old
+    # "no admissions table exists yet" stub message.
+    assert detail["routing"]["routed"] is False
+    assert "guardian_email" in detail["routing"]["reason"]
+    assert "grade_applied" in detail["routing"]["reason"]
+    assert detail["routing"]["suggested_payload"] is None
     assert len(detail["entities"]) == 4
 
     applicant_entity = next(e for e in detail["entities"] if e["field_name"] == "applicant_name")
@@ -196,6 +204,72 @@ def test_reextract_with_document_type_override(client, seed):
     assert body["extracted_fields"]["total_marks"] == "450"
 
 
+def test_document_1012_reextraction_now_gets_dob_grade_applied_guardian_email_and_routes(client, db_session, seed):
+    """Regression test for a real gap found via live testing on document #1012: its
+    real raw OCR text (reproduced verbatim below) originally extracted only
+    guardian_name/applicant_name/guardian_phone - dob failed on a real regex bug
+    (ISO-only date pattern vs. the form's real "12.04.2015" DD.MM.YYYY), and
+    grade_applied/guardian_email were never in scope at all. Also confirms routing
+    now produces a real pre-fill suggestion instead of the old stub message,
+    since AdmissionApplication exists now."""
+    from app.models.document import OcrResult
+
+    document = Document(
+        uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="admission_form",
+        file_url="x", status="done",
+    )
+    db_session.add(document)
+    db_session.flush()
+    db_session.add(
+        OcrResult(
+            document_id=document.id,
+            raw_text=(
+                "ADMISSION APPLICATION FORM\n�Sam School\n\nApplicant Details\n"
+                "Applicant Name: New Student\nDate of Birth: 12.04.2015\nGender: Female\n\n"
+                "Grade Applied For: 3\n\nGuardian Details\nGuardian Name: P3\n"
+                "Guardian Email: p3@sam.in\n\nGuardian Phone: 9876543210\n\nAddress\n\n"
+                "123 MG Road, Bengaluru, Karnataka, 560001\n\nPrevious Schoo! (if any)\n\n"
+                "Little Stars Primary School\n\nDeclaration\n"
+                "| hereby declare that the above information is true to the best of my knowledge.\n\n"
+                "Signature: student\nDate: 15-08-2026\n"
+            ),
+            confidence_score=0.838,
+            engine_version="test",
+        )
+    )
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(f"/admin/ocr/documents/{document.id}/reextract", params={"school_id": seed["school"].id}, json={})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    fields = body["extracted_fields"]
+    assert fields["applicant_name"] == "New Student"
+    assert fields["dob"] == "2015-04-12"  # normalized from 12.04.2015
+    assert fields["gender"] == "Female"
+    assert fields["grade_applied"] == "3"
+    assert fields["guardian_name"] == "P3"
+    assert fields["guardian_email"] == "p3@sam.in"
+    assert fields["guardian_phone"] == "9876543210"
+
+    assert body["routing"]["routed"] is True
+    assert body["routing"]["target_table"] == "admission_applications"
+    assert body["routing"]["suggested_payload"] == {
+        "applicant_name": "New Student",
+        "dob": "2015-04-12",
+        "guardian_email": "p3@sam.in",
+        "grade_applied": "3",
+        # Real fix found live: guardian_name/guardian_phone were extracted here but
+        # never carried into suggested_payload, so a real accept later created a
+        # parent account with full_name=None despite the name being right there.
+        "guardian_name": "P3",
+        "guardian_phone": "9876543210",
+        "school_id": seed["school"].id,
+        "ocr_document_ids": [document.id],
+    }
+
+
 def test_low_confidence_field_is_flagged_and_correctable(client, seed):
     _override_user("admin", user_id=seed["admin_user"].id)
     resp = _upload(client, FIXTURES / "low_confidence_admission_form.png", "admission_form", seed["school"].id)
@@ -215,6 +289,200 @@ def test_low_confidence_field_is_flagged_and_correctable(client, seed):
     )
     assert resp.status_code == 200
     assert resp.json()["corrected_value"] == "2015-04-01"
+
+
+# --- expected_fields / application_id / manual entry ---
+
+
+def test_detail_includes_expected_fields_for_marksheet(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = _upload(client, FIXTURES / "marksheet.png", "marksheet", seed["school"].id)
+    document_id = resp.json()["id"]
+
+    detail = client.get(f"/admin/ocr/documents/{document_id}", params={"school_id": seed["school"].id}).json()
+    assert set(detail["expected_fields"]) == {"student_name", "roll_number", "total_marks", "percentage"}
+
+
+def test_application_id_is_null_until_linked(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = _upload(client, FIXTURES / "marksheet.png", "marksheet", seed["school"].id)
+    document_id = resp.json()["id"]
+
+    detail = client.get(f"/admin/ocr/documents/{document_id}", params={"school_id": seed["school"].id}).json()
+    assert detail["application_id"] is None
+
+    listing = client.get("/admin/ocr/documents", params={"school_id": seed["school"].id}).json()
+    listed = next(d for d in listing["items"] if d["id"] == document_id)
+    assert listed["application_id"] is None
+
+
+def test_application_id_is_set_once_attached_to_an_application(client, db_session, seed):
+    from datetime import date
+
+    from app.models.admissions import AdmissionApplication
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    marksheet_id = _upload(client, FIXTURES / "marksheet.png", "marksheet", seed["school"].id).json()["id"]
+
+    application = AdmissionApplication(
+        school_id=seed["school"].id, academic_year="2026-27", applicant_name="Jane Doe", dob=date(2015, 4, 1),
+        guardian_email="g@example.com", grade_applied="8", status="submitted", submitted_by=seed["admin_user"].id,
+    )
+    db_session.add(application)
+    db_session.commit()
+    db_session.refresh(application)
+
+    attach_resp = client.post(f"/admin/admissions/applications/{application.id}/documents", json={"document_id": marksheet_id})
+    assert attach_resp.status_code == 200
+
+    detail = client.get(f"/admin/ocr/documents/{marksheet_id}", params={"school_id": seed["school"].id}).json()
+    assert detail["application_id"] == application.id
+
+
+def test_document_endpoints_survive_a_document_linked_to_two_applications(client, db_session, seed):
+    """Regression test for a real crash found live in the real sam school: a
+    document that ends up in TWO applications' ocr_document_ids (pre-existing data
+    from before admissions.py's attach_document rejected double-linking) used to
+    make _linked_application_for_document's .scalar() raise MultipleResultsFound,
+    500ing the ENTIRE document list for that school - not just this one document.
+    Constructs that exact shape directly (bypassing the now-guarded API) since
+    legacy rows like this can still exist regardless of the new guard."""
+    from datetime import date
+
+    from app.models.admissions import AdmissionApplication
+
+    document = Document(
+        uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="marksheet", file_url="x", status="done"
+    )
+    db_session.add(document)
+    db_session.flush()
+
+    first_app = AdmissionApplication(
+        school_id=seed["school"].id, academic_year="2026-27", applicant_name="First Kid", dob=date(2015, 4, 1),
+        guardian_email="first@example.com", grade_applied="8", status="submitted", submitted_by=seed["admin_user"].id,
+        ocr_document_ids=[document.id],
+    )
+    second_app = AdmissionApplication(
+        school_id=seed["school"].id, academic_year="2026-27", applicant_name="Second Kid", dob=date(2015, 4, 1),
+        guardian_email="second@example.com", grade_applied="8", status="submitted", submitted_by=seed["admin_user"].id,
+        ocr_document_ids=[document.id],
+    )
+    db_session.add_all([first_app, second_app])
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    list_resp = client.get("/admin/ocr/documents", params={"school_id": seed["school"].id})
+    assert list_resp.status_code == 200
+
+    detail_resp = client.get(f"/admin/ocr/documents/{document.id}", params={"school_id": seed["school"].id})
+    assert detail_resp.status_code == 200
+    # Which of the two "wins" is deterministic (lowest id) but not the point - the
+    # point is that it resolves to ONE of them instead of crashing.
+    assert detail_resp.json()["application_id"] == min(first_app.id, second_app.id)
+
+
+def test_add_manual_entity_for_a_field_ocr_never_found(client, db_session, seed):
+    document = Document(
+        uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="marksheet", file_url="x", status="done"
+    )
+    db_session.add(document)
+    db_session.commit()
+    db_session.refresh(document)
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/ocr/documents/{document.id}/entities",
+        params={"school_id": seed["school"].id},
+        json={"field_name": "total_marks", "value": "450"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["extracted_fields"]["total_marks"] == "450"
+    entity = next(e for e in body["entities"] if e["field_name"] == "total_marks")
+    assert entity["confidence_score"] == 1.0
+    assert entity["is_low_confidence"] is False
+
+
+def test_add_manual_entity_rejects_unknown_field_name(client, db_session, seed):
+    document = Document(
+        uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="marksheet", file_url="x", status="done"
+    )
+    db_session.add(document)
+    db_session.commit()
+    db_session.refresh(document)
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/ocr/documents/{document.id}/entities",
+        params={"school_id": seed["school"].id},
+        json={"field_name": "not_a_real_field", "value": "x"},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_manual_entity_rejects_empty_value(client, db_session, seed):
+    document = Document(
+        uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="marksheet", file_url="x", status="done"
+    )
+    db_session.add(document)
+    db_session.commit()
+    db_session.refresh(document)
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/ocr/documents/{document.id}/entities",
+        params={"school_id": seed["school"].id},
+        json={"field_name": "total_marks", "value": "   "},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_manual_entity_conflicts_when_field_already_has_a_value(client, db_session, seed):
+    from app.models.document import ExtractedEntity
+
+    document = Document(
+        uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="marksheet", file_url="x", status="done"
+    )
+    db_session.add(document)
+    db_session.flush()
+    db_session.add(ExtractedEntity(document_id=document.id, field_name="total_marks", field_value="450", confidence_score=0.9, is_low_confidence=False))
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/ocr/documents/{document.id}/entities",
+        params={"school_id": seed["school"].id},
+        json={"field_name": "total_marks", "value": "460"},
+    )
+    assert resp.status_code == 409
+
+
+def test_add_manual_entity_401_without_token(client):
+    resp = client.post("/admin/ocr/documents/1/entities", params={"school_id": 1}, json={"field_name": "x", "value": "y"})
+    assert resp.status_code == 401
+
+
+def test_add_manual_entity_403_for_teacher_role(client):
+    _override_user("teacher")
+    resp = client.post("/admin/ocr/documents/1/entities", params={"school_id": 1}, json={"field_name": "x", "value": "y"})
+    assert resp.status_code == 403
+
+
+def test_add_manual_entity_404_for_document_in_a_different_school(client, db_session, seed, other_school):
+    document = Document(
+        uploaded_by=other_school["admin_user"].id, school_id=other_school["school"].id, document_type="marksheet", file_url="x", status="done"
+    )
+    db_session.add(document)
+    db_session.commit()
+    db_session.refresh(document)
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/ocr/documents/{document.id}/entities",
+        params={"school_id": seed["school"].id},
+        json={"field_name": "total_marks", "value": "450"},
+    )
+    assert resp.status_code == 404
 
 
 def test_correct_entity_rejects_empty_value(client, db_session, seed):

@@ -67,15 +67,18 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/staffing", role: "teacher", element: <StaffingPage /> },
   { path: "/teacher/risk", role: "teacher", element: <RiskDashboard /> },
   { path: "/teacher/syllabus", role: "teacher", element: <SyllabusPage /> },
+  { path: "/teacher/fees", role: "teacher", element: <FeesPage /> },
   { path: "/teacher/exams", role: "teacher", element: <InvigilationDutiesPage /> },
 
   { path: "/student", role: "student", element: <StudentDashboard /> },
   { path: "/student/timetable", role: "student", element: <TimetablePage /> },
+  { path: "/student/fees", role: "student", element: <FeesPage /> },
   { path: "/student/exams", role: "student", element: <StudentSeatLookup /> },
 
   { path: "/parent", role: "parent", element: <ParentDashboard /> },
   { path: "/parent/timetable", role: "parent", element: <TimetablePage /> },
   { path: "/parent/risk", role: "parent", element: <RiskDashboard /> },
+  { path: "/parent/fees", role: "parent", element: <FeesPage /> },
 ];
 
 export default function App() {

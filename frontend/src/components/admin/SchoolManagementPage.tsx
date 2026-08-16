@@ -89,20 +89,36 @@ function usePaged<T>(items: T[] | undefined, page: number) {
 
 // --- Classes ---------------------------------------------------------------------
 
-function AddClassForm({ schoolId, onCancel }: { schoolId: number; onCancel: () => void }) {
+function AddClassForm({
+  schoolId,
+  onCancel,
+  teacherOptions,
+}: {
+  schoolId: number;
+  onCancel: () => void;
+  teacherOptions: { id: number; name: string; classCount: number }[];
+}) {
   const [gradeLevel, setGradeLevel] = useState("");
   const [gradeLabel, setGradeLabel] = useState("");
   const [section, setSection] = useState("");
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
+  // Pre-selects the least-loaded qualified teacher (teacherOptions is already
+  // sorted ascending by classCount) as a suggestion - still just a default,
+  // freely overridable via the same dropdown.
+  const [classTeacherId, setClassTeacherId] = useState(() => (teacherOptions[0] ? String(teacherOptions[0].id) : ""));
   const create = useCreateClass();
 
   function handleSave() {
     const level = Number(gradeLevel);
     if (!level && level !== 0) return;
+    if (!classTeacherId) return;
     const label = gradeLabel.trim() || undefined;
     const name = `${label || `Grade ${level}`}${section ? ` - ${section}` : ""}`;
     create.mutate(
-      { school_id: schoolId, name, academic_year: academicYear, grade_level: level, grade_label: label, section: section || undefined },
+      {
+        school_id: schoolId, name, academic_year: academicYear, grade_level: level, grade_label: label,
+        section: section || undefined, class_teacher_id: Number(classTeacherId),
+      },
       { onSuccess: onCancel }
     );
   }
@@ -121,7 +137,21 @@ function AddClassForm({ schoolId, onCancel }: { schoolId: number; onCancel: () =
       <Field label="Academic year" className="w-28">
         <Input value={academicYear} onChange={(e) => setAcademicYear(e.target.value)} />
       </Field>
-      <Button size="sm" onClick={handleSave} disabled={!gradeLevel || create.isPending}>
+      <Field label="Class teacher (required)" className="w-56" hint="Pre-filled with the least-loaded teacher - change it if you'd rather pick someone else.">
+        <Select value={classTeacherId} onValueChange={setClassTeacherId}>
+          <SelectTrigger>
+            <SelectValue placeholder="Select a teacher" />
+          </SelectTrigger>
+          <SelectContent>
+            {teacherOptions.map((t) => (
+              <SelectItem key={t.id} value={String(t.id)}>
+                {t.name} · {t.classCount} class{t.classCount === 1 ? "" : "es"}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      <Button size="sm" onClick={handleSave} disabled={!gradeLevel || !classTeacherId || create.isPending}>
         {create.isPending ? "Adding…" : "Add class"}
       </Button>
       <Button variant="ghost" size="sm" onClick={onCancel}>
@@ -261,7 +291,20 @@ function ClassesTab({ schoolId }: { schoolId: number }) {
   }, [students.data]);
 
   const teacherName = (id: number | null) => (id == null ? "—" : lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`);
-  const teacherOptions = lookup.data?.teachers.map((t) => ({ id: t.id, name: t.name })) ?? [];
+  // Load = how many active classes this teacher is already the class teacher of -
+  // sorted ascending so the least-loaded teacher is both the first option shown
+  // and the one AddClassForm pre-selects (a suggestion, not a silent auto-pick;
+  // the admin can still choose anyone else from the same list).
+  const classTeacherLoad = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const c of classes.data ?? []) {
+      if (c.class_teacher_id != null && c.is_active) map.set(c.class_teacher_id, (map.get(c.class_teacher_id) ?? 0) + 1);
+    }
+    return map;
+  }, [classes.data]);
+  const teacherOptions = (lookup.data?.teachers ?? [])
+    .map((t) => ({ id: t.id, name: t.name, classCount: classTeacherLoad.get(t.id) ?? 0 }))
+    .sort((a, b) => a.classCount - b.classCount);
   const roomName = (id: number | null) => (id == null ? "Not configured" : lookup.data?.rooms.find((r) => r.id === id)?.name ?? `Room #${id}`);
   const roomOptions = lookup.data?.rooms.map((r) => ({ id: r.id, name: r.name, room_type: r.room_type })) ?? [];
 
@@ -270,9 +313,18 @@ function ClassesTab({ schoolId }: { schoolId: number }) {
     [classes.data]
   );
   const { rows, total } = usePaged(sorted, page);
+  const missingTeacherCount = (classes.data ?? []).filter((c) => c.is_active && c.class_teacher_id == null).length;
 
   return (
     <div className="flex flex-col gap-3">
+      {missingTeacherCount > 0 && (
+        <Card className="border-warning/40 bg-warning/5">
+          <CardContent className="py-3 text-sm text-warning">
+            {missingTeacherCount} active class{missingTeacherCount === 1 ? "" : "es"} {missingTeacherCount === 1 ? "has" : "have"} no class
+            teacher assigned. Timetable generation is blocked for any class without one — assign one below.
+          </CardContent>
+        </Card>
+      )}
       <div className="flex items-center justify-between">
         <IncludeInactiveToggle value={includeInactive} onChange={setIncludeInactive} />
         {!showAdd && (
@@ -281,7 +333,7 @@ function ClassesTab({ schoolId }: { schoolId: number }) {
           </Button>
         )}
       </div>
-      {showAdd && <AddClassForm schoolId={schoolId} onCancel={() => setShowAdd(false)} />}
+      {showAdd && <AddClassForm schoolId={schoolId} onCancel={() => setShowAdd(false)} teacherOptions={teacherOptions} />}
 
       {classes.isLoading && <div className="h-32 animate-pulse rounded-2xl bg-elevated/60" />}
       {!classes.isLoading && total === 0 && <EmptyState label="classes" />}
@@ -308,7 +360,7 @@ function ClassesTab({ schoolId }: { schoolId: number }) {
                 </TableCell>
                 <TableCell className="text-ink-muted">{c.academic_year}</TableCell>
                 <TableCell className="font-mono tabular-nums">{studentCountByClass.get(c.id) ?? 0}</TableCell>
-                <TableCell className="text-ink-muted">{teacherName(c.class_teacher_id)}</TableCell>
+                <TableCell className={c.class_teacher_id == null ? "text-warning" : "text-ink-muted"}>{teacherName(c.class_teacher_id)}</TableCell>
                 <TableCell className={c.home_room_id == null ? "text-warning" : "text-ink-muted"}>{roomName(c.home_room_id)}</TableCell>
                 <TableCell>
                   <StatusBadge isActive={c.is_active} />
@@ -1153,17 +1205,18 @@ function StudentsTab({ schoolId }: { schoolId: number }) {
 function EditParentDialog({ schoolId, parent }: { schoolId: number; parent: ParentOut }) {
   const [open, setOpen] = useState(false);
   const [fullName, setFullName] = useState(parent.full_name ?? "");
+  const [phone, setPhone] = useState(parent.phone ?? "");
   const update = useUpdateParent();
 
   function handleSave() {
-    update.mutate({ parentId: parent.id, schoolId, full_name: fullName }, { onSuccess: () => setOpen(false) });
+    update.mutate({ parentId: parent.id, schoolId, full_name: fullName, phone }, { onSuccess: () => setOpen(false) });
   }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm">
-          <Pencil className="h-3.5 w-3.5" /> Edit name
+          <Pencil className="h-3.5 w-3.5" /> Edit details
         </Button>
       </DialogTrigger>
       <DialogContent>
@@ -1174,6 +1227,9 @@ function EditParentDialog({ schoolId, parent }: { schoolId: number; parent: Pare
         <div className="flex flex-col gap-3">
           <Field label="Full name">
             <Input value={fullName} onChange={(e) => setFullName(e.target.value)} />
+          </Field>
+          <Field label="Phone number">
+            <Input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="9876543210" />
           </Field>
           {update.isError && (
             <p className="text-sm text-urgent">{update.error instanceof ApiError ? update.error.message : "Failed to update parent."}</p>
@@ -1277,6 +1333,7 @@ function ParentsTab({ schoolId }: { schoolId: number }) {
               <TableHead></TableHead>
               <TableHead>Name</TableHead>
               <TableHead>Email</TableHead>
+              <TableHead>Phone number</TableHead>
               <TableHead>Linked children</TableHead>
               <TableHead>Status</TableHead>
               <TableHead></TableHead>
@@ -1295,6 +1352,7 @@ function ParentsTab({ schoolId }: { schoolId: number }) {
                     </TableCell>
                     <TableCell className="font-medium text-ink">{p.full_name ?? "—"}</TableCell>
                     <TableCell className="text-ink-muted">{p.email}</TableCell>
+                    <TableCell className="text-ink-muted">{p.phone ?? "—"}</TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
                         {p.student_ids.length === 0 && <span className="text-xs text-ink-muted">None</span>}
@@ -1335,7 +1393,7 @@ function ParentsTab({ schoolId }: { schoolId: number }) {
                   </TableRow>
                   {isExpanded && (
                     <TableRow>
-                      <TableCell colSpan={6} className="bg-elevated/20">
+                      <TableCell colSpan={7} className="bg-elevated/20">
                         <ParentExpandedPanel schoolId={schoolId} parent={p} studentOptions={studentOptions} />
                       </TableCell>
                     </TableRow>

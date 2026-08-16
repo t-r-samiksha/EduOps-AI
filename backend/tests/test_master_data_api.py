@@ -68,7 +68,10 @@ def test_create_school_returns_403_for_non_admin_role(client, role):
 
 def test_create_class_returns_403_for_non_admin_role(client, seed):
     _override_user("teacher")
-    resp = client.post("/admin/classes", json={"school_id": seed["school"].id, "name": "X", "academic_year": "2026-27"})
+    resp = client.post(
+        "/admin/classes",
+        json={"school_id": seed["school"].id, "name": "X", "academic_year": "2026-27", "class_teacher_id": seed["teacher"].id},
+    )
     assert resp.status_code == 403
 
 
@@ -104,14 +107,27 @@ def test_get_school_returns_404_for_unknown_id(client):
 # --- SchoolClass -----------------------------------------------------------------
 
 
-def test_create_class_cold_start_from_real_school(client):
+def _make_teacher(db_session, school_id):
+    teacher_role = db_session.query(Role).filter(Role.name == "teacher").one()
+    teacher = User(supabase_id=uuid.uuid4(), email=f"t-{uuid.uuid4()}@example.com", role_id=teacher_role.id, school_id=school_id)
+    db_session.add(teacher)
+    db_session.commit()
+    db_session.refresh(teacher)
+    return teacher
+
+
+def test_create_class_cold_start_from_real_school(client, db_session):
     """Cold-start chain: create a school, then create a class in it - no seed data involved."""
     _override_user("admin")
     school = client.post("/admin/schools", json={"name": "Cold Start School"}).json()
+    teacher = _make_teacher(db_session, school["id"])
 
     resp = client.post(
         "/admin/classes",
-        json={"school_id": school["id"], "name": "Grade 9 - A", "academic_year": "2027-28", "grade_level": 9, "section": "A"},
+        json={
+            "school_id": school["id"], "name": "Grade 9 - A", "academic_year": "2027-28", "grade_level": 9, "section": "A",
+            "class_teacher_id": teacher.id,
+        },
     )
     assert resp.status_code == 201
     body = resp.json()
@@ -119,18 +135,19 @@ def test_create_class_cold_start_from_real_school(client):
     assert body["grade_level"] == 9
 
 
-def test_create_class_with_negative_grade_level_and_grade_label(client):
+def test_create_class_with_negative_grade_level_and_grade_label(client, db_session):
     """LKG/UKG/Nursery support: grade_level=-2 (LKG per the documented convention -
     Nursery=-3, LKG=-2, UKG=-1) with a cosmetic grade_label, previously blocked
     entirely (grade_level is int-only, "LKG" as a raw value was a 422)."""
     _override_user("admin")
     school = client.post("/admin/schools", json={"name": "LKG Test School"}).json()
+    teacher = _make_teacher(db_session, school["id"])
 
     resp = client.post(
         "/admin/classes",
         json={
             "school_id": school["id"], "name": "LKG - A", "academic_year": "2026-27",
-            "grade_level": -2, "grade_label": "LKG", "section": "A",
+            "grade_level": -2, "grade_label": "LKG", "section": "A", "class_teacher_id": teacher.id,
         },
     )
     assert resp.status_code == 201
@@ -151,7 +168,10 @@ def test_create_class_without_grade_label_leaves_it_null(client, seed):
     _override_user("admin")
     resp = client.post(
         "/admin/classes",
-        json={"school_id": seed["school"].id, "name": "Grade 8 - C", "academic_year": "2026-27", "grade_level": 8, "section": "C"},
+        json={
+            "school_id": seed["school"].id, "name": "Grade 8 - C", "academic_year": "2026-27", "grade_level": 8,
+            "section": "C", "class_teacher_id": seed["teacher"].id,
+        },
     )
     assert resp.status_code == 201
     assert resp.json()["grade_label"] is None
@@ -163,7 +183,10 @@ def test_create_class_add_to_existing_school(client, seed):
     _override_user("admin")
     resp = client.post(
         "/admin/classes",
-        json={"school_id": seed["school"].id, "name": "Grade 8 - B", "academic_year": "2026-27", "grade_level": 8, "section": "B"},
+        json={
+            "school_id": seed["school"].id, "name": "Grade 8 - B", "academic_year": "2026-27", "grade_level": 8,
+            "section": "B", "class_teacher_id": seed["teacher"].id,
+        },
     )
     assert resp.status_code == 201
 
@@ -174,8 +197,16 @@ def test_create_class_add_to_existing_school(client, seed):
 
 def test_create_class_returns_400_for_unknown_school_id(client):
     _override_user("admin")
-    resp = client.post("/admin/classes", json={"school_id": 999999999, "name": "X", "academic_year": "2026-27"})
+    resp = client.post("/admin/classes", json={"school_id": 999999999, "name": "X", "academic_year": "2026-27", "class_teacher_id": 1})
     assert resp.status_code == 400
+
+
+def test_create_class_requires_class_teacher_id(client, seed):
+    """Every class must have a class teacher (school policy) - omitting it
+    entirely is a validation error, not an optional field left blank."""
+    _override_user("admin")
+    resp = client.post("/admin/classes", json={"school_id": seed["school"].id, "name": "X", "academic_year": "2026-27"})
+    assert resp.status_code == 422
 
 
 def test_create_class_returns_400_for_unknown_class_teacher_id(client, seed):
@@ -214,7 +245,7 @@ def test_create_class_with_home_room_id(client, seed):
         "/admin/classes",
         json={
             "school_id": seed["school"].id, "name": "Grade 8 - B", "academic_year": "2026-27",
-            "grade_level": 8, "section": "B", "home_room_id": seed["room"].id,
+            "grade_level": 8, "section": "B", "home_room_id": seed["room"].id, "class_teacher_id": seed["teacher"].id,
         },
     )
     assert resp.status_code == 201
@@ -225,7 +256,10 @@ def test_create_class_returns_400_for_unknown_home_room_id(client, seed):
     _override_user("admin")
     resp = client.post(
         "/admin/classes",
-        json={"school_id": seed["school"].id, "name": "Grade 8 - B", "academic_year": "2026-27", "home_room_id": 999999999},
+        json={
+            "school_id": seed["school"].id, "name": "Grade 8 - B", "academic_year": "2026-27", "home_room_id": 999999999,
+            "class_teacher_id": seed["teacher"].id,
+        },
     )
     assert resp.status_code == 400
 
@@ -238,7 +272,7 @@ def test_create_class_returns_400_when_home_room_already_claimed_by_another_acti
         "/admin/classes",
         json={
             "school_id": seed["school"].id, "name": "Grade 8 - B", "academic_year": "2026-27",
-            "home_room_id": seed["room"].id,
+            "home_room_id": seed["room"].id, "class_teacher_id": seed["teacher"].id,
         },
     )
     assert resp.status_code == 400

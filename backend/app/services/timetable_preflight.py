@@ -64,6 +64,7 @@ class ClassInfo:
     id: int
     name: str
     home_room_id: int | None
+    class_teacher_id: int | None
 
 
 # --- Small bipartite max-flow helper (Edmonds-Karp) -----------------------
@@ -684,6 +685,39 @@ def _check_cross_run_collisions(
     return findings
 
 
+# --- Check G: every class must have a class teacher -------------------------
+
+
+def _check_class_teacher_assigned(classes: list[ClassInfo]) -> list[Finding]:
+    """Every class must have a designated class teacher before a timetable can
+    be generated for it - a school-operations policy decision (not a solver
+    feasibility constraint), enforced here since this is the one shared gate
+    both POST /preflight and POST /generate already run through."""
+    missing = [c for c in classes if c.class_teacher_id is None]
+    if not missing:
+        return []
+    names = ", ".join(c.name for c in missing)
+    return [
+        Finding(
+            severity="error",
+            code="CLASS_TEACHER_MISSING",
+            message=(
+                f"{len(missing)} section(s) have no class teacher assigned ({names}) - every class must have "
+                "one before a timetable can be generated for it. Assign one in School Management > Classes."
+            ),
+            numbers={"classes_missing_teacher": len(missing)},
+            remedies=[
+                Remedy(
+                    action="assign_class_teacher",
+                    quantity=len(missing),
+                    detail=f"assign a class teacher to {len(missing)} section(s): {names}",
+                )
+            ],
+            details={"class_ids": [c.id for c in missing]},
+        )
+    ]
+
+
 def run_preflight_checks(
     *,
     teachers: list[SolverTeacher],
@@ -714,4 +748,5 @@ def run_preflight_checks(
     findings += _check_cross_run_collisions(
         teachers, requirements, existing_bookings_by_teacher, teacher_names, days, periods_per_day, uncapped_fallback
     )
+    findings += _check_class_teacher_assigned(classes)
     return findings

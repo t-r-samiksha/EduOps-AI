@@ -57,6 +57,10 @@ class ClassItem(NamedItem):
     grade. See SchoolClass.grade_label's docstring - display code should show
     this when present, falling back to f"Grade {grade_level}" otherwise."""
     section: str | None = None
+    class_teacher_id: int | None = None
+    """So a teacher viewing this lookup can tell which class(es), if any, they
+    are the class teacher of (e.g. the Fees page's teacher view) without needing
+    the admin-only /admin/classes endpoint."""
 
 
 class LookupResponse(BaseModel):
@@ -119,7 +123,10 @@ def get_lookup(
         students=[NamedItem(id=s.id, name=s.full_name or s.email) for s in students],
         rooms=[RoomItem(id=r.id, name=r.name, room_type=r.room_type) for r in rooms],
         classes=[
-            ClassItem(id=c.id, name=c.name, grade_level=c.grade_level, grade_label=c.grade_label, section=c.section)
+            ClassItem(
+                id=c.id, name=c.name, grade_level=c.grade_level, grade_label=c.grade_label, section=c.section,
+                class_teacher_id=c.class_teacher_id,
+            )
             for c in classes
         ],
     )

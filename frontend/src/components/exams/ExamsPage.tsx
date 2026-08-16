@@ -1,16 +1,14 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CalendarClock,
   CalendarPlus,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  ClipboardCheck,
   DoorOpen,
   Grid3x3,
   ListTodo,
-  Plus,
-  Trash2,
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -22,14 +20,30 @@ import Field from "@/components/ui/field";
 import PageHeader from "@/components/shared/PageHeader";
 import EntityCard from "@/components/shared/EntityCard";
 import SeatingChart from "@/components/exams/SeatingChart";
-import InvigilationDuties from "@/components/exams/InvigilationDuties";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
-import { useCreateExam, useGenerateSchedules, useSeating, useExamsList } from "@/api/hooks/useExams";
+import {
+  useCreateExam,
+  useCreateExamsForGrade,
+  useGenerateSchedules,
+  useRoomSuggestions,
+  useSeating,
+  useExamsList,
+} from "@/api/hooks/useExams";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { ApiError } from "@/api/client";
+import type { ExamType } from "@/api/types";
 
 const PAGE_SIZE = 8;
+
+const EXAM_TYPES: { value: ExamType; label: string }[] = [
+  { value: "class_test", label: "Class test" },
+  { value: "unit_test", label: "Unit test" },
+  { value: "mid_term", label: "Mid term" },
+  { value: "end_term", label: "End term" },
+];
+
+const examTypeLabel = (type: ExamType | null) => EXAM_TYPES.find((t) => t.value === type)?.label ?? null;
 
 function ExamsListTab({
   schoolId,
@@ -106,7 +120,12 @@ function ExamsListTab({
             icon={CalendarClock}
             tone="neutral"
             title={`${subjectName(exam.subject_id)} · ${className(exam.class_id)}`}
-            badges={<Badge variant="outline">{exam.academic_year}</Badge>}
+            badges={
+              <>
+                <Badge variant="outline">{exam.academic_year}</Badge>
+                {examTypeLabel(exam.exam_type) && <Badge variant="outline">{examTypeLabel(exam.exam_type)}</Badge>}
+              </>
+            }
             message={`${exam.exam_date} · ${exam.start_time.slice(0, 5)}–${exam.end_time.slice(0, 5)}`}
             meta={`Exam #${exam.id}`}
             actions={
@@ -145,31 +164,53 @@ function ExamsListTab({
 function CreateExamTab({ schoolId, onCreated }: { schoolId: number; onCreated: (examId: number) => void }) {
   const lookup = useReferenceLookup(schoolId);
   const create = useCreateExam();
+  const createForGrade = useCreateExamsForGrade();
+  const [scope, setScope] = useState<"section" | "grade">("section");
   const [subjectId, setSubjectId] = useState("");
   const [classId, setClassId] = useState("");
+  const [gradeLevel, setGradeLevel] = useState("");
+  const [examType, setExamType] = useState<ExamType | "">("");
   const [examDate, setExamDate] = useState("");
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("11:00");
   const [totalMarks, setTotalMarks] = useState("100");
 
-  const canSubmit = subjectId && classId && examDate && startTime && endTime;
+  const gradeOptions = useMemo(() => {
+    const seen = new Map<number, string>();
+    for (const c of lookup.data?.classes ?? []) {
+      if (c.grade_level == null) continue;
+      seen.set(c.grade_level, c.grade_label ?? `Grade ${c.grade_level}`);
+    }
+    return [...seen.entries()].sort((a, b) => a[0] - b[0]);
+  }, [lookup.data?.classes]);
+
+  const target = scope === "section" ? classId : gradeLevel;
+  const canSubmit = subjectId && target && examDate && startTime && endTime;
 
   function submit() {
     if (!canSubmit) return;
-    create.mutate(
-      {
-        school_id: schoolId,
-        subject_id: Number(subjectId),
-        class_id: Number(classId),
-        academic_year: DEFAULT_ACADEMIC_YEAR,
-        exam_date: examDate,
-        start_time: startTime,
-        end_time: endTime,
-        total_marks: totalMarks ? Number(totalMarks) : undefined,
-      },
-      { onSuccess: (exam) => onCreated(exam.id) }
-    );
+    const shared = {
+      school_id: schoolId,
+      subject_id: Number(subjectId),
+      academic_year: DEFAULT_ACADEMIC_YEAR,
+      exam_type: examType || undefined,
+      exam_date: examDate,
+      start_time: startTime,
+      end_time: endTime,
+      total_marks: totalMarks ? Number(totalMarks) : undefined,
+    };
+    if (scope === "section") {
+      create.mutate({ ...shared, class_id: Number(classId) }, { onSuccess: (exam) => onCreated(exam.id) });
+    } else {
+      createForGrade.mutate(
+        { ...shared, grade_level: Number(gradeLevel) },
+        { onSuccess: (result) => onCreated(result.created[0].id) }
+      );
+    }
   }
+
+  const isPending = create.isPending || createForGrade.isPending;
+  const error = create.error ?? createForGrade.error;
 
   return (
     <Card className="max-w-xl">
@@ -178,6 +219,17 @@ function CreateExamTab({ schoolId, onCreated }: { schoolId: number; onCreated: (
         <CardDescription>Not in the original stub — added because generating a schedule needs an Exam to generate one for.</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
+        <Field label="Scope">
+          <Select value={scope} onValueChange={(v) => setScope(v as typeof scope)}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="section">One class/section</SelectItem>
+              <SelectItem value="grade">Whole grade (every active section)</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
         <Field label="Subject">
           <Select value={subjectId} onValueChange={setSubjectId}>
             <SelectTrigger>
@@ -192,15 +244,46 @@ function CreateExamTab({ schoolId, onCreated }: { schoolId: number; onCreated: (
             </SelectContent>
           </Select>
         </Field>
-        <Field label="Class">
-          <Select value={classId} onValueChange={setClassId}>
+        {scope === "section" ? (
+          <Field label="Class">
+            <Select value={classId} onValueChange={setClassId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select a class" />
+              </SelectTrigger>
+              <SelectContent>
+                {lookup.data?.classes.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        ) : (
+          <Field label="Grade" hint="Creates one exam per active section in this grade, all with the same subject/date/time.">
+            <Select value={gradeLevel} onValueChange={setGradeLevel}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select a grade" />
+              </SelectTrigger>
+              <SelectContent>
+                {gradeOptions.map(([level, label]) => (
+                  <SelectItem key={level} value={String(level)}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
+        <Field label="Exam type (optional)">
+          <Select value={examType} onValueChange={(v) => setExamType(v as ExamType)}>
             <SelectTrigger>
-              <SelectValue placeholder="Select a class" />
+              <SelectValue placeholder="Not set" />
             </SelectTrigger>
             <SelectContent>
-              {lookup.data?.classes.map((c) => (
-                <SelectItem key={c.id} value={String(c.id)}>
-                  {c.name}
+              {EXAM_TYPES.map((t) => (
+                <SelectItem key={t.value} value={t.value}>
+                  {t.label}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -220,14 +303,15 @@ function CreateExamTab({ schoolId, onCreated }: { schoolId: number; onCreated: (
         <Field label="Total marks (optional)">
           <Input type="number" value={totalMarks} onChange={(e) => setTotalMarks(e.target.value)} />
         </Field>
-        <Button onClick={submit} disabled={!canSubmit || create.isPending} className="self-start">
+        <Button onClick={submit} disabled={!canSubmit || isPending} className="self-start">
           <CalendarPlus className="h-4 w-4" />
-          {create.isPending ? "Creating…" : "Create exam"}
+          {isPending ? "Creating…" : scope === "grade" ? "Create exams" : "Create exam"}
         </Button>
-        {create.isError && (
-          <p className="text-sm text-urgent">{create.error instanceof ApiError ? create.error.message : "Failed to create exam."}</p>
-        )}
+        {error && <p className="text-sm text-urgent">{error instanceof ApiError ? error.message : "Failed to create exam."}</p>}
         {create.isSuccess && <p className="text-sm text-positive">Exam #{create.data.id} created.</p>}
+        {createForGrade.isSuccess && (
+          <p className="text-sm text-positive">{createForGrade.data.created.length} exam(s) created, one per section.</p>
+        )}
       </CardContent>
     </Card>
   );
@@ -243,20 +327,57 @@ function GenerateScheduleTab({
   onGenerated: (examId: number) => void;
 }) {
   const lookup = useReferenceLookup(schoolId);
+  const examsList = useExamsList({ pageSize: 100 });
   const [examId, setExamId] = useState(initialExamId ? String(initialExamId) : "");
-  const [rooms, setRooms] = useState<{ roomId: string; capacity: string }[]>([{ roomId: "", capacity: "30" }]);
+  const suggestions = useRoomSuggestions(examId ? Number(examId) : undefined);
+  const [selectedRoomIds, setSelectedRoomIds] = useState<Set<number>>(new Set());
+  const [phase, setPhase] = useState<"idle" | "previewed" | "confirmed">("idle");
   const generate = useGenerateSchedules();
 
-  const teacherName = (id: number | null) => (id === null ? null : lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`);
+  // A newly picked exam's suggestions load async - default-select whatever's
+  // suggested (still just a default; every available room is shown, toggleable).
+  useEffect(() => {
+    if (suggestions.data) {
+      setSelectedRoomIds(new Set(suggestions.data.suggested_room_ids));
+      setPhase("idle");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestions.data?.exam_id]);
 
-  function updateRoom(i: number, patch: Partial<{ roomId: string; capacity: string }>) {
-    setRooms((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const teacherName = (id: number | null) => (id === null ? null : lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`);
+  const examLabel = (id: number) => {
+    const e = examsList.data?.items.find((x) => x.id === id);
+    if (!e) return `Exam #${id}`;
+    const subj = lookup.data?.subjects.find((s) => s.id === e.subject_id)?.name ?? `Subject #${e.subject_id}`;
+    const cls = lookup.data?.classes.find((c) => c.id === e.class_id)?.name ?? `Class #${e.class_id}`;
+    return `${subj} · ${cls} · ${e.exam_date}`;
+  };
+
+  function toggleRoom(roomId: number) {
+    setSelectedRoomIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(roomId)) next.delete(roomId);
+      else next.add(roomId);
+      return next;
+    });
+    setPhase("idle");
   }
 
-  function submit() {
-    const parsedRooms = rooms.filter((r) => r.roomId && r.capacity).map((r) => ({ room_id: Number(r.roomId), capacity: Number(r.capacity) }));
-    if (!examId || parsedRooms.length === 0) return;
-    generate.mutate({ examId: Number(examId), rooms: parsedRooms }, { onSuccess: (result) => onGenerated(result.exam_id) });
+  const rooms = (suggestions.data?.available_rooms ?? [])
+    .filter((r) => selectedRoomIds.has(r.room_id))
+    .map((r) => ({ room_id: r.room_id, capacity: r.capacity }));
+
+  function preview() {
+    if (!examId || rooms.length === 0) return;
+    generate.mutate({ examId: Number(examId), rooms, dryRun: true }, { onSuccess: () => setPhase("previewed") });
+  }
+
+  function confirm() {
+    if (!examId || rooms.length === 0) return;
+    generate.mutate(
+      { examId: Number(examId), rooms, dryRun: false },
+      { onSuccess: (result) => { setPhase("confirmed"); onGenerated(result.exam_id); } }
+    );
   }
 
   return (
@@ -264,60 +385,80 @@ function GenerateScheduleTab({
       <Card>
         <CardHeader>
           <CardTitle>Generate seating + invigilation</CardTitle>
-          <CardDescription>
-            Supersedes any previous generation for this exam. Pick an exam from the "Exams" tab, or type its id directly below.
-          </CardDescription>
+          <CardDescription>Preview first - nothing is saved until you confirm. Confirming supersedes any previous generation for this exam.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <Field label="Exam ID">
-            <Input type="number" value={examId} onChange={(e) => setExamId(e.target.value)} placeholder="e.g. 25" />
+          <Field label="Exam">
+            <Select value={examId} onValueChange={(v) => { setExamId(v); setPhase("idle"); }}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select an exam" />
+              </SelectTrigger>
+              <SelectContent>
+                {examsList.data?.items.map((e) => (
+                  <SelectItem key={e.id} value={String(e.id)}>
+                    {examLabel(e.id)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
 
-          <div className="flex flex-col gap-2">
-            <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">Rooms</span>
-            {rooms.map((r, i) => (
-              <div key={i} className="flex items-end gap-2">
-                <Field label="Room" className="flex-1">
-                  <Select value={r.roomId} onValueChange={(v) => updateRoom(i, { roomId: v })}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select room" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {lookup.data?.rooms.map((room) => (
-                        <SelectItem key={room.id} value={String(room.id)}>
-                          {room.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </Field>
-                <Field label="Capacity" className="w-28">
-                  <Input type="number" value={r.capacity} onChange={(e) => updateRoom(i, { capacity: e.target.value })} />
-                </Field>
-                <Button variant="ghost" size="icon" onClick={() => setRooms((prev) => prev.filter((_, idx) => idx !== i))} disabled={rooms.length === 1}>
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
-            <Button variant="outline" size="sm" onClick={() => setRooms((prev) => [...prev, { roomId: "", capacity: "30" }])} className="self-start">
-              <Plus className="h-3.5 w-3.5" /> Add room
-            </Button>
-          </div>
+          {examId && (
+            <div className="flex flex-col gap-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">
+                Rooms{suggestions.data ? ` · ${suggestions.data.headcount} student(s) to seat` : ""}
+              </span>
+              {suggestions.isLoading && <div className="h-16 animate-pulse rounded-lg bg-elevated/60" />}
+              {suggestions.data?.available_rooms.length === 0 && (
+                <p className="text-sm text-urgent">No rooms are available for this exam's date/time — every room is booked by another exam.</p>
+              )}
+              {suggestions.data?.available_rooms.map((r) => (
+                <label
+                  key={r.room_id}
+                  className="flex cursor-pointer items-center justify-between rounded-xl border border-border bg-card px-3.5 py-2 text-sm"
+                >
+                  <span className="flex items-center gap-2 text-ink">
+                    <input type="checkbox" checked={selectedRoomIds.has(r.room_id)} onChange={() => toggleRoom(r.room_id)} />
+                    {r.room_name} · {r.capacity} seats
+                  </span>
+                  {suggestions.data!.suggested_room_ids.includes(r.room_id) && <Badge variant="positive">Suggested</Badge>}
+                </label>
+              ))}
+            </div>
+          )}
 
-          <Button onClick={submit} disabled={!examId || generate.isPending} className="self-start">
-            {generate.isPending ? "Generating…" : "Generate schedule"}
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={preview} disabled={!examId || rooms.length === 0 || generate.isPending} className="self-start">
+              {generate.isPending && phase !== "previewed" ? "Checking…" : "Preview"}
+            </Button>
+            {phase === "previewed" && (
+              <Button onClick={confirm} disabled={generate.isPending} className="self-start">
+                {generate.isPending ? "Saving…" : "Confirm & save"}
+              </Button>
+            )}
+          </div>
           {generate.isError && (
             <p className="text-sm text-urgent">{generate.error instanceof ApiError ? generate.error.message : "Failed to generate schedule."}</p>
           )}
         </CardContent>
       </Card>
 
-      {generate.isSuccess && (
+      {generate.isSuccess && (phase === "previewed" || phase === "confirmed") && (
         <Card>
           <CardHeader>
-            <CardTitle>Result — exam #{generate.data.exam_id}</CardTitle>
-            <CardDescription>{generate.data.seating.length} seat(s) assigned across {generate.data.invigilators.length} room(s).</CardDescription>
+            <CardTitle className="flex items-center gap-2">
+              {phase === "confirmed" ? (
+                <>
+                  <CheckCircle2 className="h-4 w-4 text-positive" /> Saved — {examLabel(generate.data.exam_id)}
+                </>
+              ) : (
+                `Preview — ${examLabel(generate.data.exam_id)}`
+              )}
+            </CardTitle>
+            <CardDescription>
+              {phase === "previewed" ? "Nothing saved yet - review, then confirm. " : ""}
+              {generate.data.seating.length} seat(s) assigned across {generate.data.invigilators.length} room(s).
+            </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             {generate.data.unassigned_rooms.length > 0 && (
@@ -353,18 +494,38 @@ function GenerateScheduleTab({
 
 function SeatingChartTab({ schoolId, lastGeneratedExamId }: { schoolId: number; lastGeneratedExamId: number | null }) {
   const lookup = useReferenceLookup(schoolId);
+  const examsList = useExamsList({ pageSize: 100 });
   const [examId, setExamId] = useState(lastGeneratedExamId ? String(lastGeneratedExamId) : "");
   const seating = useSeating({ examId: examId ? Number(examId) : undefined, enabled: !!examId });
+
+  const examLabel = (id: number) => {
+    const e = examsList.data?.items.find((x) => x.id === id);
+    if (!e) return `Exam #${id}`;
+    const subj = lookup.data?.subjects.find((s) => s.id === e.subject_id)?.name ?? `Subject #${e.subject_id}`;
+    const cls = lookup.data?.classes.find((c) => c.id === e.class_id)?.name ?? `Class #${e.class_id}`;
+    return `${subj} · ${cls} · ${e.exam_date}`;
+  };
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-end gap-3">
-        <Field label="Exam ID" className="w-48">
-          <Input type="number" value={examId} onChange={(e) => setExamId(e.target.value)} placeholder="e.g. 25" />
+        <Field label="Exam" className="w-72">
+          <Select value={examId} onValueChange={setExamId}>
+            <SelectTrigger>
+              <SelectValue placeholder="Select an exam" />
+            </SelectTrigger>
+            <SelectContent>
+              {examsList.data?.items.map((e) => (
+                <SelectItem key={e.id} value={String(e.id)}>
+                  {examLabel(e.id)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </Field>
       </div>
 
-      {!examId && <p className="text-sm text-ink-muted">Enter an exam id to view its seating chart.</p>}
+      {!examId && <p className="text-sm text-ink-muted">Select an exam to view its seating chart.</p>}
       {examId && seating.isLoading && <div className="h-40 animate-pulse rounded-2xl bg-elevated/60" />}
       {examId && seating.data && <SeatingChart items={seating.data.items} lookup={lookup.data} />}
     </div>
@@ -396,9 +557,6 @@ export default function ExamsPage() {
             <TabsTrigger value="seating">
               <DoorOpen className="h-3.5 w-3.5" /> Seating chart
             </TabsTrigger>
-            <TabsTrigger value="invigilation">
-              <ClipboardCheck className="h-3.5 w-3.5" /> My invigilation duties
-            </TabsTrigger>
           </TabsList>
           <TabsContent value="list">
             <ExamsListTab
@@ -421,9 +579,6 @@ export default function ExamsPage() {
           </TabsContent>
           <TabsContent value="seating">
             <SeatingChartTab schoolId={schoolId} lastGeneratedExamId={selectedExamId} />
-          </TabsContent>
-          <TabsContent value="invigilation">
-            <InvigilationDuties />
           </TabsContent>
         </Tabs>
       )}

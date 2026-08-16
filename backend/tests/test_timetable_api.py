@@ -55,6 +55,13 @@ def seed(db_session):
     db_session.add_all([teacher1, teacher2])
     db_session.flush()
 
+    # Every class must have a class teacher before /timetable/generate will run
+    # (Check G in timetable_preflight.py) - assigned here so this fixture stays
+    # a valid, generation-ready baseline; tests for the missing-class-teacher
+    # case build their own class without one instead of mutating this shared seed.
+    school_class.class_teacher_id = teacher1.id
+    class_b.class_teacher_id = teacher2.id
+
     db_session.add_all(
         [
             TeacherProfile(teacher_id=teacher1.id, max_periods_per_week=30),
@@ -398,7 +405,8 @@ def test_generate_with_negative_grade_level_for_lkg(client, seed, db_session):
     Nursery=-3/LKG=-2/UKG=-1 convention) must resolve and generate exactly like
     a positive grade_level - grade_levels: list[int] has no special-cased range."""
     lkg_class = SchoolClass(
-        name="LKG - A", academic_year="2026-27", grade_level=-2, grade_label="LKG", school_id=seed["school"].id
+        name="LKG - A", academic_year="2026-27", grade_level=-2, grade_label="LKG", school_id=seed["school"].id,
+        class_teacher_id=seed["teacher1"].id,
     )
     db_session.add(lkg_class)
     db_session.commit()
@@ -427,6 +435,17 @@ def test_generate_returns_422_for_lab_required_with_no_lab_room_selected(client,
     )
     resp = client.post("/timetable/generate", json=body)
     assert resp.status_code == 422
+
+
+def test_generate_returns_422_when_a_class_has_no_class_teacher(client, seed, db_session):
+    seed["class"].class_teacher_id = None
+    db_session.commit()
+
+    _override_user("admin", school_id=seed["school"].id)
+    resp = client.post("/timetable/generate", json=_generate_body(seed))
+    assert resp.status_code == 422
+    findings = resp.json()["detail"]["findings"]
+    assert any(f["code"] == "CLASS_TEACHER_MISSING" for f in findings)
 
 
 def test_generate_excludes_teacher_marked_not_included(client, seed, db_session):

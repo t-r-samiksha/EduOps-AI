@@ -125,6 +125,7 @@ export interface ClassCreateBody {
   grade_level?: number;
   grade_label?: string;
   section?: string;
+  class_teacher_id: number;
   home_room_id?: number;
 }
 
@@ -481,6 +482,7 @@ export interface ParentCreateBody {
   email: string;
   password: string;
   full_name?: string;
+  phone?: string;
   student_ids?: number[];
 }
 
@@ -488,6 +490,7 @@ export interface ParentOut {
   id: number;
   email: string;
   full_name: string | null;
+  phone: string | null;
   school_id: number | null;
   is_active: boolean;
   student_ids: number[];
@@ -517,7 +520,7 @@ function _invalidateParent(queryClient: ReturnType<typeof useQueryClient>, schoo
 export function useUpdateParent() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ parentId, schoolId, ...body }: { parentId: number; schoolId: number; full_name?: string }) =>
+    mutationFn: ({ parentId, schoolId, ...body }: { parentId: number; schoolId: number; full_name?: string; phone?: string }) =>
       apiPut<ParentOut>(`/admin/parents/${parentId}`, body),
     onSuccess: (_result, variables) => _invalidateParent(queryClient, variables.schoolId),
   });

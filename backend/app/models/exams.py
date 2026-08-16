@@ -21,6 +21,10 @@ class Exam(Base):
     subject_id: Mapped[int] = mapped_column(ForeignKey("subjects.id"), nullable=False)
     class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), nullable=False)
     academic_year: Mapped[str] = mapped_column(String(20), nullable=False)
+    exam_type: Mapped[str | None] = mapped_column(String(30))
+    """Free text, e.g. "class_test"/"unit_test"/"mid_term"/"end_term" - not an
+    enum, same spirit as FeeSchedule.fee_type/Intervention.action_taken elsewhere
+    in this codebase. Nullable for rows predating this field."""
     exam_date: Mapped[date_] = mapped_column(nullable=False)
     start_time: Mapped[time_] = mapped_column(nullable=False)
     end_time: Mapped[time_] = mapped_column(nullable=False)

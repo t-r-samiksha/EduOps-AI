@@ -103,9 +103,22 @@ export function useLeaveRequestSubstitutions(params: { leaveRequestId: number; a
 export function useConfirmSubstitution() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ substitutionId, substituteTeacherId }: { substitutionId: number; substituteTeacherId?: number }) =>
+    mutationFn: ({
+      substitutionId,
+      substituteTeacherId,
+      overrideQualification,
+    }: {
+      substitutionId: number;
+      substituteTeacherId?: number;
+      /** Explicit admin acknowledgment to confirm a teacher NOT qualified for
+       * this subject anyway (supervision-only cover) - the only conflict type
+       * this can waive; every other conflict is a real scheduling/physical
+       * impossibility and stays blocked regardless of this flag. */
+      overrideQualification?: boolean;
+    }) =>
       apiPut<ConfirmSubstitutionResponse>(`/substitution/${substitutionId}/confirm`, {
         substitute_teacher_id: substituteTeacherId,
+        override_qualification: overrideQualification,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-alerts"] });

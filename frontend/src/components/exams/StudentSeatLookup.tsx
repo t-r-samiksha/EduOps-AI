@@ -9,16 +9,18 @@ import { ApiError } from "@/api/client";
 
 /** No exam_id/student_id passed — per the real backend (GET /admin/exams/seating),
  * a student's own id is used regardless of any student_id they might pass, so this
- * is already correctly scoped to "my seats across every exam" without a filter UI.
- * No highlight needed either: every seat this endpoint returns is already the
- * caller's own. */
+ * is already correctly scoped to "my seats" without a filter UI. The backend
+ * returns every seat in each room the student is actually placed in (not just
+ * their own row), so the chart shows the real room layout with their own seat
+ * highlighted - not an isolated single seat. */
 export default function StudentSeatLookup() {
+  const currentUser = useCurrentUser();
   const seating = useSeating();
-  const lookup = useReferenceLookup(useCurrentUser().data?.school_id);
+  const lookup = useReferenceLookup(currentUser.data?.school_id);
 
   return (
     <div className="flex flex-col gap-3">
-      <PageHeader title="My Exam Seats" description="Your assigned seat for every exam that's had a seating chart generated." />
+      <PageHeader title="My Exam Seats" description="The full room layout for every exam you've been seated in, with your own seat highlighted." />
 
       {seating.isLoading && <div className="h-40 animate-pulse rounded-2xl bg-elevated/60" />}
       {seating.error && (
@@ -38,7 +40,7 @@ export default function StudentSeatLookup() {
         </Card>
       )}
       {seating.data && seating.data.items.length > 0 && (
-        <SeatingChart items={seating.data.items} lookup={lookup.data} />
+        <SeatingChart items={seating.data.items} lookup={lookup.data} highlightStudentId={currentUser.data?.user_id} />
       )}
     </div>
   );

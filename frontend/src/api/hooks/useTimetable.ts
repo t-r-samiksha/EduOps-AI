@@ -147,6 +147,7 @@ export interface LookupClass {
   grade_level: number | null;
   grade_label: string | null;
   section: string | null;
+  class_teacher_id: number | null;
 }
 
 export interface LookupResponse {

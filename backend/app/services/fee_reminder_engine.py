@@ -45,19 +45,30 @@ class ReminderDecision:
 def determine_reminder(days_overdue: int, already_sent_reasons: set[str]) -> ReminderDecision:
     """`already_sent_reasons` is the set of `cadence_reason` strings already logged
     as FeeReminders for this FeeRecord, so a tier that already fired doesn't fire
-    again on every subsequent run."""
+    again on every subsequent run.
+
+    Tracked by TIER INDEX, not just exact reason membership: escalation only ever
+    moves forward. Skipping a tier (e.g. first reached at 20 days overdue, jumping
+    straight to the 14-day reminder) is intentional - see this module's docstring -
+    but that skipped lower tier must never fire on a later run just because its
+    exact reason string was never logged. Without this, calling the invoicing job
+    (or its on-demand endpoint) twice on the same day could send the mild "first
+    reminder" right after the escalated "second reminder" had already gone out."""
     if days_overdue <= 0:
         return ReminderDecision(should_send=False, cadence_reason=None, severity=None)
 
+    reason_index = {reason: i for i, (_, _, reason) in enumerate(REMINDER_TIERS)}
+    highest_sent_index = max((reason_index[r] for r in already_sent_reasons if r in reason_index), default=-1)
+
     eligible = [
-        (threshold, severity, reason)
-        for threshold, severity, reason in REMINDER_TIERS
-        if days_overdue >= threshold and reason not in already_sent_reasons
+        (i, severity, reason)
+        for i, (threshold, severity, reason) in enumerate(REMINDER_TIERS)
+        if days_overdue >= threshold and i > highest_sent_index
     ]
     if not eligible:
         return ReminderDecision(should_send=False, cadence_reason=None, severity=None)
 
     # REMINDER_TIERS is defined in ascending threshold order, so the last eligible
     # entry is the highest tier reached that hasn't fired yet.
-    _threshold, severity, reason = eligible[-1]
+    _index, severity, reason = eligible[-1]
     return ReminderDecision(should_send=True, cadence_reason=reason, severity=severity)

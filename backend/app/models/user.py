@@ -16,6 +16,13 @@ class User(Base):
     supabase_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, nullable=False, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     full_name: Mapped[str | None] = mapped_column(String(255))
+    phone: Mapped[str | None] = mapped_column(String(30))
+    """Generic on User (not parent-specific at the schema level) but only exposed/
+    editable via the Parents endpoints today (routers/parents.py) - real gap found
+    live: School Management's Parents tab had no way to see a guardian's contact
+    number even though AdmissionApplication.guardian_phone had been real for a
+    while (that field belongs to the APPLICATION, not the parent's own account,
+    and was never carried over into one)."""
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     """Soft-deactivation - e.g. an admin deactivating a teacher account. Does not
     revoke Supabase Auth login (out of scope for a DB column); routers/services

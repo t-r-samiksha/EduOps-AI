@@ -57,11 +57,20 @@ Team of 3, vertical domain ownership:
   APScheduler instance** (`backend/app/scheduler.py`, wired into the FastAPI lifespan)
   that runs 4 jobs automatically for every active school: nightly risk scoring (02:00
   UTC), nightly syllabus/anomaly scan (02:15 UTC), nightly admin briefing (02:30 UTC),
-  monthly fee invoicing (1st of the month, 03:00 UTC). Leaving a dev server running
-  past those times will produce real `RiskFlag`/`AnomalyFlag`/`FeeRecord` rows, not
-  just when you manually run a script. The manual CLI scripts
-  (`python -m scripts.run_nightly_risk_scoring --school-id ... --academic-year ...`,
-  etc.) still work unchanged for on-demand/single-school runs.
+  nightly fee invoicing (02:45 UTC — changed from monthly this session: a monthly
+  cadence meant a fee due mid-month could sit unmarked-overdue for weeks with no
+  reminder logged; nightly closes that gap. `POST /admin/fees/schedules` also now
+  triggers this immediately/synchronously for its own school+year on creation — but
+  both this and the nightly job only actually generate a schedule's `FeeRecord`s
+  once its `due_date` is within `AUTO_GENERATE_WINDOW_DAYS` (7,
+  `scripts/run_monthly_fee_invoicing.py`) — a fee due 2 months out won't
+  materialize records until it enters that window. `POST /admin/fees/schedules/
+  {id}/generate` (per-schedule) and `POST /admin/fees/invoicing/run` (bulk) are the
+  manual, ungated overrides for "generate this now regardless of due date").
+  Leaving a dev server running past those times will produce real
+  `RiskFlag`/`AnomalyFlag`/`FeeRecord` rows, not just when you manually run a script.
+  The manual CLI scripts (`python -m scripts.run_nightly_risk_scoring --school-id ...
+  --academic-year ...`, etc.) still work unchanged for on-demand/single-school runs.
 - Backend deps: `pip install -r requirements.txt --break-system-packages` (or use a venv)
 - **System dependency (not a pip package):** Document OCR (`backend/app/services/
   ocr_engine.py`) needs the actual Tesseract OCR engine binary installed separately -

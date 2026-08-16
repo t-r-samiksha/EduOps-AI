@@ -7,6 +7,7 @@ from app.main import app
 from app.models.class_ import SchoolClass
 from app.models.enrollment import Enrollment
 from app.models.fees import FeeRecord, FeeReminder, FeeSchedule
+from app.models.parent_student import ParentStudent
 from app.models.role import Role
 from app.models.school import School
 from app.models.user import User
@@ -15,9 +16,9 @@ from app.services.auth import CurrentUser, get_current_user
 ACADEMIC_YEAR = "2026-27"
 
 
-def _override_user(role: str, user_id: int = 999):
+def _override_user(role: str, user_id: int = 999, school_id: int | None = None):
     def _fake_user():
-        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role)
+        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role, school_id=school_id)
 
     app.dependency_overrides[get_current_user] = _fake_user
 
@@ -54,6 +55,29 @@ def seed(db_session):
     return {"school": school, "class": school_class, "admin_user": admin_user, "student": student}
 
 
+@pytest.fixture()
+def class_teacher_seed(db_session, seed):
+    """Extends `seed` with a real class-teacher relationship: a teacher assigned as
+    seed["class"]'s class_teacher, and seed["student"] actually enrolled in it -
+    needed for teacher-scoped fee_status/mark-paid tests, which resolve ownership via
+    SchoolClass.class_teacher_id + Enrollment, not just a FeeSchedule.class_id."""
+    teacher_role = db_session.query(Role).filter(Role.name == "teacher").one()
+    teacher = _make_user(db_session, teacher_role, "teacher", seed["school"])
+    seed["class"].class_teacher_id = teacher.id
+    db_session.add(Enrollment(student_id=seed["student"].id, class_id=seed["class"].id, is_primary=True))
+    db_session.commit()
+    return {**seed, "teacher": teacher}
+
+
+@pytest.fixture()
+def parent_seed(db_session, seed):
+    parent_role = db_session.query(Role).filter(Role.name == "parent").one()
+    parent = _make_user(db_session, parent_role, "parent", seed["school"])
+    db_session.add(ParentStudent(parent_id=parent.id, student_id=seed["student"].id))
+    db_session.commit()
+    return {**seed, "parent": parent}
+
+
 # --- RBAC ---
 
 
@@ -80,10 +104,15 @@ def test_reminders_403_for_teacher_role(client):
     assert resp.status_code == 403
 
 
-def test_status_403_for_teacher_role(client):
+def test_status_teacher_role_is_allowed_but_scoped(client):
+    """Teachers ARE allowed to call this endpoint (unlike schedules/reminders,
+    which stay admin/principal-only) - GET /admin/fees/status doubles as the class
+    teacher's own fee view, scoped to their class(es). See the dedicated
+    role-based-scoping tests below for what "scoped" means in practice."""
     _override_user("teacher")
     resp = client.get("/admin/fees/status")
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.json()["items"] == []  # this teacher owns no classes at all
 
 
 def test_payment_403_for_teacher_role(client):
@@ -107,6 +136,115 @@ def test_create_and_list_schedule(client, seed):
     resp2 = client.get("/admin/fees/schedules", params={"school_id": seed["school"].id, "academic_year": ACADEMIC_YEAR})
     assert resp2.status_code == 200
     assert any(s["id"] == schedule_id for s in resp2.json())
+
+
+def test_create_schedule_immediately_generates_fee_records_when_due_soon(client, db_session, seed):
+    """A schedule due within the auto-generate window (7 days) must have its
+    FeeRecords exist right away - not just after the nightly job or a manual
+    "Generate now" click - so it doesn't sit invisible in Status."""
+    db_session.add(Enrollment(student_id=seed["student"].id, class_id=seed["class"].id, is_primary=True))
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    due_soon = (date.today() + timedelta(days=3)).isoformat()
+    resp = client.post(
+        "/admin/fees/schedules",
+        json={"school_id": seed["school"].id, "class_id": seed["class"].id, "academic_year": ACADEMIC_YEAR, "fee_type": "event", "amount": 500, "due_date": due_soon},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["records_generated"] is True
+    schedule_id = body["id"]
+
+    record = db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule_id).one()
+    assert record.student_id == seed["student"].id
+    assert record.status == "pending"
+
+
+def test_create_schedule_does_not_generate_when_due_date_is_far_out(client, db_session, seed):
+    """A schedule due well beyond the auto-generate window must NOT get records
+    the moment it's created - it should wait for the nightly job to catch it
+    once due_date enters the window, or an explicit POST .../generate."""
+    db_session.add(Enrollment(student_id=seed["student"].id, class_id=seed["class"].id, is_primary=True))
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id)
+    due_far = (date.today() + timedelta(days=60)).isoformat()
+    resp = client.post(
+        "/admin/fees/schedules",
+        json={"school_id": seed["school"].id, "class_id": seed["class"].id, "academic_year": ACADEMIC_YEAR, "fee_type": "event", "amount": 500, "due_date": due_far},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["records_generated"] is False
+    schedule_id = body["id"]
+
+    assert db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule_id).count() == 0
+
+
+def test_generate_schedule_records_manually_bypasses_the_due_date_window(client, db_session, seed):
+    """The per-schedule POST .../generate endpoint is the admin's explicit
+    override - must work regardless of how far out due_date is."""
+    db_session.add(Enrollment(student_id=seed["student"].id, class_id=seed["class"].id, is_primary=True))
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    due_far = (date.today() + timedelta(days=60)).isoformat()
+    schedule_id = client.post(
+        "/admin/fees/schedules",
+        json={"school_id": seed["school"].id, "class_id": seed["class"].id, "academic_year": ACADEMIC_YEAR, "fee_type": "event", "amount": 500, "due_date": due_far},
+    ).json()["id"]
+    assert db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule_id).count() == 0
+
+    resp = client.post(f"/admin/fees/schedules/{schedule_id}/generate")
+    assert resp.status_code == 200
+    assert resp.json()["records_generated"] is True
+    assert db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule_id).count() == 1
+
+
+def test_generate_schedule_records_403_for_teacher_role(client, seed):
+    _override_user("teacher")
+    resp = client.post("/admin/fees/schedules/1/generate")
+    assert resp.status_code == 403
+
+
+def test_generate_schedule_records_401_without_token(client):
+    resp = client.post("/admin/fees/schedules/1/generate")
+    assert resp.status_code == 401
+
+
+def test_generate_schedule_records_404_for_unknown_schedule(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.post("/admin/fees/schedules/999999/generate")
+    assert resp.status_code == 404
+
+
+def test_generate_schedule_records_404_for_another_schools_schedule(client, db_session, seed):
+    other_school = School(name="Other School For Schedule Generate")
+    db_session.add(other_school)
+    db_session.flush()
+    other_schedule = FeeSchedule(
+        school_id=other_school.id, class_id=None, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=100.0, due_date=date.today() + timedelta(days=60),
+    )
+    db_session.add(other_schedule)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.post(f"/admin/fees/schedules/{other_schedule.id}/generate")
+    assert resp.status_code == 404
+
+
+def test_list_schedules_sorted_ascending_by_due_date(client, seed):
+    _override_user("admin", user_id=seed["admin_user"].id)
+    far = (date.today() + timedelta(days=60)).isoformat()
+    soon = (date.today() + timedelta(days=3)).isoformat()
+    client.post("/admin/fees/schedules", json={"school_id": seed["school"].id, "academic_year": ACADEMIC_YEAR, "fee_type": "far one", "amount": 1, "due_date": far})
+    client.post("/admin/fees/schedules", json={"school_id": seed["school"].id, "academic_year": ACADEMIC_YEAR, "fee_type": "soon one", "amount": 1, "due_date": soon})
+
+    resp = client.get("/admin/fees/schedules", params={"school_id": seed["school"].id, "academic_year": ACADEMIC_YEAR})
+    due_dates = [s["due_date"] for s in resp.json()]
+    assert due_dates == sorted(due_dates)
 
 
 def test_create_schedule_rejects_nonpositive_amount(client, seed):
@@ -179,7 +317,7 @@ def test_fee_status_filters_by_class_and_status(client, db_session, seed, overdu
     resp = client.get("/admin/fees/status")  # no override yet -> should 401
     assert resp.status_code == 401
 
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.get("/admin/fees/status", params={"class_id": seed["class"].id, "status": "overdue"})
     items = resp.json()["items"]
     match = next(i for i in items if i["fee_record_id"] == overdue_record.id)
@@ -191,7 +329,7 @@ def test_fee_status_filters_by_class_and_status(client, db_session, seed, overdu
 
 
 def test_partial_payment_sets_status_partial(client, db_session, seed, overdue_record):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.post(f"/admin/fees/records/{overdue_record.id}/payment", json={"amount": 5000})
     assert resp.status_code == 200
     body = resp.json()
@@ -200,19 +338,315 @@ def test_partial_payment_sets_status_partial(client, db_session, seed, overdue_r
 
 
 def test_full_payment_sets_status_paid(client, db_session, seed, overdue_record):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.post(f"/admin/fees/records/{overdue_record.id}/payment", json={"amount": 15000})
     assert resp.status_code == 200
     assert resp.json()["status"] == "paid"
 
 
 def test_payment_rejects_nonpositive_amount(client, seed, overdue_record):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.post(f"/admin/fees/records/{overdue_record.id}/payment", json={"amount": 0})
     assert resp.status_code == 400
 
 
 def test_payment_404_for_missing_record(client, seed):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.post("/admin/fees/records/999999/payment", json={"amount": 100})
+    assert resp.status_code == 404
+
+
+def test_payment_404_for_another_schools_record(client, db_session, seed, overdue_record):
+    """Regression: record_payment had zero school scoping before this session's fix -
+    any admin from any school could reconcile any other school's fee record."""
+    other_school = School(name="Other School")
+    db_session.add(other_school)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=other_school.id)
+    resp = client.post(f"/admin/fees/records/{overdue_record.id}/payment", json={"amount": 100})
+    assert resp.status_code == 404
+
+
+# --- POST /admin/fees/invoicing/run ---
+
+
+def test_run_invoicing_403_for_teacher_role(client):
+    _override_user("teacher")
+    resp = client.post("/admin/fees/invoicing/run", json={"academic_year": ACADEMIC_YEAR})
+    assert resp.status_code == 403
+
+
+def test_run_invoicing_401_without_token(client):
+    resp = client.post("/admin/fees/invoicing/run", json={"academic_year": ACADEMIC_YEAR})
+    assert resp.status_code == 401
+
+
+def test_run_invoicing_creates_a_record_for_each_enrolled_student(client, db_session, seed):
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=30),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    db_session.add(Enrollment(student_id=seed["student"].id, class_id=seed["class"].id, is_primary=True))
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.post("/admin/fees/invoicing/run", json={"academic_year": ACADEMIC_YEAR})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["records_created"] == 1
+
+    record = db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule.id).one()
+    assert record.student_id == seed["student"].id
+    assert record.status == "pending"
+
+
+def test_run_invoicing_is_idempotent(client, db_session, seed):
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=30),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    db_session.add(Enrollment(student_id=seed["student"].id, class_id=seed["class"].id, is_primary=True))
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    client.post("/admin/fees/invoicing/run", json={"academic_year": ACADEMIC_YEAR})
+    resp2 = client.post("/admin/fees/invoicing/run", json={"academic_year": ACADEMIC_YEAR})
+    assert resp2.json()["records_created"] == 0
+    assert db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule.id).count() == 1
+
+
+def test_run_invoicing_marks_past_due_records_overdue_and_logs_reminder(client, db_session, seed):
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() - timedelta(days=8),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    db_session.add(Enrollment(student_id=seed["student"].id, class_id=seed["class"].id, is_primary=True))
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.post("/admin/fees/invoicing/run", json={"academic_year": ACADEMIC_YEAR})
+    body = resp.json()
+    assert body["records_created"] == 1
+    assert body["overdue_marked"] == 1
+    assert body["reminders_sent"] == 1
+
+    record = db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == schedule.id).one()
+    assert record.status == "overdue"
+
+
+def test_run_invoicing_is_scoped_to_the_callers_school(client, db_session, seed):
+    """A schedule/enrollment belonging to a different school must not be touched by
+    this school's admin running invoicing - matches the cross-tenant scoping fix
+    applied elsewhere in fees/admissions/approvals."""
+    other_school = School(name="Other School")
+    db_session.add(other_school)
+    db_session.flush()
+    other_class = SchoolClass(name="9A", academic_year=ACADEMIC_YEAR, school_id=other_school.id)
+    db_session.add(other_class)
+    db_session.flush()
+    other_schedule = FeeSchedule(
+        school_id=other_school.id, class_id=other_class.id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=9999.0, due_date=date.today() + timedelta(days=30),
+    )
+    db_session.add(other_schedule)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.post("/admin/fees/invoicing/run", json={"academic_year": ACADEMIC_YEAR})
+    assert resp.json()["records_created"] == 0
+    assert db_session.query(FeeRecord).filter(FeeRecord.fee_schedule_id == other_schedule.id).count() == 0
+
+
+# --- GET /admin/fees/status - role-based scoping (teacher/parent/student) ---
+
+
+@pytest.fixture()
+def class_teacher_record(db_session, class_teacher_seed):
+    schedule = FeeSchedule(
+        school_id=class_teacher_seed["school"].id, class_id=class_teacher_seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="event", amount=500.0, due_date=date.today() + timedelta(days=10),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(
+        student_id=class_teacher_seed["student"].id, fee_schedule_id=schedule.id, amount_due=500.0,
+        amount_paid=0.0, status="pending", due_date=schedule.due_date,
+    )
+    db_session.add(record)
+    db_session.commit()
+    db_session.refresh(record)
+    return record
+
+
+def test_fee_status_teacher_sees_only_their_own_class(client, db_session, class_teacher_seed, class_teacher_record):
+    _override_user("teacher", user_id=class_teacher_seed["teacher"].id)
+    resp = client.get("/admin/fees/status")
+    assert resp.status_code == 200
+    ids = [i["fee_record_id"] for i in resp.json()["items"]]
+    assert class_teacher_record.id in ids
+
+
+def test_fee_status_teacher_403_for_a_class_they_do_not_teach(client, db_session, class_teacher_seed):
+    other_class = SchoolClass(name="9B", academic_year=ACADEMIC_YEAR, school_id=class_teacher_seed["school"].id)
+    db_session.add(other_class)
+    db_session.commit()
+
+    _override_user("teacher", user_id=class_teacher_seed["teacher"].id)
+    resp = client.get("/admin/fees/status", params={"class_id": other_class.id})
+    assert resp.status_code == 403
+
+
+def test_fee_status_teacher_sees_nothing_from_an_unrelated_class(client, db_session, seed):
+    """A teacher who isn't any class's class_teacher must see an empty list, not
+    every record in the school."""
+    teacher_role = db_session.query(Role).filter(Role.name == "teacher").one()
+    unrelated_teacher = _make_user(db_session, teacher_role, "unrelated-teacher", seed["school"])
+    db_session.commit()
+
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=10),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    db_session.add(FeeRecord(student_id=seed["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="pending", due_date=schedule.due_date))
+    db_session.commit()
+
+    _override_user("teacher", user_id=unrelated_teacher.id)
+    resp = client.get("/admin/fees/status")
+    assert resp.json()["items"] == []
+
+
+def test_fee_status_parent_requires_student_id(client, parent_seed):
+    _override_user("parent", user_id=parent_seed["parent"].id)
+    resp = client.get("/admin/fees/status")
+    assert resp.status_code == 400
+
+
+def test_fee_status_parent_403_for_a_student_not_their_own(client, parent_seed):
+    _override_user("parent", user_id=parent_seed["parent"].id)
+    resp = client.get("/admin/fees/status", params={"student_id": 999999})
+    assert resp.status_code == 403
+
+
+def test_fee_status_parent_sees_their_own_childs_record(client, db_session, parent_seed):
+    schedule = FeeSchedule(
+        school_id=parent_seed["school"].id, class_id=parent_seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=10),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=parent_seed["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="pending", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+    db_session.refresh(record)
+
+    _override_user("parent", user_id=parent_seed["parent"].id)
+    resp = client.get("/admin/fees/status", params={"student_id": parent_seed["student"].id})
+    ids = [i["fee_record_id"] for i in resp.json()["items"]]
+    assert record.id in ids
+
+
+def test_fee_status_student_sees_only_their_own_records(client, db_session, seed):
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=10),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    own_record = FeeRecord(student_id=seed["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="pending", due_date=schedule.due_date)
+    db_session.add(own_record)
+
+    student_role = db_session.query(Role).filter(Role.name == "student").one()
+    other_student = _make_user(db_session, student_role, "other-student", seed["school"])
+    other_record = FeeRecord(student_id=other_student.id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="pending", due_date=schedule.due_date)
+    db_session.add(other_record)
+    db_session.commit()
+    db_session.refresh(own_record)
+
+    _override_user("student", user_id=seed["student"].id)
+    resp = client.get("/admin/fees/status")
+    ids = [i["fee_record_id"] for i in resp.json()["items"]]
+    assert ids == [own_record.id]
+
+
+# --- PATCH /admin/fees/records/{id}/mark-paid ---
+
+
+def test_mark_paid_403_for_admin_role(client, seed):
+    """This toggle is deliberately teacher-only - admin/principal keep the full
+    amount-reconciliation endpoint (POST .../payment) instead."""
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.patch("/admin/fees/records/1/mark-paid", json={"paid": True})
+    assert resp.status_code == 403
+
+
+def test_mark_paid_401_without_token(client):
+    resp = client.patch("/admin/fees/records/1/mark-paid", json={"paid": True})
+    assert resp.status_code == 401
+
+
+def test_mark_paid_sets_paid_status_and_fills_amount_paid(client, db_session, class_teacher_seed, class_teacher_record):
+    _override_user("teacher", user_id=class_teacher_seed["teacher"].id)
+    resp = client.patch(f"/admin/fees/records/{class_teacher_record.id}/mark-paid", json={"paid": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "paid"
+    assert body["amount_paid"] == 500.0
+
+
+def test_mark_unpaid_resets_amount_paid_and_recomputes_status(client, db_session, class_teacher_seed, class_teacher_record):
+    _override_user("teacher", user_id=class_teacher_seed["teacher"].id)
+    client.patch(f"/admin/fees/records/{class_teacher_record.id}/mark-paid", json={"paid": True})
+    resp = client.patch(f"/admin/fees/records/{class_teacher_record.id}/mark-paid", json={"paid": False})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["amount_paid"] == 0.0
+    assert body["status"] == "pending"  # due_date is in the future in this fixture
+
+
+def test_mark_unpaid_recomputes_overdue_when_past_due_date(client, db_session, class_teacher_seed):
+    schedule = FeeSchedule(
+        school_id=class_teacher_seed["school"].id, class_id=class_teacher_seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="event", amount=500.0, due_date=date.today() - timedelta(days=3),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=class_teacher_seed["student"].id, fee_schedule_id=schedule.id, amount_due=500.0, amount_paid=500.0, status="paid", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+    db_session.refresh(record)
+
+    _override_user("teacher", user_id=class_teacher_seed["teacher"].id)
+    resp = client.patch(f"/admin/fees/records/{record.id}/mark-paid", json={"paid": False})
+    assert resp.json()["status"] == "overdue"
+
+
+def test_mark_paid_404_for_a_student_outside_the_teachers_class(client, db_session, seed):
+    """A teacher must not be able to mark paid/unpaid for a student who isn't in
+    their own class."""
+    teacher_role = db_session.query(Role).filter(Role.name == "teacher").one()
+    unrelated_teacher = _make_user(db_session, teacher_role, "unrelated-teacher", seed["school"])
+    db_session.commit()
+
+    schedule = FeeSchedule(
+        school_id=seed["school"].id, class_id=seed["class"].id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=15000.0, due_date=date.today() + timedelta(days=10),
+    )
+    db_session.add(schedule)
+    db_session.flush()
+    record = FeeRecord(student_id=seed["student"].id, fee_schedule_id=schedule.id, amount_due=15000.0, amount_paid=0.0, status="pending", due_date=schedule.due_date)
+    db_session.add(record)
+    db_session.commit()
+    db_session.refresh(record)
+
+    _override_user("teacher", user_id=unrelated_teacher.id)
+    resp = client.patch(f"/admin/fees/records/{record.id}/mark-paid", json={"paid": True})
     assert resp.status_code == 404

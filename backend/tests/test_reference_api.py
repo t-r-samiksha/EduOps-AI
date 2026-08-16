@@ -114,6 +114,17 @@ def test_lookup_enriched_class_fields(client, seed):
     assert unparsed["section"] is None
 
 
+def test_lookup_class_teacher_id_lets_a_teacher_identify_their_own_class(client, db_session, seed):
+    seed["class"].class_teacher_id = seed["teacher"].id
+    db_session.commit()
+
+    _override_user("teacher", user_id=seed["teacher"].id)
+    resp = client.get("/reference/lookup", params={"school_id": seed["school"].id})
+    classes = {c["id"]: c for c in resp.json()["classes"]}
+    assert classes[seed["class"].id]["class_teacher_id"] == seed["teacher"].id
+    assert classes[seed["unparsed_class"].id]["class_teacher_id"] is None
+
+
 def test_lookup_enriched_subject_fields(client, seed):
     _override_user("admin")
     resp = client.get("/reference/lookup", params={"school_id": seed["school"].id})

@@ -333,7 +333,7 @@ def test_diagnose_infeasibility_names_the_conflicting_requirement_for_a_case_pre
     )
     rooms = [SolverRoom(id=1, room_type=CLASSROOM)]
     subjects = [SolverSubject(id=MATH)]
-    classes = [ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)]
+    classes = [ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)]
 
     findings = run_preflight_checks(
         teachers=[teacher], rooms=rooms, subjects=subjects, requirements=requirements, classes=classes,

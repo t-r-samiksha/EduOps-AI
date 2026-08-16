@@ -27,7 +27,7 @@ def test_check_a_reports_error_when_over_subscribed():
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH), SolverSubject(id=ENGLISH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=5,
         periods_per_day=2,
     )
@@ -49,7 +49,7 @@ def test_check_a_reports_warning_when_under_subscribed():
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH), SolverSubject(id=ENGLISH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=5,
         periods_per_day=2,
     )
@@ -70,7 +70,7 @@ def test_check_b_reports_naive_per_subject_shortfall():
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=5,
         periods_per_day=2,
         subject_names={MATH: "Math"},
@@ -97,7 +97,7 @@ def test_check_b_reports_overlap_caused_shortfall_that_naive_per_subject_check_w
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH), SolverSubject(id=ENGLISH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=5,
         periods_per_day=4,
         subject_names={MATH: "Math", ENGLISH: "English"},
@@ -125,7 +125,7 @@ def test_check_b_reports_warning_for_tight_pool_that_still_passes():
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=1,
         periods_per_day=9,
         subject_names={MATH: "Math"},
@@ -151,8 +151,8 @@ def test_check_c_reports_home_room_collision():
         subjects=[SolverSubject(id=MATH)],
         requirements=requirements,
         classes=[
-            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=500),
-            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=500),
+            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=500, class_teacher_id=1),
+            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=500, class_teacher_id=1),
         ],
         days=6,
         periods_per_day=10,
@@ -175,8 +175,8 @@ def test_check_c_reports_room_concurrency_shortfall():
         subjects=[SolverSubject(id=MATH)],
         requirements=requirements,
         classes=[
-            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=None),
-            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=None),
+            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=None, class_teacher_id=1),
+            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=None, class_teacher_id=1),
         ],
         days=6,
         periods_per_day=10,
@@ -208,8 +208,8 @@ def test_check_d_reports_weekly_lab_capacity_shortfall():
         subjects=[SolverSubject(id=SCIENCE, required_room_type=LAB)],
         requirements=requirements,
         classes=[
-            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1),
-            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=2),
+            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1),
+            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=2, class_teacher_id=1),
         ],
         days=5,
         periods_per_day=20,  # total_slots = 100, well above any one teacher's demand (60)
@@ -241,7 +241,7 @@ def test_check_d_reports_peak_concurrency_shortfall_distinct_from_weekly_total()
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)] + [SolverRoom(id=100 + i, room_type=LAB) for i in range(3)],
         subjects=[SolverSubject(id=SCIENCE, required_room_type=LAB), SolverSubject(id=PHYSICS, required_room_type=LAB)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=5,
         periods_per_day=2,  # total_slots = 10
     )
@@ -266,7 +266,7 @@ def test_check_e_reports_teacher_availability_shortfall():
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=1,
         periods_per_day=8,
         teacher_names={1: "T. Rao"},
@@ -289,7 +289,7 @@ def test_check_f_reports_cross_run_collision():
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=1,
         periods_per_day=5,
         teacher_names={1: "T. Rao"},
@@ -311,11 +311,72 @@ def test_check_f_is_silent_when_no_teacher_has_cross_run_bookings():
         rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
         subjects=[SolverSubject(id=MATH)],
         requirements=requirements,
-        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1)],
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
         days=1,
         periods_per_day=5,
     )
     assert "CROSS_RUN_COLLISION" not in _codes(findings)
+
+
+# --- Check G: every class must have a class teacher --------------------------
+
+
+def test_check_g_reports_error_when_a_class_has_no_class_teacher():
+    requirements = [SolverRequirement(class_id=CLASS_A, subject_id=MATH, periods_per_week=3, home_room_id=1)]
+    findings = run_preflight_checks(
+        teachers=[SolverTeacher(id=1, subject_ids=frozenset({MATH}), max_periods_per_week=20)],
+        rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
+        subjects=[SolverSubject(id=MATH)],
+        requirements=requirements,
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=None)],
+        days=5,
+        periods_per_day=2,
+    )
+    missing = [f for f in findings if f.code == "CLASS_TEACHER_MISSING"]
+    assert len(missing) == 1
+    f = missing[0]
+    assert f.severity == "error"
+    assert f.numbers == {"classes_missing_teacher": 1}
+    assert f.details["class_ids"] == [CLASS_A]
+    assert "Grade 1-A" in f.message
+    assert any(r.action == "assign_class_teacher" and r.quantity == 1 for r in f.remedies)
+
+
+def test_check_g_reports_every_class_missing_a_teacher_together():
+    requirements = [
+        SolverRequirement(class_id=CLASS_A, subject_id=MATH, periods_per_week=3, home_room_id=1),
+        SolverRequirement(class_id=CLASS_B, subject_id=MATH, periods_per_week=3, home_room_id=2),
+    ]
+    findings = run_preflight_checks(
+        teachers=[SolverTeacher(id=1, subject_ids=frozenset({MATH}), max_periods_per_week=20)],
+        rooms=[SolverRoom(id=1, room_type=CLASSROOM), SolverRoom(id=2, room_type=CLASSROOM)],
+        subjects=[SolverSubject(id=MATH)],
+        requirements=requirements,
+        classes=[
+            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=None),
+            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=2, class_teacher_id=None),
+        ],
+        days=5,
+        periods_per_day=2,
+    )
+    missing = [f for f in findings if f.code == "CLASS_TEACHER_MISSING"]
+    assert len(missing) == 1
+    assert missing[0].numbers == {"classes_missing_teacher": 2}
+    assert set(missing[0].details["class_ids"]) == {CLASS_A, CLASS_B}
+
+
+def test_check_g_silent_when_every_class_has_a_class_teacher():
+    requirements = [SolverRequirement(class_id=CLASS_A, subject_id=MATH, periods_per_week=3, home_room_id=1)]
+    findings = run_preflight_checks(
+        teachers=[SolverTeacher(id=1, subject_ids=frozenset({MATH}), max_periods_per_week=20)],
+        rooms=[SolverRoom(id=1, room_type=CLASSROOM)],
+        subjects=[SolverSubject(id=MATH)],
+        requirements=requirements,
+        classes=[ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1)],
+        days=5,
+        periods_per_day=2,
+    )
+    assert "CLASS_TEACHER_MISSING" not in _codes(findings)
 
 
 # --- Combined: multiple checks failing together -----------------------------
@@ -334,8 +395,8 @@ def test_multiple_checks_fail_simultaneously_and_all_are_reported():
         subjects=[SolverSubject(id=MATH), SolverSubject(id=ENGLISH)],
         requirements=requirements,
         classes=[
-            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1),
-            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=1),
+            ClassInfo(id=CLASS_A, name="Grade 1-A", home_room_id=1, class_teacher_id=1),
+            ClassInfo(id=CLASS_B, name="Grade 1-B", home_room_id=1, class_teacher_id=1),
         ],
         days=5,
         periods_per_day=2,

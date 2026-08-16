@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GraduationCap, Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import Field from "@/components/ui/field";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import PageHeader from "@/components/shared/PageHeader";
 import { ApiError } from "@/api/client";
 import { useCurrentUser } from "@/api/hooks/useAuth";
@@ -15,6 +16,7 @@ import {
   useSchool,
   useUpdateSchool,
   useCreateClass,
+  useClassesAdmin,
   useCreateSubject,
   useCreateRoom,
   useCreateTeacher,
@@ -24,14 +26,14 @@ import {
 import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
-const STEP_KEYS = ["school", "classes", "subjects", "rooms", "teachers", "students", "parents", "review"] as const;
+const STEP_KEYS = ["school", "teachers", "classes", "subjects", "rooms", "students", "parents", "review"] as const;
 type StepKey = (typeof STEP_KEYS)[number];
 const STEP_LABELS: Record<StepKey, string> = {
   school: "School",
+  teachers: "Teachers",
   classes: "Classes",
   subjects: "Subjects",
   rooms: "Rooms",
-  teachers: "Teachers",
   students: "Students",
   parents: "Parents",
   review: "Review",
@@ -101,51 +103,96 @@ function StepSchool({ schoolId, onContinue }: { schoolId: number; onContinue: ()
 
 function StepClasses({ schoolId, lookup, onContinue }: { schoolId: number; lookup: LookupResponse | undefined; onContinue: () => void }) {
   const createClass = useCreateClass();
+  const classes = useClassesAdmin(schoolId);
   const [gradeLevel, setGradeLevel] = useState("");
   const [gradeLabel, setGradeLabel] = useState("");
   const [section, setSection] = useState("");
   const [academicYear, setAcademicYear] = useState(DEFAULT_ACADEMIC_YEAR);
 
+  // Same "suggest, don't silently auto-pick" load-based default as School
+  // Management's Add class form - least-loaded (fewest classes already held)
+  // qualified teacher pre-selected, freely overridable.
+  const classTeacherLoad = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const c of classes.data ?? []) {
+      if (c.class_teacher_id != null && c.is_active) map.set(c.class_teacher_id, (map.get(c.class_teacher_id) ?? 0) + 1);
+    }
+    return map;
+  }, [classes.data]);
+  const teacherOptions = (lookup?.teachers ?? [])
+    .map((t) => ({ id: t.id, name: t.name, classCount: classTeacherLoad.get(t.id) ?? 0 }))
+    .sort((a, b) => a.classCount - b.classCount);
+
+  const [classTeacherId, setClassTeacherId] = useState("");
+  useEffect(() => {
+    if (!classTeacherId && teacherOptions[0]) setClassTeacherId(String(teacherOptions[0].id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teacherOptions[0]?.id]);
+
   function handleAdd() {
     const level = Number(gradeLevel);
     if (!level && level !== 0) return;
+    if (!classTeacherId) return;
     const label = gradeLabel.trim() || undefined;
     const name = `${label || `Grade ${level}`}${section ? ` - ${section}` : ""}`;
     createClass.mutate(
-      { school_id: schoolId, name, academic_year: academicYear, grade_level: level, grade_label: label, section: section || undefined },
-      { onSuccess: () => { setGradeLevel(""); setGradeLabel(""); setSection(""); } }
+      {
+        school_id: schoolId, name, academic_year: academicYear, grade_level: level, grade_label: label,
+        section: section || undefined, class_teacher_id: Number(classTeacherId),
+      },
+      { onSuccess: () => { setGradeLevel(""); setGradeLabel(""); setSection(""); setClassTeacherId(""); } }
     );
   }
+
+  const noTeachersYet = (lookup?.teachers.length ?? 0) === 0;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Classes</CardTitle>
-        <CardDescription>Real classes, created directly - not a template. Add as many as you need.</CardDescription>
+        <CardDescription>Real classes, created directly - not a template. Every class needs a class teacher, added in the previous step.</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div>
           <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-ink-muted">Already created</span>
           <ExistingList items={(lookup?.classes ?? []).map((c) => ({ id: c.id, label: c.name }))} empty="None yet." />
         </div>
-        <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-elevated/40 px-3.5 py-3">
-          <Field label="Grade level (number)" className="w-36" hint="Nursery=-3, LKG=-2, UKG=-1, Grade 1=1...">
-            <Input type="number" value={gradeLevel} onChange={(e) => setGradeLevel(e.target.value)} />
-          </Field>
-          <Field label="Label (optional)" className="w-28">
-            <Input value={gradeLabel} onChange={(e) => setGradeLabel(e.target.value)} placeholder="e.g. LKG" />
-          </Field>
-          <Field label="Section" className="w-24">
-            <Input value={section} onChange={(e) => setSection(e.target.value)} placeholder="A" />
-          </Field>
-          <Field label="Academic year" className="w-32">
-            <Input value={academicYear} onChange={(e) => setAcademicYear(e.target.value)} />
-          </Field>
-          <Button onClick={handleAdd} disabled={!gradeLevel || createClass.isPending}>
-            {createClass.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-            Add class
-          </Button>
-        </div>
+        {noTeachersYet ? (
+          <p className="text-sm text-warning">Add at least one teacher first (previous step) - every class needs one assigned.</p>
+        ) : (
+          <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-elevated/40 px-3.5 py-3">
+            <Field label="Grade level (number)" className="w-36" hint="Nursery=-3, LKG=-2, UKG=-1, Grade 1=1...">
+              <Input type="number" value={gradeLevel} onChange={(e) => setGradeLevel(e.target.value)} />
+            </Field>
+            <Field label="Label (optional)" className="w-28">
+              <Input value={gradeLabel} onChange={(e) => setGradeLabel(e.target.value)} placeholder="e.g. LKG" />
+            </Field>
+            <Field label="Section" className="w-24">
+              <Input value={section} onChange={(e) => setSection(e.target.value)} placeholder="A" />
+            </Field>
+            <Field label="Academic year" className="w-32">
+              <Input value={academicYear} onChange={(e) => setAcademicYear(e.target.value)} />
+            </Field>
+            <Field label="Class teacher" className="w-52" hint="Pre-filled with the least-loaded teacher.">
+              <Select value={classTeacherId} onValueChange={setClassTeacherId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a teacher" />
+                </SelectTrigger>
+                <SelectContent>
+                  {teacherOptions.map((t) => (
+                    <SelectItem key={t.id} value={String(t.id)}>
+                      {t.name} · {t.classCount} class{t.classCount === 1 ? "" : "es"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Button onClick={handleAdd} disabled={!gradeLevel || !classTeacherId || createClass.isPending}>
+              {createClass.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              Add class
+            </Button>
+          </div>
+        )}
         {createClass.isError && (
           <p className="text-sm text-urgent">{createClass.error instanceof ApiError ? createClass.error.message : "Failed to create class."}</p>
         )}
@@ -444,6 +491,7 @@ function StepParents({
 }) {
   const createParent = useCreateParent();
   const [fullName, setFullName] = useState("");
+  const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [studentIds, setStudentIds] = useState<Set<number>>(new Set());
@@ -461,12 +509,15 @@ function StepParents({
     if (!email.trim() || password.length < 8) return;
     const idsArray = Array.from(studentIds);
     createParent.mutate(
-      { school_id: schoolId, email: email.trim(), password, full_name: fullName.trim() || undefined, student_ids: idsArray },
+      {
+        school_id: schoolId, email: email.trim(), password, full_name: fullName.trim() || undefined,
+        phone: phone.trim() || undefined, student_ids: idsArray,
+      },
       {
         onSuccess: (result) => {
           const names = idsArray.map((id) => lookup?.students.find((s) => s.id === id)?.name ?? `#${id}`);
           onParentCreated({ id: result.id, name: fullName.trim() || email.trim(), studentNames: names });
-          setFullName(""); setEmail(""); setPassword(""); setStudentIds(new Set());
+          setFullName(""); setPhone(""); setEmail(""); setPassword(""); setStudentIds(new Set());
         },
       }
     );
@@ -498,6 +549,9 @@ function StepParents({
           <div className="flex flex-wrap items-end gap-3">
             <Field label="Full name" className="w-44">
               <Input value={fullName} onChange={(e) => setFullName(e.target.value)} />
+            </Field>
+            <Field label="Phone number" className="w-40">
+              <Input type="tel" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="9876543210" />
             </Field>
             <Field label="Email" className="w-56">
               <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
@@ -627,6 +681,9 @@ function WizardBody({ schoolId }: { schoolId: number }) {
         <TabsContent value="school">
           <StepSchool schoolId={schoolId} onContinue={() => advanceFrom("school")} />
         </TabsContent>
+        <TabsContent value="teachers">
+          <StepTeachers schoolId={schoolId} lookup={lookup.data} onContinue={() => advanceFrom("teachers")} />
+        </TabsContent>
         <TabsContent value="classes">
           <StepClasses schoolId={schoolId} lookup={lookup.data} onContinue={() => advanceFrom("classes")} />
         </TabsContent>
@@ -635,9 +692,6 @@ function WizardBody({ schoolId }: { schoolId: number }) {
         </TabsContent>
         <TabsContent value="rooms">
           <StepRooms schoolId={schoolId} lookup={lookup.data} onContinue={() => advanceFrom("rooms")} />
-        </TabsContent>
-        <TabsContent value="teachers">
-          <StepTeachers schoolId={schoolId} lookup={lookup.data} onContinue={() => advanceFrom("teachers")} />
         </TabsContent>
         <TabsContent value="students">
           <StepStudents schoolId={schoolId} lookup={lookup.data} onContinue={() => advanceFrom("students")} />

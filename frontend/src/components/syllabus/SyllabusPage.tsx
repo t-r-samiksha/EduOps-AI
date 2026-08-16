@@ -10,9 +10,10 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@
 import Field from "@/components/ui/field";
 import PageHeader from "@/components/shared/PageHeader";
 import ProgressBar from "@/components/shared/ProgressBar";
-import { useReferenceLookup } from "@/api/hooks/useTimetable";
+import { useReferenceLookup, useTimetableActive } from "@/api/hooks/useTimetable";
 import { useSyllabusSummary, useCreateSyllabusPlan, useLogCheckpoint } from "@/api/hooks/useSyllabus";
 import { useCurrentUser } from "@/api/hooks/useAuth";
+import { useAuthStore } from "@/store/authStore";
 import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { ApiError } from "@/api/client";
 
@@ -24,6 +25,12 @@ const STATUS_VARIANT: Record<string, "urgent" | "positive" | "accent"> = {
 
 function NewPlanDialog({ schoolId }: { schoolId: number }) {
   const lookup = useReferenceLookup(schoolId);
+  const { role } = useAuthStore();
+  const isTeacher = role === "teacher";
+  // GET /timetable/active already scopes to just this teacher's own slots at the
+  // backend (TimetableSlot.teacher_id == user.id) when called with no filters - real
+  // data for "classes/subjects this teacher actually teaches", no new endpoint needed.
+  const myTimetable = useTimetableActive({ academicYear: DEFAULT_ACADEMIC_YEAR, enabled: isTeacher });
   const create = useCreateSyllabusPlan();
   const [open, setOpen] = useState(false);
   const [classId, setClassId] = useState("");
@@ -31,6 +38,13 @@ function NewPlanDialog({ schoolId }: { schoolId: number }) {
   const [totalUnits, setTotalUnits] = useState("10");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
+
+  const myClassIds = new Set((myTimetable.data ?? []).map((s) => s.class_id));
+  const mySubjectIds = new Set((myTimetable.data ?? []).map((s) => s.subject_id));
+  const classOptions = isTeacher ? (lookup.data?.classes ?? []).filter((c) => myClassIds.has(c.id)) : (lookup.data?.classes ?? []);
+  const subjectOptions = isTeacher
+    ? (lookup.data?.subjects ?? []).filter((s) => mySubjectIds.has(s.id))
+    : (lookup.data?.subjects ?? []);
 
   function submit() {
     if (!classId || !subjectId || !totalUnits || !start || !end) return;
@@ -64,7 +78,7 @@ function NewPlanDialog({ schoolId }: { schoolId: number }) {
             <Select value={classId} onValueChange={setClassId}>
               <SelectTrigger><SelectValue placeholder="Select class" /></SelectTrigger>
               <SelectContent>
-                {lookup.data?.classes.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
+                {classOptions.map((c) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </Field>
@@ -72,7 +86,7 @@ function NewPlanDialog({ schoolId }: { schoolId: number }) {
             <Select value={subjectId} onValueChange={setSubjectId}>
               <SelectTrigger><SelectValue placeholder="Select subject" /></SelectTrigger>
               <SelectContent>
-                {lookup.data?.subjects.map((s) => <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>)}
+                {subjectOptions.map((s) => <SelectItem key={s.id} value={String(s.id)}>{s.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </Field>

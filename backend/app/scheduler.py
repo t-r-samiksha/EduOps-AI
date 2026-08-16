@@ -46,7 +46,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.class_ import SchoolClass
 from app.models.school import School
-from scripts.run_monthly_fee_invoicing import run_monthly_invoicing
+from scripts.run_monthly_fee_invoicing import AUTO_GENERATE_WINDOW_DAYS, run_monthly_invoicing
 from scripts.run_nightly_admin_briefing import BRIEFING_OUTPUT_DIR, compile_briefing
 from scripts.run_nightly_risk_scoring import run_nightly_scoring
 from scripts.run_nightly_syllabus_anomaly_scan import run_scan
@@ -150,7 +150,7 @@ def run_monthly_fee_invoicing_job() -> dict:
     try:
         pairs = _active_school_academic_year_pairs(session)
         for school_id, academic_year in pairs:
-            summary = run_monthly_invoicing(session, school_id, academic_year)
+            summary = run_monthly_invoicing(session, school_id, academic_year, generate_only_due_within_days=AUTO_GENERATE_WINDOW_DAYS)
             logger.info("monthly fee invoicing: school_id=%s academic_year=%s -> %s", school_id, academic_year, summary)
             totals["school_year_pairs"] += 1
             totals["records_created"] += summary["records_created"]
@@ -180,8 +180,16 @@ def build_scheduler() -> BackgroundScheduler:
         run_nightly_syllabus_anomaly_scan_job, CronTrigger(hour=2, minute=15), id=JOB_ID_SYLLABUS_ANOMALY_SCAN, replace_existing=True
     )
     scheduler.add_job(run_nightly_admin_briefing_job, CronTrigger(hour=2, minute=30), id=JOB_ID_ADMIN_BRIEFING, replace_existing=True)
-    # Monthly, 1st of the month, off-peak.
-    scheduler.add_job(run_monthly_fee_invoicing_job, CronTrigger(day=1, hour=3, minute=0), id=JOB_ID_FEE_INVOICING, replace_existing=True)
+    # NIGHTLY, not monthly - changed this session. A monthly cadence meant a fee
+    # due mid-month could sit "pending" for weeks past its due date before ever
+    # being marked overdue or getting a reminder logged, since nothing else drove
+    # that transition (schedule creation now generates records immediately, but
+    # marking overdue/reminding only happens when this job runs). Running nightly
+    # instead closes that gap - matches the other 3 real nightly jobs's cadence.
+    # Safe to run this often: generate_fee_records is idempotent (its own
+    # UniqueConstraint check) and determine_reminder tracks tier-by-index so it
+    # never resends/regresses a reminder (see fee_reminder_engine.py).
+    scheduler.add_job(run_monthly_fee_invoicing_job, CronTrigger(hour=2, minute=45), id=JOB_ID_FEE_INVOICING, replace_existing=True)
     return scheduler
 
 

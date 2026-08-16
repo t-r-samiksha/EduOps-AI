@@ -94,7 +94,7 @@ def test_default_registry_has_leave_request_and_admission_application():
 def test_under_review_admission_is_a_pending_approval(db_session, admin):
     application = AdmissionApplication(
         school_id=admin["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
-        guardian_email="g@example.com", grade_applied="Grade 8", status="under_review", submitted_by=admin["admin"].id,
+        guardian_email="g@example.com", grade_applied="8", status="under_review", submitted_by=admin["admin"].id,
     )
     db_session.add(application)
     db_session.commit()
@@ -111,7 +111,7 @@ def test_submitted_admission_is_not_yet_a_pending_approval(db_session, admin):
     # approval_aggregator.py's module docstring.
     application = AdmissionApplication(
         school_id=admin["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
-        guardian_email="g@example.com", grade_applied="Grade 8", status="submitted", submitted_by=admin["admin"].id,
+        guardian_email="g@example.com", grade_applied="8", status="submitted", submitted_by=admin["admin"].id,
     )
     db_session.add(application)
     db_session.commit()
@@ -122,7 +122,7 @@ def test_submitted_admission_is_not_yet_a_pending_approval(db_session, admin):
 def test_accepted_admission_is_not_pending(db_session, admin):
     application = AdmissionApplication(
         school_id=admin["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
-        guardian_email="g@example.com", grade_applied="Grade 8", status="accepted", submitted_by=admin["admin"].id,
+        guardian_email="g@example.com", grade_applied="8", status="accepted", submitted_by=admin["admin"].id,
     )
     db_session.add(application)
     db_session.commit()
@@ -134,7 +134,7 @@ def test_real_registry_surfaces_both_leave_request_and_admission_together(db_ses
     lr = LeaveRequest(teacher_id=teacher.id, start_date=date.today(), end_date=date.today(), reason="sick", status="pending")
     application = AdmissionApplication(
         school_id=admin["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
-        guardian_email="g@example.com", grade_applied="Grade 8", status="under_review", submitted_by=admin["admin"].id,
+        guardian_email="g@example.com", grade_applied="8", status="under_review", submitted_by=admin["admin"].id,
     )
     db_session.add_all([lr, application])
     db_session.commit()

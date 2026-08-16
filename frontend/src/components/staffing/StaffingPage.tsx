@@ -25,6 +25,7 @@ import {
 } from "@/api/hooks/useStaffing";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { DEFAULT_ACADEMIC_YEAR, DAY_LABELS } from "@/lib/constants";
+import { cn } from "@/lib/utils";
 import { ApiError } from "@/api/client";
 import type { LeaveRequest, Substitution } from "@/api/types";
 
@@ -60,16 +61,43 @@ function SubstitutionCard({
   const [pickedTeacher, setPickedTeacher] = useState<string>(
     sub.substitute_teacher_id ? String(sub.substitute_teacher_id) : sub.candidates[0] ? String(sub.candidates[0].teacher_id) : ""
   );
+  const [overrideQualification, setOverrideQualification] = useState(false);
 
   const subjectName = lookup.data?.subjects.find((s) => s.id === sub.subject_id)?.name ?? `Subject #${sub.subject_id}`;
   const className = lookup.data?.classes.find((c) => c.id === sub.class_id)?.name ?? `Class #${sub.class_id}`;
   const teacherName = (id: number) => lookup.data?.teachers.find((t) => t.id === id)?.name ?? `Teacher #${id}`;
 
   const isConfirmed = sub.status === "confirmed";
+  const hasNoSolverCandidates = sub.candidates.length === 0;
+  // Manual-override fallback for when the solver found nobody: PUT /substitution/
+  // {id}/confirm already accepts any substitute_teacher_id and independently
+  // re-checks qualification/availability/conflicts server-side regardless of what
+  // this list offers - so surfacing the full roster here is safe, just not
+  // solver-recommended (an admin picking someone genuinely unqualified/busy still
+  // gets a real conflict back, same as any other pick).
+  const manualOverrideOptions = hasNoSolverCandidates
+    ? (lookup.data?.teachers ?? []).filter((t) => t.id !== sub.original_teacher_id)
+    : [];
+
+  const conflicts = confirm.data?.conflicts ?? [];
+  const hasHardConflict = conflicts.some((c) => !c.overridable);
+  // Only the not_qualified conflict is left - real-world escalation when there's
+  // genuinely no qualified substitute (supervision-only cover). Every other
+  // conflict (already busy/substituting/unavailable/on_leave/is_original_teacher)
+  // is a real impossibility and can never reach this state.
+  const needsQualificationAck = conflicts.length > 0 && !hasHardConflict;
+
+  function handlePick(value: string) {
+    setPickedTeacher(value);
+    setOverrideQualification(false);
+  }
 
   function handleConfirm() {
     if (!sub.id || !pickedTeacher) return;
-    confirm.mutate({ substitutionId: sub.id, substituteTeacherId: Number(pickedTeacher) }, { onSuccess: () => onConfirmed() });
+    confirm.mutate(
+      { substitutionId: sub.id, substituteTeacherId: Number(pickedTeacher), overrideQualification },
+      { onSuccess: () => onConfirmed() }
+    );
   }
 
   return (
@@ -89,34 +117,75 @@ function SubstitutionCard({
 
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">Candidates</span>
-          {sub.candidates.length === 0 && <p className="text-xs text-ink-faint">No candidates returned by the solver.</p>}
+          {hasNoSolverCandidates && (
+            <p className="text-xs text-ink-faint">
+              No candidates returned by the solver - nobody is even free at this day/period, qualified or not. You can
+              still confirm any teacher manually below; the same conflict checks still apply.
+            </p>
+          )}
           {sub.candidates.map((c) => (
-            <div key={c.teacher_id} className="flex items-center justify-between rounded-xl bg-elevated/60 px-3.5 py-2 text-sm">
-              <span className="text-ink">{teacherName(c.teacher_id)}</span>
+            <div
+              key={c.teacher_id}
+              className={cn(
+                "flex items-center justify-between rounded-xl px-3.5 py-2 text-sm",
+                c.qualified ? "bg-elevated/60" : "border border-warning/40 bg-warning/10"
+              )}
+            >
+              <span className="flex items-center gap-1.5 text-ink">
+                {!c.qualified && <AlertTriangle className="h-3.5 w-3.5 text-warning" />}
+                {teacherName(c.teacher_id)}
+              </span>
               <span className="font-mono text-xs tabular-nums text-ink-muted">{(c.score * 100).toFixed(0)}% · {c.reason}</span>
             </div>
           ))}
         </div>
 
         {!readOnly && !isConfirmed && sub.id && (
-          <div className="flex flex-wrap items-end gap-2">
-            <Field label="Confirm substitute" className="min-w-[12rem] flex-1">
-              <Select value={pickedTeacher} onValueChange={setPickedTeacher}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select teacher" />
-                </SelectTrigger>
-                <SelectContent>
-                  {sub.candidates.map((c) => (
-                    <SelectItem key={c.teacher_id} value={String(c.teacher_id)}>
-                      {teacherName(c.teacher_id)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-            <Button size="sm" onClick={handleConfirm} disabled={!pickedTeacher || confirm.isPending}>
-              {confirm.isPending ? "Confirming…" : "Confirm"}
-            </Button>
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-end gap-2">
+              <Field
+                label="Confirm substitute"
+                className="min-w-[12rem] flex-1"
+                hint={hasNoSolverCandidates ? "No solver-recommended candidate - choose any teacher manually" : undefined}
+              >
+                <Select value={pickedTeacher} onValueChange={handlePick}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select teacher" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {sub.candidates.map((c) => (
+                      <SelectItem key={c.teacher_id} value={String(c.teacher_id)}>
+                        {teacherName(c.teacher_id)}
+                        {!c.qualified && " (not qualified)"}
+                      </SelectItem>
+                    ))}
+                    {manualOverrideOptions.map((t) => (
+                      <SelectItem key={t.id} value={String(t.id)}>
+                        {t.name} (manual override)
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Button
+                size="sm"
+                onClick={handleConfirm}
+                disabled={!pickedTeacher || confirm.isPending || (needsQualificationAck && !overrideQualification)}
+              >
+                {confirm.isPending ? "Confirming…" : "Confirm"}
+              </Button>
+            </div>
+            {needsQualificationAck && (
+              <label className="flex items-start gap-2 text-xs text-ink-muted">
+                <input
+                  type="checkbox"
+                  checked={overrideQualification}
+                  onChange={(e) => setOverrideQualification(e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 rounded border-border accent-accent"
+                />
+                <span>I understand this teacher isn't qualified for this subject - confirm anyway (supervision only)</span>
+              </label>
+            )}
           </div>
         )}
         {isConfirmed && sub.substitute_teacher_id && (
@@ -125,12 +194,35 @@ function SubstitutionCard({
         {!isConfirmed && readOnly && sub.substitute_teacher_id && (
           <p className="text-sm text-ink-muted">Suggested (not yet confirmed): {teacherName(sub.substitute_teacher_id)}</p>
         )}
-        {confirm.data?.conflicts && confirm.data.conflicts.length > 0 && (
-          <p className="text-sm text-urgent">{confirm.data.conflicts.map((c) => c.message).join("; ")}</p>
-        )}
+        {conflicts.length > 0 && <p className="text-sm text-urgent">{conflicts.map((c) => c.message).join("; ")}</p>}
       </CardContent>
     </Card>
   );
+}
+
+/** Coverage summary for one leave request's real Substitution rows - separate
+ * from (and shown alongside, never merged into) the leave-approval status
+ * badge: "approved" answers "is the LEAVE decided", this answers "is the
+ * COVERAGE resolved", and those are two independently-true-or-false real
+ * states. Reuses the exact same query as InlineSubstitutions below (same
+ * queryKey via useLeaveRequestSubstitutions) rather than a second fetch path -
+ * expanding "Show substitutes" on the same card is a cache hit, not a refetch.
+ * Zero-confirmed is rendered as the most attention-grabbing (urgent) of the
+ * three real states since it's the actual risk: leave approved, nobody
+ * covering it yet. */
+function CoverageBadge({ leaveRequestId }: { leaveRequestId: number }) {
+  const subs = useLeaveRequestSubstitutions({ leaveRequestId, academicYear: DEFAULT_ACADEMIC_YEAR, enabled: true });
+
+  if (subs.isError) return null;
+  if (!subs.data) return <Badge variant="neutral">Coverage: …</Badge>;
+
+  const total = subs.data.substitutions.length;
+  if (total === 0) return <Badge variant="neutral">No substitutes needed</Badge>;
+
+  const confirmed = subs.data.substitutions.filter((s) => s.status === "confirmed").length;
+  const variant = confirmed === total ? "positive" : confirmed === 0 ? "urgent" : "warning";
+
+  return <Badge variant={variant}>Coverage: {confirmed}/{total} confirmed</Badge>;
 }
 
 /** Shows the real, persisted Substitution rows for a leave request directly
@@ -281,7 +373,12 @@ function TeacherLeaveView({ schoolId }: { schoolId: number }) {
             icon={CalendarClock}
             tone={STATUS_TONE[lr.status]}
             title={`${lr.start_date} → ${lr.end_date}`}
-            badges={<Badge variant={lr.status === "pending" ? "warning" : lr.status === "approved" ? "positive" : "urgent"}>{lr.status}</Badge>}
+            badges={
+              <>
+                <Badge variant={lr.status === "pending" ? "warning" : lr.status === "approved" ? "positive" : "urgent"}>{lr.status}</Badge>
+                {lr.status === "approved" && <CoverageBadge leaveRequestId={lr.id} />}
+              </>
+            }
             message={lr.reason}
             meta={`Requested ${new Date(lr.requested_at).toLocaleDateString()}`}
           >
@@ -455,7 +552,12 @@ function AdminLeaveApprovalView({ schoolId }: { schoolId: number }) {
             icon={CalendarClock}
             tone={STATUS_TONE[lr.status]}
             title={teacherName(lr.teacher_id)}
-            badges={<Badge variant={lr.status === "approved" ? "positive" : "urgent"}>{lr.status}</Badge>}
+            badges={
+              <>
+                <Badge variant={lr.status === "approved" ? "positive" : "urgent"}>{lr.status}</Badge>
+                {lr.status === "approved" && <CoverageBadge leaveRequestId={lr.id} />}
+              </>
+            }
             message={
               <>
                 <span className="font-mono text-ink">

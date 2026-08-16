@@ -17,9 +17,9 @@ from app.services.auth import CurrentUser, get_current_user
 ACADEMIC_YEAR = "2026-27"
 
 
-def _override_user(role: str, user_id: int = 999):
+def _override_user(role: str, user_id: int = 999, school_id: int | None = None):
     def _fake_user():
-        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role)
+        return CurrentUser(id=user_id, sub=str(uuid.uuid4()), email="test@example.com", role=role, school_id=school_id)
 
     app.dependency_overrides[get_current_user] = _fake_user
 
@@ -57,7 +57,10 @@ def seed(db_session):
     room = Room(name="R1", capacity=30, room_type="classroom", school_id=school.id)
     db_session.add(room)
     db_session.flush()
-    school_class = SchoolClass(name="8A", academic_year=ACADEMIC_YEAR, school_id=school.id, class_teacher_id=teacher.id)
+    school_class = SchoolClass(
+        name="8A", academic_year=ACADEMIC_YEAR, school_id=school.id, class_teacher_id=teacher.id,
+        grade_level=8, section="A", is_active=True,
+    )
     db_session.add(school_class)
     db_session.flush()
 
@@ -221,7 +224,7 @@ def test_get_admin_approvals_shows_both_leave_request_and_admission_together(cli
 
     application = AdmissionApplication(
         school_id=seed["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
-        guardian_email="g@example.com", grade_applied="8A", status="under_review", submitted_by=seed["admin_user"].id,
+        guardian_email="g@example.com", grade_applied="8", status="under_review", submitted_by=seed["admin_user"].id,
     )
     db_session.add(application)
     db_session.commit()
@@ -236,34 +239,88 @@ def test_get_admin_approvals_shows_both_leave_request_and_admission_together(cli
 
 
 def test_approve_admission_via_unified_endpoint_creates_enrollment(client, db_session, seed):
+    """Same real, automatic accept pipeline (section auto-assignment + real
+    student account + real guardian resolution) via the shared Approvals inbox
+    entry point, not just the dedicated PATCH endpoint - decide_admission_application
+    is shared, so behavior must be identical regardless of entry point."""
+    import uuid as uuid_module
     from datetime import date
+    from unittest.mock import patch
 
     from app.models.admissions import AdmissionApplication
+    from app.models.document import Document
     from app.models.enrollment import Enrollment
+    from app.models.parent_student import ParentStudent
+    from app.models.role import Role
+    from app.models.user import User
+
+    # Accepting now hard-requires a marksheet + id_proof already linked
+    # (REQUIRED_DOCUMENT_TYPES_FOR_ACCEPTANCE) - constructed directly here rather
+    # than via the real upload/attach endpoints, matching this test's own existing
+    # direct-construction style.
+    marksheet = Document(uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="marksheet", file_url="x", status="done")
+    id_proof = Document(uploaded_by=seed["admin_user"].id, school_id=seed["school"].id, document_type="id_proof", file_url="x", status="done")
+    db_session.add_all([marksheet, id_proof])
+    db_session.flush()
 
     application = AdmissionApplication(
         school_id=seed["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
-        guardian_email="g@example.com", grade_applied="8A", status="under_review", submitted_by=seed["admin_user"].id,
+        guardian_email="g@example.com", grade_applied="8", status="under_review", submitted_by=seed["admin_user"].id,
+        ocr_document_ids=[marksheet.id, id_proof.id],
     )
     db_session.add(application)
     db_session.commit()
     db_session.refresh(application)
 
-    _override_user("admin", user_id=seed["admin_user"].id)
-    resp = client.post(
-        f"/admin/approvals/admission_application:{application.id}/decision",
-        json={"decision": "approve", "student_user_id": seed["sub_teacher"].id, "class_id": seed["class"].id},
-    )
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    with patch("app.routers.admissions.create_auth_account", side_effect=lambda **kwargs: uuid_module.uuid4()):
+        resp = client.post(f"/admin/approvals/admission_application:{application.id}/decision", json={"decision": "approve"})
     assert resp.status_code == 200
     assert resp.json() == {"id": f"admission_application:{application.id}", "status": "accepted"}
 
     db_session.refresh(application)
     assert application.status == "accepted"
-    assert application.enrolled_student_id == seed["sub_teacher"].id
+    assert application.enrolled_student_id is not None
+
+    student_role = db_session.query(Role).filter(Role.name == "student").one()
+    student = db_session.query(User).filter(User.id == application.enrolled_student_id).one()
+    assert student.role_id == student_role.id
+    assert student.full_name == "Jane Doe"
 
     enrollment = (
         db_session.query(Enrollment)
-        .filter(Enrollment.student_id == seed["sub_teacher"].id, Enrollment.class_id == seed["class"].id)
+        .filter(Enrollment.student_id == student.id, Enrollment.class_id == seed["class"].id)
         .one()
     )
     assert enrollment.is_primary is True
+
+    parent_role = db_session.query(Role).filter(Role.name == "parent").one()
+    parent = db_session.query(User).filter(User.email == "g@example.com", User.role_id == parent_role.id).one()
+    link = db_session.query(ParentStudent).filter(ParentStudent.parent_id == parent.id, ParentStudent.student_id == student.id).one_or_none()
+    assert link is not None
+
+
+def test_decide_admission_via_unified_endpoint_404s_for_another_schools_application(client, db_session, seed):
+    """Same cross-school scoping fix as the dedicated PATCH endpoint in
+    admissions.py - this is the SECOND entry point to the same decide function,
+    found live to have the identical gap during this session's manual testing."""
+    from datetime import date
+
+    from app.models.admissions import AdmissionApplication
+
+    other_school = School(name="Another School")
+    db_session.add(other_school)
+    db_session.commit()
+    db_session.refresh(other_school)
+
+    application = AdmissionApplication(
+        school_id=seed["school"].id, academic_year=ACADEMIC_YEAR, applicant_name="Jane Doe", dob=date(2015, 4, 1),
+        guardian_email="g2@example.com", grade_applied="8", status="under_review", submitted_by=seed["admin_user"].id,
+    )
+    db_session.add(application)
+    db_session.commit()
+    db_session.refresh(application)
+
+    _override_user("admin", user_id=999999, school_id=other_school.id)
+    resp = client.post(f"/admin/approvals/admission_application:{application.id}/decision", json={"decision": "approve"})
+    assert resp.status_code == 404

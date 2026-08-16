@@ -27,6 +27,10 @@ class ParentCreate(BaseModel):
     email: str
     password: str
     full_name: str | None = None
+    phone: str | None = None
+    """Real gap found live: School Management's Parents tab had no contact number
+    for a guardian at all - AdmissionApplication.guardian_phone existed but
+    belongs to the application, never carried into the parent's own account."""
     student_ids: list[int] = []
     """Real students (already created via POST /admin/students or otherwise)
     to link via ParentStudent - the same table/mechanism GET /parent/children
@@ -38,6 +42,7 @@ class ParentOut(BaseModel):
     id: int
     email: str
     full_name: str | None
+    phone: str | None
     school_id: int | None
     is_active: bool
     student_ids: list[int]
@@ -47,6 +52,7 @@ class ParentOut(BaseModel):
 
 class ParentUpdate(BaseModel):
     full_name: str | None = None
+    phone: str | None = None
     """Linked children are managed via the add/remove sub-resource endpoints
     below (POST/DELETE .../children/{student_id}), same idempotent pattern as
     teachers.py's subject qualifications - not a single big PUT that replaces
@@ -67,7 +73,7 @@ def _build_parent_out(db: Session, parent: User) -> ParentOut:
         row.student_id for row in db.query(ParentStudent).filter(ParentStudent.parent_id == parent.id).all()
     ]
     return ParentOut(
-        id=parent.id, email=parent.email, full_name=parent.full_name, school_id=parent.school_id,
+        id=parent.id, email=parent.email, full_name=parent.full_name, phone=parent.phone, school_id=parent.school_id,
         is_active=parent.is_active, student_ids=student_ids,
     )
 
@@ -92,7 +98,7 @@ def create_parent(body: ParentCreate, user: CurrentUser = Depends(_MUTATOR), db:
 
     parent_role = db.query(Role).filter(Role.name == "parent").one()
     parent = User(
-        supabase_id=supabase_id, email=body.email, full_name=body.full_name, role_id=parent_role.id,
+        supabase_id=supabase_id, email=body.email, full_name=body.full_name, phone=body.phone, role_id=parent_role.id,
         school_id=body.school_id, is_active=True,
     )
     db.add(parent)
@@ -130,6 +136,8 @@ def update_parent(parent_id: int, body: ParentUpdate, user: CurrentUser = Depend
     parent = _get_parent_or_404(db, parent_id)
     if body.full_name is not None:
         parent.full_name = body.full_name
+    if body.phone is not None:
+        parent.phone = body.phone
     db.commit()
     db.refresh(parent)
     return _build_parent_out(db, parent)

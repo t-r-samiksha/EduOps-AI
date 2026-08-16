@@ -126,7 +126,14 @@ export default function TimetablePage() {
         <div className="h-64 animate-pulse rounded-lg border border-border bg-elevated/60" />
       ) : (
         (role !== "parent" || parentStudentId !== undefined) &&
-        !error && <TimetableGrid slots={data ?? []} lookup={lookup.data} showClass={isAdminLike && !classId} editable={isAdminLike} />
+        !error && (
+          <TimetableGrid
+            slots={data ?? []}
+            lookup={lookup.data}
+            showClass={role === "teacher" || (isAdminLike && !classId)}
+            editable={isAdminLike}
+          />
+        )
       )}
     </div>
   );

@@ -1,6 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiPost } from "@/api/client";
-import type { Exam, ExamsListResponse, GenerateSchedulesResult, InvigilationDuty, SeatingResponse } from "@/api/types";
+import type {
+  Exam,
+  ExamType,
+  ExamsListResponse,
+  GenerateSchedulesResult,
+  InvigilationDuty,
+  RoomSuggestionsResult,
+  SeatingResponse,
+} from "@/api/types";
 
 export function useCreateExam() {
   const queryClient = useQueryClient();
@@ -10,12 +18,39 @@ export function useCreateExam() {
       subject_id: number;
       class_id: number;
       academic_year: string;
+      exam_type?: ExamType;
       exam_date: string;
       start_time: string;
       end_time: string;
       total_marks?: number;
     }) => apiPost<Exam>("/admin/exams", body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["exams-list"] }),
+  });
+}
+
+export function useCreateExamsForGrade() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      school_id: number;
+      subject_id: number;
+      grade_level: number;
+      academic_year: string;
+      exam_type?: ExamType;
+      exam_date: string;
+      start_time: string;
+      end_time: string;
+      total_marks?: number;
+    }) => apiPost<{ created: Exam[] }>("/admin/exams/bulk-by-grade", body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["exams-list"] }),
+  });
+}
+
+export function useRoomSuggestions(examId?: number) {
+  return useQuery({
+    queryKey: ["exam-room-suggestions", examId],
+    queryFn: () => apiGet<RoomSuggestionsResult>(`/admin/exams/${examId}/room-suggestions`),
+    enabled: examId != null,
   });
 }
 
@@ -36,10 +71,21 @@ export function useExamsList(params: { classId?: number; subjectId?: number; aca
 export function useGenerateSchedules() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ examId, rooms }: { examId: number; rooms: { room_id: number; capacity: number }[] }) =>
-      apiPost<GenerateSchedulesResult>(`/admin/exams/${examId}/schedules`, { rooms }),
-    onSuccess: (_result, { examId }) => {
-      queryClient.invalidateQueries({ queryKey: ["exam-seating", examId] });
+    mutationFn: ({
+      examId,
+      rooms,
+      dryRun,
+    }: {
+      examId: number;
+      rooms: { room_id: number; capacity: number }[];
+      dryRun: boolean;
+    }) => apiPost<GenerateSchedulesResult>(`/admin/exams/${examId}/schedules`, { rooms, dry_run: dryRun }),
+    onSuccess: (result, { examId, dryRun }) => {
+      // Only a real (non-preview) generation actually changed anything worth
+      // refetching - a dry-run preview persisted nothing.
+      if (!dryRun && result.status === "generated") {
+        queryClient.invalidateQueries({ queryKey: ["exam-seating", examId] });
+      }
     },
   });
 }

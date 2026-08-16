@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { GraduationCap, LogOut, Menu, X } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { signOut } from "@/api/auth";
+import { queryClient } from "@/api/queryClient";
 import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
 import { NAV_ITEMS, ROLE_LABEL } from "@/lib/navConfig";
@@ -68,6 +69,11 @@ export default function Layout() {
 
   async function handleLogout() {
     await signOut();
+    // Every cached query (current-user, seating, etc.) is scoped by a fixed key,
+    // not by which account fetched it - without this, whoever logs in next on
+    // this tab within the staleTime window would see the previous user's
+    // cached data (e.g. the wrong user_id, breaking "my seat" highlighting).
+    queryClient.clear();
     navigate("/login");
   }
 
