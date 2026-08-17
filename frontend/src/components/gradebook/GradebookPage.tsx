@@ -19,17 +19,24 @@ import {
   useUpsertGradebookEntry,
 } from "@/api/hooks/useGradebook";
 import { useAuthStore } from "@/store/authStore";
+import { useReferenceLookup } from "@/api/hooks/useTimetable";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 
 export default function GradebookPage() {
   const { user, role } = useAuthStore();
   const isTeacherOrAdmin = role === "teacher" || role === "admin" || role === "principal";
 
+  const currentUser = useCurrentUser().data;
+  const lookup = useReferenceLookup(currentUser?.school_id);
+  const classes = lookup.data?.classes ?? [];
+  const subjects = lookup.data?.subjects ?? [];
+
   const [selectedTerm, setSelectedTerm] = useState("Term 1");
-  const selectedClassId = 1;
+  const [selectedClassId, setSelectedClassId] = useState<number | "">("");
 
   // Queries
   const { data: classData, isLoading: isClassLoading } = useClassGradebook(
-    isTeacherOrAdmin ? selectedClassId : undefined,
+    isTeacherOrAdmin && selectedClassId ? selectedClassId : undefined,
     selectedTerm
   );
   const { data: studentData, isLoading: isStudentLoading } = useStudentGradebook(
@@ -41,18 +48,20 @@ export default function GradebookPage() {
 
   // Grade Entry Modal
   const [isEntryOpen, setIsEntryOpen] = useState(false);
-  const [entryStudentId, setEntryStudentId] = useState<number>(1);
-  const entrySubjectId = 1;
+  const [entryStudentId, setEntryStudentId] = useState<number | "">("" as any);
+  const [entrySubjectId, setEntrySubjectId] = useState<number | "">("");
+  const [entryClassId, setEntryClassId] = useState<number | "">("");
   const [entryAssessmentType, setEntryAssessmentType] = useState<string>("assignment");
   const [entryScore, setEntryScore] = useState<string>("");
   const [entryMaxScore, setEntryMaxScore] = useState<string>("100");
 
   const handleSaveEntry = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!entrySubjectId || !entryClassId) return;
     await upsertMutation.mutateAsync({
-      student_id: entryStudentId,
-      subject_id: entrySubjectId,
-      class_id: selectedClassId,
+      student_id: Number(entryStudentId) || 0,
+      subject_id: Number(entrySubjectId),
+      class_id: Number(entryClassId),
       term: selectedTerm,
       assessment_type: entryAssessmentType,
       score: parseFloat(entryScore) || 0,
@@ -98,13 +107,26 @@ export default function GradebookPage() {
           </div>
 
           {isTeacherOrAdmin && (
-            <Button
-              onClick={() => setIsEntryOpen(true)}
-              className="flex items-center gap-1.5 shadow-sm text-xs font-medium"
-            >
-              <Plus className="h-4 w-4" />
-              Record Mark
-            </Button>
+            <>
+              {/* Class Selector for teacher view */}
+              <select
+                value={selectedClassId}
+                onChange={(e) => setSelectedClassId(e.target.value ? Number(e.target.value) : "")}
+                className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                <option value="">Select class…</option>
+                {classes.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+              <Button
+                onClick={() => setIsEntryOpen(true)}
+                className="flex items-center gap-1.5 shadow-sm text-xs font-medium"
+              >
+                <Plus className="h-4 w-4" />
+                Record Mark
+              </Button>
+            </>
           )}
         </div>
       </div>
@@ -130,6 +152,12 @@ export default function GradebookPage() {
                     <tr>
                       <td colSpan={6} className="p-8 text-center text-muted-foreground">
                         Loading gradebook...
+                      </td>
+                    </tr>
+                  ) : !selectedClassId ? (
+                    <tr>
+                      <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                        Select a class section above to view the gradebook.
                       </td>
                     </tr>
                   ) : !classData?.students || classData.students.length === 0 ? (
@@ -180,6 +208,7 @@ export default function GradebookPage() {
                             size="sm"
                             onClick={() => {
                               setEntryStudentId(st.student_id);
+                              setEntryClassId(selectedClassId || "");
                               setIsEntryOpen(true);
                             }}
                             className="h-8 text-xs flex items-center gap-1 ml-auto"
@@ -323,6 +352,38 @@ export default function GradebookPage() {
           </DialogHeader>
 
           <form onSubmit={handleSaveEntry} className="space-y-4 mt-2">
+            {/* Class & Subject selectors */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs font-semibold text-foreground">Class Section *</label>
+                <select
+                  required
+                  value={entryClassId}
+                  onChange={(e) => setEntryClassId(e.target.value ? Number(e.target.value) : "")}
+                  className="w-full mt-1 p-2 rounded-lg border bg-background text-sm"
+                >
+                  <option value="">Select class…</option>
+                  {classes.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-foreground">Subject *</label>
+                <select
+                  required
+                  value={entrySubjectId}
+                  onChange={(e) => setEntrySubjectId(e.target.value ? Number(e.target.value) : "")}
+                  className="w-full mt-1 p-2 rounded-lg border bg-background text-sm"
+                >
+                  <option value="">Select subject…</option>
+                  {subjects.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
             <div>
               <label className="text-xs font-semibold text-foreground">Assessment Type</label>
               <select
@@ -370,7 +431,7 @@ export default function GradebookPage() {
               <Button type="button" variant="ghost" onClick={() => setIsEntryOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={upsertMutation.isPending}>
+              <Button type="submit" disabled={upsertMutation.isPending || !entrySubjectId || !entryClassId}>
                 {upsertMutation.isPending ? "Saving..." : "Save Grade"}
               </Button>
             </div>

@@ -24,10 +24,17 @@ import {
   Question,
 } from "@/api/hooks/useQuizzes";
 import { useAuthStore } from "@/store/authStore";
+import { useReferenceLookup } from "@/api/hooks/useTimetable";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 
 export default function QuizzesPage() {
   const { role } = useAuthStore();
   const isTeacherOrAdmin = role === "teacher" || role === "admin" || role === "principal";
+
+  const currentUser = useCurrentUser().data;
+  const lookup = useReferenceLookup(currentUser?.school_id);
+  const classes = lookup.data?.classes ?? [];
+  const subjects = lookup.data?.subjects ?? [];
 
   const { data: quizzes = [], isLoading } = useQuizzes();
   const createQuizMutation = useCreateQuiz();
@@ -37,7 +44,8 @@ export default function QuizzesPage() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDescription, setNewDescription] = useState("");
-  const newClassId = 1;
+  const [newClassId, setNewClassId] = useState<number | "">("");
+  const [newSubjectId, setNewSubjectId] = useState<number | "">("");
   const [newDuration, setNewDuration] = useState("30");
   const [newQuestions, setNewQuestions] = useState<Question[]>([
     {
@@ -114,12 +122,13 @@ export default function QuizzesPage() {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTitle.trim()) return;
+    if (!newTitle.trim() || !newClassId) return;
 
     await createQuizMutation.mutateAsync({
       title: newTitle,
       description: newDescription,
       class_id: Number(newClassId),
+      subject_id: newSubjectId ? Number(newSubjectId) : undefined,
       duration_minutes: Number(newDuration),
       questions: newQuestions,
     });
@@ -127,6 +136,8 @@ export default function QuizzesPage() {
     setIsCreateOpen(false);
     setNewTitle("");
     setNewDescription("");
+    setNewClassId("");
+    setNewSubjectId("");
     setNewQuestions([
       {
         question_text: "",
@@ -428,7 +439,7 @@ export default function QuizzesPage() {
           <form onSubmit={handleCreateSubmit} className="space-y-4 mt-2">
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-xs font-semibold text-foreground">Quiz Title</label>
+                <label className="text-xs font-semibold text-foreground">Quiz Title *</label>
                 <Input
                   required
                   placeholder="e.g. Chapter 4 Calculus Quiz"
@@ -447,6 +458,37 @@ export default function QuizzesPage() {
                   onChange={(e) => setNewDuration(e.target.value)}
                   className="mt-1"
                 />
+              </div>
+            </div>
+
+            {/* Class & Subject selectors */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs font-semibold text-foreground">Class Section *</label>
+                <select
+                  required
+                  value={newClassId}
+                  onChange={(e) => setNewClassId(e.target.value ? Number(e.target.value) : "")}
+                  className="w-full mt-1 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  <option value="">Select class…</option>
+                  {classes.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-foreground">Subject (optional)</label>
+                <select
+                  value={newSubjectId}
+                  onChange={(e) => setNewSubjectId(e.target.value ? Number(e.target.value) : "")}
+                  className="w-full mt-1 rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  <option value="">All subjects</option>
+                  {subjects.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
               </div>
             </div>
 
@@ -543,7 +585,7 @@ export default function QuizzesPage() {
               <Button type="button" variant="ghost" onClick={() => setIsCreateOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={createQuizMutation.isPending}>
+              <Button type="submit" disabled={createQuizMutation.isPending || !newClassId || !newTitle.trim()}>
                 {createQuizMutation.isPending ? "Creating..." : "Publish Quiz"}
               </Button>
             </div>

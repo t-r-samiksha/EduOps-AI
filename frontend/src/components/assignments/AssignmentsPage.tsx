@@ -58,8 +58,10 @@ function getStatusBadge(status?: SubmissionStatus | string) {
   }
 }
 
-function formatDeadline(iso: string) {
+function formatDeadline(iso: string | null | undefined) {
+  if (!iso) return { formatted: "No deadline", relative: "No deadline", isPast: false };
   const d = new Date(iso);
+  if (isNaN(d.getTime())) return { formatted: "Invalid date", relative: "Invalid date", isPast: false };
   const now = new Date();
   const diffMs = d.getTime() - now.getTime();
   const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
@@ -146,10 +148,14 @@ export default function AssignmentsPage() {
   const [gradeInput, setGradeInput] = useState("");
   const [feedbackInput, setFeedbackInput] = useState("");
 
+  // Mutations
   const createMutation = useCreateAssignment();
   const submitMutation = useSubmitAssignment(activeSubmitAssignment?.id);
   const gradeMutation = useGradeSubmission(activeQueueAssignment?.id);
-  const uploadMutation = useUploadAssignmentFile(activeSubmitAssignment?.id || 0);
+  // Use a separate state for the assignment being attached (teacher creates an assignment)
+  // so the upload URL is never undefined/0 during student submission.
+  const [pendingCreateAssignmentId] = useState<number>(0);
+  const uploadMutation = useUploadAssignmentFile(activeSubmitAssignment?.id || pendingCreateAssignmentId);
   const deleteMutation = useDeleteAssignment();
 
   // Submissions for active queue
