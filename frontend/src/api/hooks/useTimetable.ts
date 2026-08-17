@@ -158,11 +158,11 @@ export interface LookupResponse {
   classes: LookupClass[];
 }
 
-export function useReferenceLookup(schoolId: number | null | undefined) {
+export function useReferenceLookup(schoolId?: number | null) {
   return useQuery({
-    queryKey: ["reference-lookup", schoolId],
-    queryFn: () => apiGet<LookupResponse>("/reference/lookup", { school_id: schoolId as number }),
+    queryKey: ["reference-lookup", schoolId ?? "current"],
+    queryFn: () =>
+      apiGet<LookupResponse>("/reference/lookup", schoolId != null ? { school_id: schoolId } : undefined),
     staleTime: 5 * 60_000,
-    enabled: schoolId != null,
   });
 }

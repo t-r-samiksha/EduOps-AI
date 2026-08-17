@@ -196,7 +196,7 @@ export default function ClassroomStreamPage() {
                     className="w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent"
                     required
                   >
-                    <option value="">Select a class</option>
+                    <option value="">{lookup.isLoading ? "Loading classes..." : "Select a class"}</option>
                     {lookup.data?.classes.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
@@ -215,7 +215,7 @@ export default function ClassroomStreamPage() {
                     className="w-full rounded-xl border border-border bg-surface px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent"
                     required
                   >
-                    <option value="">Select a subject</option>
+                    <option value="">{lookup.isLoading ? "Loading subjects..." : "Select a subject"}</option>
                     {lookup.data?.subjects.map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.name}
