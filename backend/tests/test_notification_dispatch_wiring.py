@@ -166,8 +166,30 @@ def test_fee_reminders_notify_every_linked_parent(client, db_session, seed, over
         rows = _notifications_for(db_session, seed[recipient].id, "fee_reminder")
         assert len(rows) == 1, recipient
         assert rows[0].source_id == overdue_fee.id
-        assert rows[0].priority == "urgent"
         assert "Term 1 Tuition" in rows[0].body
+        # NOT urgent, and this assertion CHANGED deliberately. The fixture fee is 21
+        # days overdue, which reaches the 14-day tier, not the urgent 30-day one.
+        # Priority used to be `urgent if record.status == "overdue"`, making EVERY
+        # overdue fee urgent regardless of age - so a fee one day past due sent an
+        # urgent notification while alert_aggregator called the same fee `normal`
+        # (its FEE_OVERDUE_URGENT_DAYS is 30). Both modules' docstrings say those two
+        # thresholds must agree "rather than each inventing its own independent
+        # number"; the old priority was the one inventing. Priority now comes from
+        # determine_reminder's tier severity, so they do agree.
+        assert rows[0].priority == "normal"
+
+
+def test_fee_reminder_priority_escalates_at_the_thirty_day_tier(client, db_session, seed, overdue_fee):
+    """The other half of the assertion above: urgency is real when it is earned."""
+    overdue_fee.due_date = date.today() - timedelta(days=45)
+    db_session.commit()
+
+    _override_user("admin", seed["admin"].id, seed["school"].id)
+    assert client.post("/admin/fees/reminders", json={"overdue_only": True}).status_code == 200
+
+    rows = _notifications_for(db_session, seed["parent_one"].id, "fee_reminder")
+    assert len(rows) == 1
+    assert rows[0].priority == "urgent"
 
 
 def test_fee_reminders_do_not_cross_school_boundaries(client, db_session, seed, overdue_fee):

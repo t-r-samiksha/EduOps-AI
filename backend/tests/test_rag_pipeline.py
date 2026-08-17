@@ -156,6 +156,181 @@ def test_search_chunks_orders_by_cosine_distance_ascending(db_session, rag_seed)
     assert hits[0].distance < hits[1].distance
 
 
+# --- SILENTLY WRONG: citation attribution across source types ---------------------
+
+
+def test_verified_answer_chunk_never_inherits_a_resource_title(db_session, rag_seed):
+    """REGRESSION. `kb_chunks.source_id` is polymorphic by source_type, but the
+    Resource join used to match on `Resource.id == source_id` alone. A
+    verified_doubt_answer chunk whose source_id happened to equal a resource's id
+    therefore inherited that resource's title, and the bot cited a teacher's reply
+    under an unrelated document's name - no error, no empty result, just a
+    confidently wrong footnote.
+
+    Asserted by making the collision certain: the verified-answer chunk's source_id
+    is set to a REAL resource's id.
+    """
+    from app.models.knowledge import SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+    from app.models.resource import Resource
+
+    resource = Resource(
+        title="Grade 3 Water Cycle Notes.pdf",
+        file_url="resources/test/water-cycle.pdf",
+        mime_type="application/pdf",
+        school_id=rag_seed["school"].id,
+        grade_level=3,
+        uploaded_by=rag_seed["teacher"].id,
+    )
+    db_session.add(resource)
+    db_session.flush()
+
+    shared = _unit_vector(axis=0)
+    db_session.add_all([
+        # A genuine resource chunk - must still resolve its title.
+        KbChunk(source_type=SOURCE_TYPE_RESOURCE, source_id=resource.id, chunk_index=0,
+                chunk_text="the water cycle has four stages",
+                embedding=shared, school_id=rag_seed["school"].id, grade_level=3),
+        # A verified answer DELIBERATELY sharing that integer as its source_id.
+        KbChunk(source_type=SOURCE_TYPE_VERIFIED_DOUBT_ANSWER, source_id=resource.id, chunk_index=0,
+                chunk_text="Question: why does ice float? Answer: ice is less dense than water.",
+                embedding=_unit_vector(axis=1), school_id=rag_seed["school"].id, grade_level=3),
+    ])
+    db_session.commit()
+
+    hits = search_chunks(
+        db_session, query_embedding=shared, school_id=rag_seed["school"].id, grade_level=3, top_k=5
+    )
+    by_type = {h.source_type: h for h in hits}
+    assert set(by_type) == {SOURCE_TYPE_RESOURCE, SOURCE_TYPE_VERIFIED_DOUBT_ANSWER}
+
+    # The resource chunk keeps its real title - the fix is not "stop joining".
+    assert by_type[SOURCE_TYPE_RESOURCE].title == "Grade 3 Water Cycle Notes.pdf"
+    # The verified answer must NOT wear it...
+    assert by_type[SOURCE_TYPE_VERIFIED_DOUBT_ANSWER].title != "Grade 3 Water Cycle Notes.pdf"
+    # ...and with no thread behind that id, it degrades to the bare label rather than
+    # rendering None. (The attributed form is covered by the test below.)
+    assert by_type[SOURCE_TYPE_VERIFIED_DOUBT_ANSWER].title == "Verified answer"
+
+
+def test_verified_answer_citation_names_the_teacher_who_verified_it(db_session, rag_seed):
+    """THE DEMO BEAT, asserted. A verified answer must cite the human who certified it -
+    "Verified answer · Meera Nair · \"...\"" - because a footnote reading like a
+    document title is indistinguishable from the PDF-citing behaviour it replaces."""
+    from app.models.doubt import DoubtThread, ThreadReply
+    from app.models.knowledge import SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+
+    thread = DoubtThread(
+        school_id=rag_seed["school"].id,
+        class_id=rag_seed["class_a"].id,
+        author_id=rag_seed["student_a"].id,
+        title="Why does ice float on water?",
+        body="Everything else sinks when it gets solid.",
+        resolved=True,
+    )
+    db_session.add(thread)
+    db_session.flush()
+    reply = ThreadReply(
+        thread_id=thread.id,
+        author_id=rag_seed["teacher"].id,
+        body="Water expands when it freezes, so ice is less dense than liquid water.",
+    )
+    db_session.add(reply)
+    db_session.flush()
+    thread.verified_reply_id = reply.id
+
+    vector = _unit_vector(axis=3)
+    db_session.add(
+        KbChunk(
+            source_type=SOURCE_TYPE_VERIFIED_DOUBT_ANSWER, source_id=thread.id, chunk_index=0,
+            chunk_text="Question: Why does ice float on water?\nAnswer: ice is less dense.",
+            embedding=vector, school_id=rag_seed["school"].id, grade_level=3,
+        )
+    )
+    db_session.commit()
+
+    hits = search_chunks(
+        db_session, query_embedding=vector, school_id=rag_seed["school"].id, grade_level=3, top_k=1
+    )
+    assert hits[0].source_type == SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+    title = hits[0].title
+    assert title is not None
+    assert title.startswith("Verified answer · ")
+    # Names the verifying teacher, and quotes the question.
+    assert rag_seed["teacher"].full_name in title or rag_seed["teacher"].email in title
+    assert '"Why does ice float on water?"' in title
+
+
+def test_resource_chunks_still_resolve_their_title_after_the_join_was_gated(db_session, rag_seed):
+    """Behaviour-neutrality for the live bot's own path: gating the join on
+    source_type must not stop an ordinary resource chunk from being attributed."""
+    from app.models.resource import Resource
+
+    resource = Resource(
+        title="Photosynthesis Handout.md",
+        file_url="resources/test/photosynthesis.md",
+        mime_type="text/markdown",
+        school_id=rag_seed["school"].id,
+        grade_level=3,
+        uploaded_by=rag_seed["teacher"].id,
+    )
+    db_session.add(resource)
+    db_session.flush()
+
+    vector = _unit_vector(axis=2)
+    db_session.add(
+        KbChunk(source_type=SOURCE_TYPE_RESOURCE, source_id=resource.id, chunk_index=0,
+                chunk_text="plants convert light into sugar",
+                embedding=vector, school_id=rag_seed["school"].id, grade_level=3)
+    )
+    db_session.commit()
+
+    hits = search_chunks(
+        db_session, query_embedding=vector, school_id=rag_seed["school"].id, grade_level=3, top_k=1
+    )
+    assert hits[0].title == "Photosynthesis Handout.md"
+    assert hits[0].source_type == SOURCE_TYPE_RESOURCE
+
+
+def test_resource_citation_still_serialises_the_original_four_fields(db_session, rag_seed):
+    """PINS THE ADDITIVE CONTRACT of Citation.source_type.
+
+    The field was added with a default so an older client could not break: every
+    pre-existing citation is a resource, and omitting source_type at construction has
+    to keep working. "Additive with a default" stays non-breaking right up until
+    someone tightens the model - makes it required, drops the default, or reorders
+    the constructor - six months from now with no idea this property was relied on.
+    This test is what fails at that moment instead of a client.
+    """
+    from app.routers.bots import Citation
+
+    # Constructing WITHOUT source_type must work - that is the whole guarantee.
+    citation = Citation(chunk_id=11, source_id=22, title="Grade 3 Notes.pdf", snippet="the water cycle")
+
+    dumped = citation.model_dump()
+    assert dumped == {
+        "chunk_id": 11,
+        "source_id": 22,
+        "title": "Grade 3 Notes.pdf",
+        "snippet": "the water cycle",
+        "source_type": SOURCE_TYPE_RESOURCE,
+    }
+    # The original four remain required; only the new field is optional.
+    from app.main import app
+
+    schema = app.openapi()["components"]["schemas"]["Citation"]
+    assert set(schema["required"]) == {"chunk_id", "source_id", "title", "snippet"}
+    assert "source_type" in schema["properties"]
+
+    # And a verified answer serialises its own type rather than the default.
+    from app.models.knowledge import SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+
+    verified = Citation(
+        chunk_id=12, source_id=9, title="Verified answer", snippet="ice is less dense",
+        source_type=SOURCE_TYPE_VERIFIED_DOUBT_ANSWER,
+    )
+    assert verified.model_dump()["source_type"] == SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+
+
 # --- SECURITY: retrieval scope ----------------------------------------------------
 
 

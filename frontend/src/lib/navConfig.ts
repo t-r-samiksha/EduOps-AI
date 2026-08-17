@@ -8,6 +8,7 @@ import {
   ClipboardList,
   FileCheck2,
   LayoutGrid,
+  MessagesSquare,
   School,
   ScanText,
   ScanFace,
@@ -17,11 +18,20 @@ import {
 } from "lucide-react";
 import type { Role } from "@/store/authStore";
 
+/** A live count rendered on a nav item. The Layout resolves the key to a hook -
+ * navConfig stays a plain data module with no data-fetching in it.
+ *
+ * Exists because the fee payment queue became a TAB rather than its own page, and an
+ * inbox that parents are waiting on cannot only be visible once you're already on the
+ * right screen. */
+export type NavBadge = "pending-fee-payment-requests";
+
 export interface NavItem {
   label: string;
   path: string;
   icon: LucideIcon;
   end?: boolean;
+  badge?: NavBadge;
 }
 
 export const NAV_ITEMS: Record<Role, NavItem[]> = {
@@ -34,7 +44,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Syllabus", path: "/admin/syllabus", icon: BookOpenCheck },
     { label: "Approvals", path: "/admin/approvals", icon: FileCheck2 },
     { label: "Document OCR", path: "/admin/ocr", icon: ScanText },
-    { label: "Fees", path: "/admin/fees", icon: Wallet },
+    { label: "Fees", path: "/admin/fees", icon: Wallet, badge: "pending-fee-payment-requests" },
     { label: "Admissions", path: "/admin/admissions", icon: ClipboardList },
     { label: "Exams", path: "/admin/exams", icon: Armchair },
     { label: "School Management", path: "/admin/school-management", icon: School },
@@ -48,7 +58,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Syllabus", path: "/principal/syllabus", icon: BookOpenCheck },
     { label: "Approvals", path: "/principal/approvals", icon: FileCheck2 },
     { label: "Document OCR", path: "/principal/ocr", icon: ScanText },
-    { label: "Fees", path: "/principal/fees", icon: Wallet },
+    { label: "Fees", path: "/principal/fees", icon: Wallet, badge: "pending-fee-payment-requests" },
     { label: "Admissions", path: "/principal/admissions", icon: ClipboardList },
     { label: "Exams", path: "/principal/exams", icon: Armchair },
     { label: "School Management", path: "/principal/school-management", icon: School },
@@ -57,6 +67,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Dashboard", path: "/teacher", icon: LayoutGrid, end: true },
     { label: "Timetable", path: "/teacher/timetable", icon: CalendarClock },
     { label: "Attendance", path: "/teacher/attendance", icon: ScanFace },
+    { label: "Doubts", path: "/teacher/doubts", icon: MessagesSquare },
     { label: "Staffing", path: "/teacher/staffing", icon: Users },
     { label: "Early-Warning", path: "/teacher/risk", icon: AlertTriangle },
     { label: "Syllabus", path: "/teacher/syllabus", icon: BookOpenCheck },
@@ -66,6 +77,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
     { label: "Attendance", path: "/student/attendance", icon: ScanFace },
+    { label: "Doubts", path: "/student/doubts", icon: MessagesSquare },
     { label: "Doubt Bot", path: "/student/doubt-bot", icon: Bot },
     { label: "Timetable", path: "/student/timetable", icon: CalendarClock },
     { label: "Fees", path: "/student/fees", icon: Wallet },

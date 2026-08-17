@@ -88,7 +88,7 @@ from sqlalchemy.orm import Session
 from app.models.attendance import AttendanceReconciliation
 from app.models.class_ import SchoolClass
 from app.models.document import Document, ExtractedEntity
-from app.models.fees import FeeRecord
+from app.models.fees import FeeRecord, has_outstanding_balance
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
 from app.models.subject import Subject
@@ -459,13 +459,25 @@ counts as seriously overdue rather than each inventing its own independent numbe
 
 
 def fee_overdue_alerts(db: Session, school_id: int | None = None, today: date | None = None) -> list[Alert]:
-    """Open FeeRecord rows in status="overdue" - the 8th alert source, added in the
-    Fees & Admissions session. Severity escalates at FEE_OVERDUE_URGENT_DAYS, same
-    threshold services/fee_reminder_engine.py treats as its final escalated tier.
-    FeeRecord has no school_id of its own (only student_id/fee_schedule_id - see
-    models/fees.py) so scoping goes through the student, same as risk_flag."""
+    """Fee records with money still owed past their due date - the 8th alert source,
+    added in the Fees & Admissions session. Severity escalates at
+    FEE_OVERDUE_URGENT_DAYS, same threshold services/fee_reminder_engine.py treats as
+    its final escalated tier. FeeRecord has no school_id of its own (only
+    student_id/fee_schedule_id - see models/fees.py) so scoping goes through the
+    student, same as risk_flag.
+
+    PARTIALLY PAID COUNTS AS OVERDUE, and used not to. This filtered on
+    `status == "overdue"` alone, but recording any payment flips a record to
+    "partial" - so paying 1 rupee of a 350 rupee fee removed it from this feed
+    entirely, 30 days late and 349 rupees short. Paying part of a debt made the school
+    stop tracking it, which is backwards: a partial payer is still a debtor, and a
+    more actionable one than someone who has paid nothing.
+
+    Uses `has_outstanding_balance` so this and the reminder engine agree about what
+    "still owed" means, rather than each carrying its own status list.
+    """
     today = today or _utcnow().date()
-    query = db.query(FeeRecord).filter(FeeRecord.status == "overdue")
+    query = db.query(FeeRecord).filter(has_outstanding_balance(today))
     if school_id is not None:
         query = query.filter(FeeRecord.student_id.in_(_user_ids_in_school(db, school_id) or [-1]))
     records = query.all()
@@ -474,15 +486,17 @@ def fee_overdue_alerts(db: Session, school_id: int | None = None, today: date | 
     for r in records:
         days_overdue = (today - r.due_date).days
         balance = round(r.amount_due - r.amount_paid, 2)
+        part_paid = r.amount_paid > 0
         alerts.append(
             Alert(
                 id=f"fee_overdue:{r.id}",
                 source="fee_overdue",
                 severity="urgent" if days_overdue >= FEE_OVERDUE_URGENT_DAYS else "normal",
-                title="Overdue fee",
+                title="Partly paid fee overdue" if part_paid else "Overdue fee",
                 message=(
                     f"{_named(names, r.student_id, 'Student')} has {balance} overdue, "
                     f"{days_overdue} days past due date {r.due_date}"
+                    + (f" ({r.amount_paid} of {r.amount_due} paid)" if part_paid else "")
                 ),
                 entity_type="fee_records",
                 entity_id=r.id,

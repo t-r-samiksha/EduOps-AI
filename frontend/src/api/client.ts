@@ -50,6 +50,35 @@ export async function apiGet<T>(path: string, params?: Record<string, string | n
   return handle<T>(res);
 }
 
+/** GET a binary response as a Blob.
+ *
+ * Needed because some stored files live in PRIVATE Supabase Storage buckets and are
+ * read back through a role-scoped API route (fee payment proofs), so there is no
+ * plain URL an <img src> could point at - the request has to carry the bearer token.
+ * Callers turn the blob into an object URL and revoke it when done. */
+export async function apiGetBlob(path: string, params?: Record<string, string | number | undefined>): Promise<Blob> {
+  const url = new URL(API_BASE_URL + path);
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined) url.searchParams.set(key, String(value));
+    }
+  }
+  const res = await fetch(url, { headers: await authHeaders() });
+  if (!res.ok) {
+    let detail = res.statusText;
+    let body: unknown;
+    try {
+      body = await res.json();
+      const parsed = body as { detail?: unknown };
+      detail = typeof parsed.detail === "string" ? parsed.detail : JSON.stringify(parsed.detail ?? body);
+    } catch {
+      // A binary endpoint's error path still returns JSON, but don't assume it.
+    }
+    throw new ApiError(res.status, detail, body);
+  }
+  return res.blob();
+}
+
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(API_BASE_URL + path, {
     method: "POST",

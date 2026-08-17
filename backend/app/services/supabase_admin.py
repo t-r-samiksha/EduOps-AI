@@ -88,10 +88,20 @@ public: a resource belongs to one class and the read path is GET /resources, whi
 applies role scoping. A public bucket would make every object URL-guessable and route
 around that entirely."""
 
+PAYMENT_PROOFS_BUCKET = "payment-proofs"
+"""Private bucket holding parents' fee payment proof photos (UPI screenshots, bank
+slips, office receipts).
 
-def ensure_resources_bucket() -> None:
-    """Create the `resources` bucket if it does not exist. Safe to call on every
-    upload - a bucket that already exists is left alone.
+DELIBERATELY NOT the `resources` bucket, even though the upload path is otherwise
+identical: `resources` is RAG source material, and POST /bots/reindex reads that
+bucket back to re-chunk and embed its contents. A fee receipt dropped in there would
+become retrievable through the chatbots - someone else's payment reference surfacing
+in a Doubt Bot answer. Separate bucket, and nothing indexes this one."""
+
+
+def ensure_bucket(bucket: str = RESOURCES_BUCKET) -> None:
+    """Create `bucket` if it does not exist. Safe to call on every upload - a bucket
+    that already exists is left alone.
 
     Supabase raises rather than returning a flag when the bucket already exists, and
     the error text/status has varied across supabase-py versions, so this checks the
@@ -102,20 +112,20 @@ def ensure_resources_bucket() -> None:
         existing = {b.name if hasattr(b, "name") else b.get("name") for b in client.storage.list_buckets()}
     except Exception:  # noqa: BLE001 - listing is an optimization, not a gate
         existing = set()
-    if RESOURCES_BUCKET in existing:
+    if bucket in existing:
         return
     try:
-        client.storage.create_bucket(RESOURCES_BUCKET, options={"public": False})
+        client.storage.create_bucket(bucket, options={"public": False})
     except Exception as exc:  # noqa: BLE001
         if "already exist" in str(exc).lower() or "duplicate" in str(exc).lower():
             return
         raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"Could not create the {RESOURCES_BUCKET!r} storage bucket: {exc}"
+            status.HTTP_502_BAD_GATEWAY, f"Could not create the {bucket!r} storage bucket: {exc}"
         ) from exc
 
 
-def upload_resource_file(*, path: str, data: bytes, content_type: str) -> str:
-    """Persist bytes to the resources bucket and return the object path.
+def upload_file(*, path: str, data: bytes, content_type: str, bucket: str = RESOURCES_BUCKET) -> str:
+    """Persist bytes to a private bucket and return the object path.
 
     UNLIKE routers/documents.py's OCR upload, which builds a descriptive file_url
     string and throws the bytes away, this actually stores the file - which is what
@@ -124,10 +134,10 @@ def upload_resource_file(*, path: str, data: bytes, content_type: str) -> str:
     `upsert` is on so re-uploading the same path replaces rather than 409s, keeping the
     seed script idempotent.
     """
-    ensure_resources_bucket()
+    ensure_bucket(bucket)
     client = _new_client()
     try:
-        client.storage.from_(RESOURCES_BUCKET).upload(
+        client.storage.from_(bucket).upload(
             path=path,
             file=data,
             file_options={"content-type": content_type, "upsert": "true"},
@@ -139,16 +149,32 @@ def upload_resource_file(*, path: str, data: bytes, content_type: str) -> str:
     return path
 
 
-def download_resource_file(path: str) -> bytes:
-    """Fetch a stored resource back. Used by ingestion so re-indexing reads from
-    storage rather than requiring the original upload request's bytes."""
+def download_file(path: str, bucket: str = RESOURCES_BUCKET) -> bytes:
+    """Fetch a stored object back. Used by ingestion so re-indexing reads from
+    storage rather than requiring the original upload request's bytes, and by the
+    fee payment proof read route."""
     client = _new_client()
     try:
-        return client.storage.from_(RESOURCES_BUCKET).download(path)
+        return client.storage.from_(bucket).download(path)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, f"Failed to read stored file {path!r}: {exc}"
         ) from exc
+
+
+# The original resources-only names, kept as thin wrappers so every existing call
+# site (routers/resources.py, services/ingestion.py, the seed scripts) is untouched
+# by the bucket parameter being added above.
+def ensure_resources_bucket() -> None:
+    ensure_bucket(RESOURCES_BUCKET)
+
+
+def upload_resource_file(*, path: str, data: bytes, content_type: str) -> str:
+    return upload_file(path=path, data=data, content_type=content_type, bucket=RESOURCES_BUCKET)
+
+
+def download_resource_file(path: str) -> bytes:
+    return download_file(path, bucket=RESOURCES_BUCKET)
 
 
 def sign_in_and_get_access_token(*, email: str, password: str) -> str:

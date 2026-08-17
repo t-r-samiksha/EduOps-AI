@@ -32,6 +32,7 @@ from app.routers import (
     students,
     syllabus,
     teachers,
+    threads,
     timetable,
 )
 
@@ -80,6 +81,7 @@ app.include_router(remarks.router)
 app.include_router(notifications.router)
 app.include_router(resources.router)
 app.include_router(bots.router)
+app.include_router(threads.router)
 
 
 @app.get("/health")

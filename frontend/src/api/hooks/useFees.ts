@@ -1,6 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiPatch, apiPost } from "@/api/client";
-import type { FeeSchedule, FeeStatusItem, InvoicingRunResult, PaymentResult, RemindersResult } from "@/api/types";
+import type {
+  FeeSchedule,
+  FeeStatusItem,
+  InvoicingRunResult,
+  PaymentResult,
+  RemindersPreview,
+  RemindersResult,
+} from "@/api/types";
 
 export function useFeeSchedules(params: { schoolId?: number; academicYear?: string } = {}) {
   return useQuery({
@@ -61,6 +68,19 @@ export function useFeeStatus(params: { classId?: number; studentId?: number; sta
   });
 }
 
+/** Dry run of the reminder cadence for the current filters. Read-only - writes no
+ * FeeReminder rows and sends nothing. Answers "why zero?" before you press anything. */
+export function useRemindersPreview(params: { classId?: number; overdueOnly: boolean }) {
+  return useQuery({
+    queryKey: ["fee-reminders-preview", params.classId, params.overdueOnly],
+    queryFn: () =>
+      apiGet<RemindersPreview>("/admin/fees/reminders/preview", {
+        class_id: params.classId,
+        overdue_only: String(params.overdueOnly),
+      }),
+  });
+}
+
 export function useTriggerReminders() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -68,6 +88,10 @@ export function useTriggerReminders() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fee-status"] });
       queryClient.invalidateQueries({ queryKey: ["admin-alerts"] });
+      // The preview is now stale by exactly the reminders that just fired.
+      queryClient.invalidateQueries({ queryKey: ["fee-reminders-preview"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications-unread-count"] });
     },
   });
 }

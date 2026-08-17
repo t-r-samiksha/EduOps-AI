@@ -27,8 +27,11 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.knowledge import SOURCE_TYPE_RESOURCE, KbChunk
+from app.models.class_ import SchoolClass
+from app.models.doubt import DoubtThread, ThreadReply
+from app.models.knowledge import SOURCE_TYPE_RESOURCE, SOURCE_TYPE_VERIFIED_DOUBT_ANSWER, KbChunk
 from app.models.resource import Resource
+from app.models.user import User
 from app.services.llm import embed_documents
 from app.services.supabase_admin import download_resource_file
 
@@ -176,6 +179,132 @@ def ingest_resource(db: Session, resource_id: int) -> int:
     resource.indexed_at = datetime.now(timezone.utc)
     db.flush()
     return len(chunks)
+
+
+# --- Verified doubt answers ------------------------------------------------------------
+# The second consumer of kb_chunks, and the reason SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+# exists. Shares embed_documents() and the upsert-by-unique-key idiom above; skips the
+# parts that only make sense for a file.
+#
+# NO STORAGE FETCH, NO SPLITTER. There is no file - the content is two rows already in
+# Postgres - and a Q&A pair is a few hundred characters, well under CHUNK_TARGET_CHARS,
+# so chunk_text() would return a single chunk anyway. Calling it would just add a code
+# path that could one day split a question away from its answer, which is the one way
+# this content must never be divided.
+
+
+def build_verified_answer_text(*, title: str, body: str, answer: str, verifier: str | None) -> str:
+    """The chunk text for a verified answer: the question, then the certified answer.
+
+    Shaped as an explicit Q&A because that is what it has to match at retrieval time -
+    a student asking the same question should land on near-identical text. The
+    attribution line is inside the CHUNK, not only in the citation title, so the LLM
+    generating the answer also knows this came from a teacher and can say so.
+    """
+    question = f"Question: {title}".strip()
+    if body.strip():
+        question = f"{question}\n{body.strip()}"
+    attribution = f"Verified answer from {verifier}" if verifier else "Verified answer from the class teacher"
+    return f"{question}\n\n{attribution}:\n{answer.strip()}"
+
+
+def ingest_verified_doubt_answer(db: Session, thread_id: int) -> int:
+    """Embed and upsert one thread's verified answer. Returns chunks written (0 or 1).
+
+    Does NOT commit, same convention as ingest_resource - the verify endpoint owns the
+    transaction so a failed embedding rolls back the verification too, rather than
+    leaving a thread marked verified whose answer never reached the corpus.
+
+    Raises ValueError for states the caller should turn into a 4xx: unknown thread, no
+    verified reply, or a class with no grade_level (kb_chunks.grade_level is NOT NULL,
+    so there would be nothing to scope the chunk by - a clean 400 beats an
+    IntegrityError).
+    """
+    thread = db.query(DoubtThread).filter(DoubtThread.id == thread_id).one_or_none()
+    if thread is None:
+        raise ValueError(f"Unknown thread_id {thread_id}")
+    if thread.verified_reply_id is None:
+        raise ValueError(f"Thread {thread_id} has no verified reply to ingest")
+
+    reply = db.query(ThreadReply).filter(ThreadReply.id == thread.verified_reply_id).one_or_none()
+    if reply is None:
+        raise ValueError(f"Thread {thread_id}'s verified reply {thread.verified_reply_id} is missing")
+
+    school_class = db.query(SchoolClass).filter(SchoolClass.id == thread.class_id).one_or_none()
+    if school_class is None or school_class.grade_level is None:
+        raise ValueError("This thread's class has no grade level set, so its answer cannot be indexed")
+
+    verifier = db.query(User).filter(User.id == reply.author_id).one_or_none()
+    text = build_verified_answer_text(
+        title=thread.title,
+        body=thread.body,
+        answer=reply.body,
+        verifier=(verifier.full_name or verifier.email) if verifier else None,
+    )
+
+    vector = embed_documents([text])[0]
+
+    # GRADE-level, not class-level - see models/doubt.py's asymmetry note. The thread
+    # stays private to its class; the certified answer joins the grade's corpus.
+    existing = db.scalars(
+        select(KbChunk).where(
+            KbChunk.source_type == SOURCE_TYPE_VERIFIED_DOUBT_ANSWER,
+            KbChunk.source_id == thread.id,
+        )
+    ).all()
+
+    row = next((r for r in existing if r.chunk_index == 0), None)
+    if row is None:
+        db.add(
+            KbChunk(
+                source_type=SOURCE_TYPE_VERIFIED_DOUBT_ANSWER,
+                source_id=thread.id,
+                chunk_index=0,
+                chunk_text=text,
+                embedding=vector,
+                school_id=thread.school_id,
+                grade_level=school_class.grade_level,
+                subject_id=thread.subject_id,
+            )
+        )
+    else:
+        # Re-verifying a different reply overwrites in place - the unique key makes
+        # this idempotent, so a teacher changing their mind doesn't leave two answers
+        # to the same question competing in retrieval.
+        row.chunk_text = text
+        row.embedding = vector
+        row.school_id = thread.school_id
+        row.grade_level = school_class.grade_level
+        row.subject_id = thread.subject_id
+        row.indexed_at = datetime.now(timezone.utc)
+
+    # Defensive: a Q&A pair is always one chunk, but if an earlier version of this ever
+    # wrote more, they would stay searchable forever quoting a retracted answer.
+    for extra in existing:
+        if extra.chunk_index > 0:
+            db.delete(extra)
+
+    db.flush()
+    return 1
+
+
+def remove_verified_doubt_answer(db: Session, thread_id: int) -> int:
+    """Delete a thread's chunks from the corpus. Returns how many were removed.
+
+    THE RETRACTION HALF, and not optional. Unverifying that only cleared a flag would
+    leave the answer permanently searchable - a teacher who withdrew a wrong answer
+    would keep watching the bot cite it, with no way to remove it short of SQL.
+    """
+    rows = db.scalars(
+        select(KbChunk).where(
+            KbChunk.source_type == SOURCE_TYPE_VERIFIED_DOUBT_ANSWER,
+            KbChunk.source_id == thread_id,
+        )
+    ).all()
+    for row in rows:
+        db.delete(row)
+    db.flush()
+    return len(rows)
 
 
 def ingest_pending(db: Session, *, school_id: int | None = None) -> tuple[int, int]:

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.knowledge import ChatbotLog
+from app.models.knowledge import SOURCE_TYPE_RESOURCE, ChatbotLog
 from app.models.resource import Resource
 from app.models.school import School
 from app.services.auth import CurrentUser, require_role
@@ -75,6 +75,13 @@ class Citation(BaseModel):
     source_id: int
     title: str | None
     snippet: str
+    source_type: str = SOURCE_TYPE_RESOURCE
+    """Which table `source_id` points at - `resource` for an uploaded document,
+    `verified_doubt_answer` for a teacher-verified doubt reply.
+
+    ADDITIVE, with a default, so it cannot break an older client: the field is new,
+    every existing citation is a resource, and the frontend needs it to label a
+    verified answer as a teacher's answer rather than as a class note."""
 
 
 class StudentAskResponse(BaseModel):
@@ -160,6 +167,7 @@ def student_ask(
                 source_id=c.source_id,
                 title=c.title,
                 snippet=c.chunk_text[:280].strip(),
+                source_type=c.source_type,
             )
             for c in chunks
         ],

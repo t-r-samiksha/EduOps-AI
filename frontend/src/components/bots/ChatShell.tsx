@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, BookOpen, ChevronDown, Send, User as UserIcon } from "lucide-react";
+import { BadgeCheck, Bot, BookOpen, ChevronDown, Send, User as UserIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
@@ -49,9 +49,18 @@ interface Turn {
   error: string | null;
 }
 
+const VERIFIED_ANSWER_SOURCE_TYPE = "verified_doubt_answer";
+
 /** Citations as expandable footnotes - the visible proof the answer is grounded in
  * the class's own material rather than the model's general knowledge. Collapsed by
- * default so the answer stays readable; one click shows the exact retrieved text. */
+ * default so the answer stays readable; one click shows the exact retrieved text.
+ *
+ * THE SUMMARY LABEL IS SOURCE-AWARE, not a constant string. The knowledge base now
+ * holds two kinds of thing: uploaded documents, and answers a teacher marked as
+ * verified in a doubt thread. Calling the latter a "class note" is simply untrue -
+ * and it buries the one fact that makes the feature legible, which is that a human
+ * teacher's reply is now what the bot is citing. So a turn grounded only in verified
+ * answers says so, and a mixed turn names both. */
 function Citations({
   citations,
   turnId,
@@ -60,11 +69,26 @@ function Citations({
 }: {
   citations: Citation[];
   turnId: number;
+  /** What this bot calls its DOCUMENT sources - verified answers describe themselves. */
   label: string;
   fallbackTitle: string;
 }) {
   const [open, setOpen] = useState(false);
   if (citations.length === 0) return null;
+
+  const verifiedCount = citations.filter((c) => c.source_type === VERIFIED_ANSWER_SOURCE_TYPE).length;
+  const documentCount = citations.length - verifiedCount;
+
+  // "2 sources from your class notes" / "1 verified teacher answer" /
+  // "3 sources: 2 from your class notes, 1 verified teacher answer".
+  const verifiedPhrase = `${verifiedCount} verified teacher answer${verifiedCount === 1 ? "" : "s"}`;
+  const documentPhrase = `${documentCount} source${documentCount === 1 ? "" : "s"} ${label}`;
+  const summary =
+    verifiedCount === 0
+      ? documentPhrase
+      : documentCount === 0
+        ? verifiedPhrase
+        : `${documentPhrase}, ${verifiedPhrase}`;
 
   const panelId = `citations-${turnId}`;
   return (
@@ -74,26 +98,41 @@ function Citations({
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-controls={panelId}
-        aria-label={`${open ? "Hide" : "Show"} the ${citations.length} sources for this answer`}
+        aria-label={`${open ? "Hide" : "Show"} ${summary} for this answer`}
         className="flex items-center gap-1.5 rounded text-xs font-medium text-ink-muted transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
-        <span>
-          {citations.length} source{citations.length === 1 ? "" : "s"} {label}
-        </span>
-        <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-180")} aria-hidden="true" />
+        <span className="text-left">{summary}</span>
+        <ChevronDown className={cn("h-3.5 w-3.5 shrink-0 transition-transform", open && "rotate-180")} aria-hidden="true" />
       </button>
 
       {open && (
         <ol id={panelId} className="mt-2 flex flex-col gap-2">
-          {citations.map((citation, index) => (
-            <li key={citation.chunk_id} className="rounded-lg bg-elevated/50 px-3 py-2">
-              <p className="font-display text-xs font-semibold text-ink">
-                [{index + 1}] {citation.title ?? fallbackTitle}
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-ink-muted">{citation.snippet}…</p>
-            </li>
-          ))}
+          {citations.map((citation, index) => {
+            const isVerified = citation.source_type === VERIFIED_ANSWER_SOURCE_TYPE;
+            return (
+              <li
+                key={citation.chunk_id}
+                className={cn(
+                  "rounded-lg px-3 py-2",
+                  // A verified answer is visually distinct in the footnote list too -
+                  // the positive edge is the same signal the thread view uses for it.
+                  isVerified ? "border-l-2 border-l-positive bg-positive/5" : "bg-elevated/50"
+                )}
+              >
+                <p className="font-display text-xs font-semibold text-ink">
+                  {isVerified && (
+                    <BadgeCheck
+                      className="mr-1 inline h-3.5 w-3.5 -translate-y-px text-positive"
+                      aria-hidden="true"
+                    />
+                  )}
+                  [{index + 1}] {citation.title ?? fallbackTitle}
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-ink-muted">{citation.snippet}…</p>
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>

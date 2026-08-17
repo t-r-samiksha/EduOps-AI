@@ -23,6 +23,7 @@ import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useAttendanceAnalytics } from "@/api/hooks/useAttendance";
 import { ApiError } from "@/api/client";
 import { DAY_LABELS } from "@/lib/constants";
+import { daysAgoIso } from "@/lib/dates";
 import { csvFilename, downloadCsv, toCsv } from "@/lib/csv";
 import type { AttendanceBucket, StudentBucket } from "@/api/types";
 import { cn } from "@/lib/utils";
@@ -31,11 +32,7 @@ import { cn } from "@/lib/utils";
  * Also the default for the defaulter list, and user-overridable in the filter row. */
 const DEFAULT_THRESHOLD = 75;
 
-function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
-}
+const daysAgo = daysAgoIso;
 
 /** A meter, per the mark spec: 10px track (well under the 24px cap), fill with a
  * 4px rounded data-end and a square baseline, and an unfilled track that is a

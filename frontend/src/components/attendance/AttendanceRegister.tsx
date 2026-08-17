@@ -23,6 +23,7 @@ import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useAttendanceRegister, useMarkManualAttendance } from "@/api/hooks/useAttendance";
 import { ApiError } from "@/api/client";
 import { DAY_LABELS } from "@/lib/constants";
+import { shiftIsoDate, todayIso } from "@/lib/dates";
 import { csvFilename, downloadCsv, toCsv } from "@/lib/csv";
 import type { AttendanceStatus, RegisterCell, RegisterPeriod, RegisterStudent } from "@/api/types";
 import { cn } from "@/lib/utils";
@@ -45,16 +46,6 @@ const UNMARKED_CELL = "border-dashed border-border bg-elevated/40 text-ink-faint
 /** Keys that set a status directly, so a teacher can run down a column without
  * ever touching the mouse. */
 const KEY_TO_STATUS: Record<string, AttendanceStatus> = { p: "present", a: "absent", l: "late" };
-
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function shiftIso(iso: string, days: number): string {
-  const d = new Date(`${iso}T00:00:00`);
-  d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
-}
 
 function cellKey(studentId: number, slotId: number): string {
   return `${studentId}:${slotId}`;
@@ -281,7 +272,7 @@ export default function AttendanceRegister({ schoolId }: { schoolId: number }) {
                   size="icon"
                   className="h-10 w-9 shrink-0"
                   aria-label="Previous day"
-                  onClick={() => setDate((d) => shiftIso(d, -1))}
+                  onClick={() => setDate((d) => shiftIsoDate(d,-1))}
                 >
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
@@ -291,7 +282,7 @@ export default function AttendanceRegister({ schoolId }: { schoolId: number }) {
                   size="icon"
                   className="h-10 w-9 shrink-0"
                   aria-label="Next day"
-                  onClick={() => setDate((d) => shiftIso(d, 1))}
+                  onClick={() => setDate((d) => shiftIsoDate(d,1))}
                 >
                   <ChevronRight className="h-4 w-4" />
                 </Button>

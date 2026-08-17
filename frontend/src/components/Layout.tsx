@@ -7,7 +7,8 @@ import { queryClient } from "@/api/queryClient";
 import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
-import { NAV_ITEMS, ROLE_LABEL } from "@/lib/navConfig";
+import { NAV_ITEMS, ROLE_LABEL, type NavBadge } from "@/lib/navConfig";
+import { useFeePaymentRequests } from "@/api/hooks/useFeePaymentRequests";
 import { cn } from "@/lib/utils";
 
 function Logo({ expanded = true }: { expanded?: boolean }) {
@@ -26,6 +27,31 @@ function Logo({ expanded = true }: { expanded?: boolean }) {
         <span className="ml-1 font-mono text-xs tracking-widest text-accent">AI</span>
       </div>
     </div>
+  );
+}
+
+/** Resolves a NavItem's badge key to a live count.
+ *
+ * Kept here rather than in navConfig so that module stays pure data. Renders nothing
+ * at zero - a permanent "0" beside a nav label is noise, and the point of a badge is
+ * that its presence means something. */
+function NavBadgeCount({ badge, expanded }: { badge: NavBadge; expanded: boolean }) {
+  // Same query key as the Fees page and the dashboard tile, so all three share one
+  // request and update together.
+  const queue = useFeePaymentRequests({ live: badge === "pending-fee-payment-requests" });
+  const count = queue.data?.pending_count ?? 0;
+  if (count === 0) return null;
+
+  return (
+    <span
+      className={cn(
+        "ml-auto shrink-0 rounded-full bg-urgent px-1.5 py-0.5 text-[0.625rem] font-bold tabular-nums text-urgent-foreground transition-opacity duration-300",
+        expanded ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+      )}
+      title={`${count} fee payment claim${count === 1 ? "" : "s"} awaiting confirmation`}
+    >
+      {count}
+    </span>
   );
 }
 
@@ -57,6 +83,7 @@ function SidebarNav({ onNavigate, expanded = true }: { onNavigate?: () => void; 
           >
             {item.label}
           </span>
+          {item.badge && <NavBadgeCount badge={item.badge} expanded={expanded} />}
         </NavLink>
       ))}
     </nav>

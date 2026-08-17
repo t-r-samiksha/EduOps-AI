@@ -329,6 +329,134 @@ export interface MyAttendanceRecordsResponse {
   days: MyRecordDay[];
 }
 
+// --- Fee payment confirmation loop ------------------------------------------
+
+export type PaymentMethod = "UPI" | "Bank Transfer" | "Cash" | "Other";
+export const PAYMENT_METHODS: PaymentMethod[] = ["UPI", "Bank Transfer", "Cash", "Other"];
+
+export type PaymentRequestStatus = "pending" | "confirmed" | "rejected";
+
+/** What the parent sees, folding an open or recently-rejected claim into the canonical
+ * record status. `paid` is the ONLY settled state — anything short of the full amount
+ * stays visible as incomplete until it is settled. */
+export type DerivedFeeStatus = "unpaid" | "partially_paid" | "payment_pending" | "paid" | "rejected";
+
+export interface FeePaymentRequestSummary {
+  id: number;
+  fee_record_id: number;
+  amount: number;
+  payment_method: string;
+  payment_reference: string;
+  status: PaymentRequestStatus;
+  submitted_at: string;
+  reviewed_at: string | null;
+  rejection_reason: string | null;
+  has_proof: boolean;
+}
+
+export interface ParentFeeItem {
+  fee_record_id: number;
+  fee_type: string;
+  amount_due: number;
+  amount_paid: number;
+  outstanding: number;
+  due_date: string;
+  /** The canonical fee_records.status. */
+  record_status: string;
+  derived_status: DerivedFeeStatus;
+  request: FeePaymentRequestSummary | null;
+}
+
+export interface ParentFeesResponse {
+  student_id: number;
+  student_name: string;
+  items: ParentFeeItem[];
+}
+
+export interface FeePaymentRequestItem {
+  id: number;
+  fee_record_id: number;
+  student_id: number;
+  student_name: string;
+  class_name: string | null;
+  parent_id: number;
+  parent_name: string;
+  fee_type: string;
+  amount: number;
+  amount_due: number;
+  amount_paid: number;
+  outstanding: number;
+  payment_method: string;
+  payment_reference: string;
+  has_proof: boolean;
+  status: PaymentRequestStatus;
+  submitted_at: string;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  rejection_reason: string | null;
+}
+
+export interface FeePaymentRequestQueue {
+  items: FeePaymentRequestItem[];
+  /** Total pending for the school, ignoring any status filter - so the dashboard
+   * badge and a filtered queue view can share one request. */
+  pending_count: number;
+}
+
+export interface ConfirmPaymentRequestResult {
+  request: FeePaymentRequestItem;
+  fee_record: PaymentResult;
+}
+
+// --- Doubt threads ----------------------------------------------------------
+
+export interface ThreadReply {
+  id: number;
+  thread_id: number;
+  author_id: number;
+  author_name: string;
+  body: string;
+  created_at: string;
+  /** The reply a teacher certified as the answer. Flagged in place so the UI can pin
+   * it without cross-referencing verified_reply_id. */
+  is_verified: boolean;
+}
+
+export interface DoubtThread {
+  id: number;
+  school_id: number;
+  class_id: number;
+  class_name: string | null;
+  subject_id: number | null;
+  title: string;
+  body: string;
+  author_id: number;
+  author_name: string;
+  resolved: boolean;
+  verified_reply_id: number | null;
+  reply_count: number;
+  created_at: string;
+  verified_reply: ThreadReply | null;
+}
+
+export interface DoubtThreadDetail extends DoubtThread {
+  /** Chronological. */
+  replies: ThreadReply[];
+}
+
+export interface ThreadVerifyResult {
+  thread: DoubtThreadDetail;
+  chunks_written: number;
+  /** Human-readable confirmation that the answer reached the bot's knowledge base —
+   * the causal link a reader needs to see, so it is rendered inline and stays put. */
+  kb_note: string;
+}
+
+export interface ThreadUnverifyResult {
+  thread: DoubtThreadDetail;
+  chunks_deleted: number;
+}
+
 // --- Staffing & Substitutes -------------------------------------------------
 
 export interface LeaveRequest {
@@ -646,18 +774,55 @@ export interface FeeSchedule {
   records_generated: boolean;
 }
 
+export interface FeeStatusClaim {
+  id: number;
+  status: PaymentRequestStatus;
+  amount: number;
+  payment_method: string;
+  payment_reference: string;
+  submitted_at: string;
+  rejection_reason: string | null;
+  has_proof: boolean;
+}
+
 export interface FeeStatusItem {
   student_id: number;
   fee_record_id: number;
   amount_due: number;
   amount_paid: number;
+  outstanding: number;
   due_date: string;
+  /** The canonical fee_records.status — knows nothing about payment claims. */
   status: "pending" | "partial" | "paid" | "overdue" | string;
   fee_type: string;
+  /** The open claim against this fee, else the most recent closed one. Without
+   * this, staff saw "overdue" on a fee a parent had already reported paying. */
+  claim: FeeStatusClaim | null;
 }
 
 export interface RemindersResult {
   sent_count: number;
+}
+
+export interface ReminderTierBucket {
+  cadence_reason: string;
+  severity: "normal" | "urgent" | string;
+  count: number;
+}
+
+/** Dry run of a reminder trigger — what it would do and why. Exists because
+ * "0 reminder(s) recorded as due" is indistinguishable from a broken button. */
+export interface RemindersPreview {
+  /** Records matching the status filter, before the day-tier gate. */
+  in_scope: number;
+  due_now: number;
+  by_tier: ReminderTierBucket[];
+  /** Due today or later — can never produce a reminder whatever the scope says. */
+  not_yet_due: number;
+  waiting_for_next_tier: number;
+  fully_escalated: number;
+  next_due_date: string | null;
+  next_due_count: number;
 }
 
 export interface InvoicingRunResult {
@@ -931,6 +1096,11 @@ export interface Citation {
   source_id: number;
   title: string | null;
   snippet: string;
+  /** Which kind of thing was cited: `resource` for an uploaded document,
+   * `verified_doubt_answer` for a reply a teacher marked verified in a doubt thread.
+   * The footnote label depends on it — calling a teacher's verified answer a "class
+   * note" would be untrue, and would bury the fact that makes the feature legible. */
+  source_type: "resource" | "verified_doubt_answer" | string;
 }
 
 export interface BotAskResponse {

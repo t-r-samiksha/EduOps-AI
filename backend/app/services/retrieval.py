@@ -11,14 +11,37 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 from app.models.class_ import SchoolClass
+from app.models.doubt import DoubtThread, ThreadReply
 from app.models.enrollment import Enrollment
-from app.models.knowledge import KbChunk
+from app.models.knowledge import SOURCE_TYPE_RESOURCE, SOURCE_TYPE_VERIFIED_DOUBT_ANSWER, KbChunk
 from app.models.resource import Resource
+from app.models.user import User
 
 DEFAULT_TOP_K = 5
+
+
+def verified_answer_title(thread_title: str | None, verifier: str | None) -> str:
+    """The citation title for a teacher-verified doubt answer.
+
+    THIS STRING IS THE DEMO. The whole point of ingesting verified answers is that the
+    bot visibly starts citing a human teacher instead of a PDF, and the footnote is
+    where a reader sees that. "Grade 3 Notes.pdf" and "Verified answer · Meera Nair"
+    are the same mechanism telling two completely different stories, so the
+    attribution is built here rather than left to each caller to format.
+
+    Degrades in order: full form, then without the teacher's name, then a bare label -
+    a citation must never render as "None" because a join came back empty.
+    """
+    label = "Verified answer"
+    if verifier:
+        label = f"{label} · {verifier}"
+    if thread_title:
+        label = f'{label} · "{thread_title}"'
+    return label
 
 
 @dataclass(frozen=True)
@@ -29,6 +52,10 @@ class RetrievedChunk:
     distance: float
     title: str | None
     subject_id: int | None = None
+    source_type: str = SOURCE_TYPE_RESOURCE
+    """Which table `source_id` points at. Callers need this to tell an uploaded
+    document apart from a teacher-verified answer - they are cited differently, and
+    before this field existed there was no way to distinguish them downstream."""
 
 
 def infer_subject_id(chunks: list[RetrievedChunk]) -> int | None:
@@ -119,8 +146,43 @@ def search_chunks(
     """
     distance = KbChunk.embedding.cosine_distance(query_embedding)
     query = (
-        db.query(KbChunk, distance.label("distance"), Resource.title)
-        .outerjoin(Resource, Resource.id == KbChunk.source_id)
+        db.query(
+            KbChunk,
+            distance.label("distance"),
+            Resource.title,
+            DoubtThread.title.label("thread_title"),
+            User.full_name.label("verifier_name"),
+            User.email.label("verifier_email"),
+        )
+        # THE source_type CONDITION IS LOAD-BEARING, not defensive tidiness.
+        #
+        # `kb_chunks.source_id` is polymorphic by design (see that column's
+        # docstring) - a resources.id for a `resource` chunk, a doubt_threads.id for
+        # a `verified_doubt_answer` one. Joining on `Resource.id == source_id` ALONE
+        # matches whatever resource happens to share that integer, so a verified
+        # answer with source_id=9 inherited resources[9]'s title and the bot cited a
+        # teacher's reply under an unrelated PDF's name. No error, no empty result -
+        # just a confidently wrong footnote, which is the worst failure mode a
+        # citation has.
+        #
+        # It was latent only because nothing wrote the second source type yet.
+        .outerjoin(
+            Resource,
+            and_(Resource.id == KbChunk.source_id, KbChunk.source_type == SOURCE_TYPE_RESOURCE),
+        )
+        # The verified-answer half of the same pattern, gated identically. Chained
+        # through the thread's verified reply to its author, so the citation can name
+        # the teacher who certified it - one query, no N+1: these only match for rows
+        # that are actually verified answers.
+        .outerjoin(
+            DoubtThread,
+            and_(
+                DoubtThread.id == KbChunk.source_id,
+                KbChunk.source_type == SOURCE_TYPE_VERIFIED_DOUBT_ANSWER,
+            ),
+        )
+        .outerjoin(ThreadReply, ThreadReply.id == DoubtThread.verified_reply_id)
+        .outerjoin(User, User.id == ThreadReply.author_id)
         .filter(KbChunk.school_id == school_id, KbChunk.grade_level == grade_level)
     )
     if subject_id is not None:
@@ -133,8 +195,13 @@ def search_chunks(
             source_id=chunk.source_id,
             chunk_text=chunk.chunk_text,
             distance=float(dist),
-            title=title,
+            title=(
+                verified_answer_title(thread_title, verifier_name or verifier_email)
+                if chunk.source_type == SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+                else resource_title
+            ),
             subject_id=chunk.subject_id,
+            source_type=chunk.source_type,
         )
-        for chunk, dist, title in rows
+        for chunk, dist, resource_title, thread_title, verifier_name, verifier_email in rows
     ]

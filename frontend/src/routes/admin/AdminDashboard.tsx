@@ -1,11 +1,13 @@
 import { useState } from "react";
-import { AlertOctagon, Inbox, ShieldCheck } from "lucide-react";
+import { Link } from "react-router-dom";
+import { AlertOctagon, Inbox, Receipt, ShieldCheck } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
 import AlertRow from "@/components/alerts/AlertRow";
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
 import { useAlerts, useAlertsSummary, useAlertsLiveStream, useResolveAlert } from "@/api/hooks/useAlerts";
+import { useFeePaymentRequests } from "@/api/hooks/useFeePaymentRequests";
 import type { Severity } from "@/api/types";
 
 function AlertFeed({ severity }: { severity?: Severity }) {
@@ -50,6 +52,42 @@ function AlertFeed({ severity }: { severity?: Severity }) {
   );
 }
 
+/** Pending fee payment claims, as a live link into the review queue.
+ *
+ * A parent submits on their phone and this number changes here without a reload -
+ * that is the whole reason it polls and refetches on window focus (see
+ * useFeePaymentRequests' `live`) rather than fetching once on mount. A badge that
+ * only updates on navigation makes the loop look dead exactly when it should look
+ * alive. Hidden entirely at zero: an always-present "0" is noise on a dashboard
+ * whose job is surfacing what needs attention. */
+function PaymentRequestsBadge() {
+  const queue = useFeePaymentRequests({ live: true });
+  const pending = queue.data?.pending_count ?? 0;
+  if (pending === 0) return null;
+
+  return (
+    <Link
+      to="/admin/fees?tab=requests"
+      className="flex flex-1 items-start justify-between gap-3 rounded-2xl border border-transparent bg-warning px-4 py-3.5 text-warning-foreground shadow-floating transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+    >
+      <span className="flex flex-col gap-0.5">
+        <span className="text-xs font-medium uppercase tracking-wide opacity-80">Payment claims</span>
+        <span className="font-display text-2xl font-bold">{pending}</span>
+        <span className="text-xs opacity-80">
+          {pending === 1 ? "parent waiting on confirmation" : "parents waiting on confirmation"} · review now
+        </span>
+      </span>
+      <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warning-foreground/10">
+        <Receipt className="h-4 w-4" />
+        <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-urgent opacity-75" />
+          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-urgent" />
+        </span>
+      </span>
+    </Link>
+  );
+}
+
 export default function AdminDashboard() {
   const summary = useAlertsSummary();
   useAlertsLiveStream(true);
@@ -71,6 +109,7 @@ export default function AdminDashboard() {
       />
 
       <div className="flex flex-wrap gap-3">
+        <PaymentRequestsBadge />
         <StatTile label="Total open" value={summary.data?.total ?? 0} icon={Inbox} tone="neutral" />
         <StatTile label="Urgent" value={summary.data?.by_severity.urgent ?? 0} icon={AlertOctagon} tone="urgent" emphasize />
         <StatTile label="Normal" value={summary.data?.by_severity.normal ?? 0} icon={ShieldCheck} tone="positive" />

@@ -10,10 +10,37 @@ already had a reminder sent for it, not a narrow day-of-week window - a job that
 misses a day (weekends, a skipped run) still catches up correctly on the next run,
 rather than needing to run on the exact day N to ever fire that tier.
 
-  7 days overdue:  first reminder,  normal severity - a friendly nudge.
-  14 days overdue: second reminder, normal severity - escalating language.
-  30 days overdue: third reminder,  urgent severity - genuinely admin-attention-
+  1 day overdue:   first notice,    normal severity - the due date has passed.
+  7 days overdue:  reminder,        normal severity - a friendly nudge.
+  14 days overdue: reminder,        normal severity - escalating language.
+  30 days overdue: final reminder,  urgent severity - genuinely admin-attention-
                     worthy, matches alert_aggregator.py's two-tier severity scheme.
+
+WHY THE 1-DAY TIER EXISTS (added after the 7/14/30 original)
+------------------------------------------------------------------------------
+Without it, `fee_records.status` and this engine disagreed about the word
+"overdue". The invoicing job flips a record to "overdue" the moment its due_date
+passes, so the admin's fee list showed ten red overdue cards while triggering
+reminders produced zero - correct on both sides, and indistinguishable from a
+broken button. A school that marks a fee overdue on day 1 and then says nothing
+for a week is also just odd; real ones send an immediate past-due notice and
+escalate from there. Now anything the UI calls overdue earns at least one notice.
+
+THE EXISTING TIERS' `cadence_reason` STRINGS ARE UNCHANGED, DELIBERATELY
+------------------------------------------------------------------------------
+Note the labels below read "7 days overdue - first reminder" even though the
+1-day notice now precedes it. That inconsistency is on purpose and must stay:
+`already_sent_reasons` is matched against `cadence_reason` values already
+PERSISTED in fee_reminders rows. Renaming a tier would orphan every historical
+row carrying the old string - it would no longer resolve to a tier index, so
+`highest_sent_index` would fall back to -1 and a reminder that already went out
+would fire again. Tidier names are not worth re-sending a fee reminder to a
+parent. Add new tiers; never rename an existing one without a data migration.
+
+Adding the tier at index 0 is safe for history for the same reason the
+skipped-lower-tier regression test exists: eligibility requires
+`i > highest_sent_index`, so a record that already received the 7-day tier can
+never fire the day-1 notice retroactively.
 
 Once every tier a record has reached has already fired, determine_reminder()
 correctly returns should_send=False - already at maximum escalation, nothing new to
@@ -27,6 +54,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 REMINDER_TIERS: tuple[tuple[int, str, str], ...] = (
+    (1, "normal", "due date passed - first notice"),
     (7, "normal", "7 days overdue - first reminder"),
     (14, "normal", "14 days overdue - second reminder"),
     (30, "urgent", "30 days overdue - third reminder, escalated"),

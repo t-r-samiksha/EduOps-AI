@@ -1485,6 +1485,8 @@ repo-wide gap, not a partial extension of something that already existed. Wired 
 | timetable | `PUT /update` | `update` | `timetable_slots` |
 | attendance | `PUT /{id}/review` | `review` | `attendance_records` |
 | attendance | `POST /manual` | `manual_mark` | `attendance_records` |
+| fees | `PUT /admin/fee-payment-requests/{id}/confirm` | `record_payment` + `confirm_fee_payment_request` | `fee_records` + `fee_payment_requests` |
+| fees | `PUT /admin/fee-payment-requests/{id}/reject` | `reject_fee_payment_request` | `fee_payment_requests` |
 | staffing | `PUT /staff/approve_leave` | `approve`/`reject` | `leave_requests` |
 | staffing | `PUT /substitution/{id}/confirm` | `confirm` | `substitutions` |
 | risk | `PUT /{id}/acknowledge` | `acknowledge` | `risk_flags` |
@@ -1564,12 +1566,76 @@ All of the above are idempotent - re-running never creates duplicate `FeeRecord`
 tracking, see `fee_reminder_engine.py`), so calling any combination of these
 repeatedly is always safe.
 
-**Reminder cadence, per playbook's "heuristic engine":** 7/14/30 days overdue,
+**Reminder cadence, per playbook's "heuristic engine":** **1**/7/14/30 days overdue,
 escalating to `urgent` severity at 30 (matching the alert feed's own threshold) -
 round numbers, not calibrated against real payment-behavior data.
 `FeeReminder.sent_at` stays null: checked, no email-sending infrastructure exists
 anywhere in this repo (same finding as Command Center's briefing email) - a row here
 means "the system determined a reminder was due," not "an email was delivered."
+
+**⚠️ A PART PAYMENT NO LONGER SILENCES A DEBT — behaviour change.** `POST /admin/fees/
+records/{id}/payment` flips a record's status from `overdue` to `partial` as soon as any
+money is recorded, and both this endpoint's scope and the Command Center's `fee_overdue`
+alert source used to filter on `status == "overdue"` **independently**. So paying ₹1 of
+a ₹350 fee removed it from reminders *and* from the alert feed, while ₹349 stayed unpaid
+and the due date stayed weeks in the past. Paying part of a debt made the school stop
+chasing it.
+
+Both now share one predicate, `models/fees.py::has_outstanding_balance` — *not settled,
+amount_paid < amount_due, and past due*. `paid` is the only settled status. Consequences:
+- **`overdue_only=true` (the default) now includes partially-paid past-due fees.** Its
+  meaning changed from "status is overdue" to "still owed and late".
+- **Reminder priority now comes from the tier severity**, not from `record.status`. It
+  was `urgent if status == "overdue"`, so a part payment downgraded a 30-days-late
+  reminder to `normal` — the escalated tier fired but arrived quietly.
+- The reminder body quotes the **remainder** and names what was already received:
+  `"Term 1 Tuition: 4400.00 due 2026-07-18 (remaining after 100.00 already paid)"`.
+- The alert title becomes `"Partly paid fee overdue"` and the message appends
+  `"(100.0 of 4500.0 paid)"`.
+
+**The 1-day tier was added later, and it fixed a real contradiction.** With 7/14/30,
+`fee_records.status` and the cadence engine disagreed about the word "overdue": the
+invoicing job flips a record to `overdue` the moment its `due_date` passes, so the fee
+list showed ten red overdue cards while `POST /admin/fees/reminders` returned
+`sent_count: 0` - both correct, and indistinguishable from a broken button. Anything
+the UI calls overdue now earns at least one notice.
+
+⚠️ **Never rename an existing tier's `cadence_reason` without a data migration.** Those
+strings are persisted in `fee_reminders.cadence_reason` and matched back against
+`REMINDER_TIERS` to decide what has already fired. A rename orphans every historical
+row - it stops resolving to a tier index, `highest_sent_index` falls back to `-1`, and
+a reminder that already went out fires again. That's why the labels read oddly ("7 days
+overdue - **first** reminder" now sits *after* the day-1 notice): the strings were left
+untouched on purpose. Adding a tier at index 0 is safe, because eligibility requires
+`i > highest_sent_index`, so a record that already had the 7-day reminder can never
+receive the day-1 notice retroactively. Both properties have tests.
+
+#### `GET /admin/fees/reminders/preview`
+Dry run: what triggering reminders with these filters would do, and **why it might do
+nothing**. Read-only - writes no `FeeReminder` rows, sends no notifications. Shares the
+same scope query and the same `determine_reminder()` call as the POST, so `due_now`
+always equals the `sent_count` the POST would return.
+- **Roles:** admin, principal (school-scoped through `fee_records → users.school_id`)
+- **Query:** `?class_id=&overdue_only=` (defaults to `overdue_only=true`)
+- **Response:**
+```json
+{
+  "in_scope": 28, "due_now": 10,
+  "by_tier": [ { "cadence_reason": "due date passed - first notice", "severity": "normal", "count": 10 } ],
+  "not_yet_due": 18, "waiting_for_next_tier": 0, "fully_escalated": 0,
+  "next_due_date": "2026-08-18", "next_due_count": 16
+}
+```
+- **`in_scope`** counts records matching the *status* filter, before the day-tier gate -
+  the gap between it and `due_now` is the thing that used to be invisible.
+- **`not_yet_due`** is records due today or later. They can never fire today whatever
+  the scope says, which is why widening scope past `overdue` looks like it should help
+  and doesn't - the UI now says so explicitly.
+- **`next_due_date`** is the earliest date any in-scope record next becomes eligible,
+  with `next_due_count` sharing that date. Turns "0 reminders" into "0 today, 16 tomorrow".
+- **`fully_escalated`** has had every tier; nothing further will ever fire for it. The
+  record still surfaces as a Command Center `fee_overdue` alert - stopping reminders is
+  not the same as stopping tracking.
 
 #### `POST /admin/fees/schedules`
 Create a fee schedule. Immediately generates this school+year's `FeeRecord`s
@@ -1637,8 +1703,31 @@ from the same live data with no separate sync path to drift.
   - student: always their own records; `class_id`/`student_id` are ignored.
 - **Response:**
 ```json
-{ "items": [ { "student_id": 15, "fee_record_id": 9, "amount_due": 5000, "amount_paid": 0, "due_date": "2026-08-15", "status": "overdue", "fee_type": "tuition" } ] }
+{ "items": [ { "student_id": 15, "fee_record_id": 9, "amount_due": 5000, "amount_paid": 0,
+               "outstanding": 5000, "due_date": "2026-08-15", "status": "overdue", "fee_type": "tuition",
+               "claim": { "id": 3, "status": "pending", "amount": 5000, "payment_method": "UPI",
+                          "payment_reference": "UPI/428817263541", "submitted_at": "2026-08-17T10:00:00Z",
+                          "rejection_reason": null, "has_proof": true } } ] }
 ```
+
+**⚠️ `class_id` filters by ENROLLMENT, not by the schedule's class — behaviour change.**
+It used to join through `FeeSchedule` and match `FeeSchedule.class_id == class_id`. But a
+**school-wide** schedule has `class_id NULL` while still generating a `FeeRecord` for
+every student in the school, so filtering to "Grade 1 - A" returned only fees whose
+*schedule* was scoped to 1-A and silently hid every school-wide fee those same students
+owed — an admin filtering to a class to chase its unpaid fees saw a fraction of them.
+It also disagreed with the teacher branch, which has always filtered by enrollment. Both
+now mean "the students enrolled in that class", which is the question a class filter
+answers. `POST /admin/fees/reminders` and its preview take the same fix.
+
+**`claim` and `outstanding` were added with the payment confirmation loop.** `status`
+is the canonical `fee_records.status` and knows nothing about payment claims, so
+without `claim` this endpoint contradicted `GET /parent/child/{id}/fees`: a fee a
+parent had already reported paying still read plainly `"overdue"` here, and an admin
+could fire a reminder chasing someone who was in fact waiting on the school. `claim`
+is the open request against that fee, else the most recent closed one (so a rejection
+stays visible to staff), or `null` if the parent never claimed. Batched into one query
+for the whole list, not one per row.
 
 #### `POST /admin/fees/records/{id}/payment`
 Record a payment against a fee record, however it was collected (cash at the office,
@@ -1649,6 +1738,15 @@ student) - previously unscoped, a real cross-tenant gap fixed this session.
 - **Roles:** admin, principal
 - **Request:** `{ "amount": 5000, "paid_at": null }`
 - **Response:** `{ "fee_record_id": 9, "amount_paid": 5000, "amount_due": 5000, "status": "paid" }`
+- **CLOSES AN OPEN PAYMENT CLAIM when this brings the fee to `paid`.** Confirm/reject
+  are not the only things that can pay a fee: an admin recording the same payment here
+  instead of through the review queue used to leave the claim `pending` forever, so
+  `pending_count` never returned to zero and the dashboard badge could not be trusted.
+  Now `services/fee_payments.py::close_open_claim_if_paid` marks it `confirmed`, stamps
+  `reviewed_by`/`reviewed_at`, notifies the parent, and writes an audit row carrying
+  `closed_indirectly: true` and `via: "record_payment"` so it never reads as a
+  considered review. Fires only on `paid`, never `partial` - a part payment leaves a
+  balance, so the claim for the remainder is still a live question.
 - **Errors:** `400` non-positive `amount`; `404` unknown fee record, or one outside the caller's school.
 
 #### `PATCH /admin/fees/records/{id}/mark-paid`
@@ -1663,8 +1761,171 @@ marking a student outside it is `404`, not `403` (doesn't reveal the record exis
 - **Roles:** teacher
 - **Request:** `{ "paid": true }`
 - **Response:** same shape as `.../payment`'s.
+- **DELIBERATELY DOES NOT close an open payment claim**, unlike `.../payment` above.
+  Teachers are excluded from confirm/reject on purpose (that's the trust model), and
+  auto-confirming from a teacher's toggle would hand them that authority through a side
+  door. A fee a teacher marked paid while a claim is open is exactly the case a human
+  should look at, so the claim stays `pending` and the queue shows it against an
+  already-paid fee for an admin to close out in one click. There is a test pinning this.
 - **Errors:** `404` if the fee record doesn't belong to a student in the caller's
   own class.
+
+### Fee payment confirmation loop (parent claims → admin confirms)
+
+**There is no payment gateway here, mocked or real, and that is the design.** Real
+Indian schools collect fees by UPI, bank transfer or cash at the office and reconcile
+against a bank statement by hand. So this models the actual operation: the parent pays
+through their own bank, records the reference, an admin checks it and confirms, and
+only that confirmation writes through to the canonical `fee_records` row.
+
+Backed by `fee_payment_requests` (`backend/app/models/fees.py`, migration
+`6b10048f8738`).
+
+**A payment request is a CLAIM, never the source of truth.** `fee_records.status`
+stays canonical. Two consequences that are load-bearing:
+
+- **`POST /admin/fees/reminders` keeps firing while a request is pending** - it reads
+  `FeeRecord.status`, which a claim never touches. Reminders stop only once an admin
+  confirms and the record reads `paid`. A parent asserting they paid cannot silence
+  the school's own alert chain; that's the point, and there's a test pinning it.
+- **A parent can never confirm their own request.** Confirm/reject are
+  `require_role("admin", "principal")`. This is the whole trust model of the feature.
+
+**One open request per fee** is enforced by a partial unique index
+(`uq_fee_payment_request_one_open` on `(fee_record_id) WHERE status = 'pending'`), not
+just a route pre-check - two concurrent submits would both pass a SELECT-then-INSERT
+check. It is partial so a *rejected* request can be resubmitted; a plain unique
+constraint would make a rejection a permanent dead end.
+
+#### `GET /parent/child/{student_id}/fees`
+The parent's fee list for one linked child, with a **derived** status that folds in any
+open claim. Supersedes the never-built `/parent/children/{student_id}/fees` stub in
+Person C's section.
+- **Roles:** parent (via `assert_parent_linked`), plus admin/principal/teacher for support
+- **Response:**
+```json
+{
+  "student_id": 21546, "student_name": "Diya Kumar",
+  "items": [
+    { "fee_record_id": 1742, "fee_type": "Term 1 Tuition", "amount_due": 4500.0,
+      "amount_paid": 0.0, "outstanding": 4500.0, "due_date": "2026-07-26",
+      "record_status": "overdue", "derived_status": "payment_pending",
+      "request": { "id": 3, "amount": 4500.0, "payment_method": "UPI",
+                   "payment_reference": "UPI/428817263541", "status": "pending",
+                   "submitted_at": "2026-08-17T10:00:00Z", "rejection_reason": null,
+                   "has_proof": true } }
+  ]
+}
+```
+- **`derived_status`** is one of `unpaid` / `partially_paid` / `payment_pending` / `paid`
+  / `rejected`, in this precedence (most actionable first):
+  - `paid` — `record_status == "paid"` **or** `amount_paid >= amount_due`. The **only**
+    settled state: a fee is settled when the school has the whole amount, never merely
+    because some of it arrived.
+  - `payment_pending` — an open (`pending`) request row exists. Outranks
+    `partially_paid`: "awaiting confirmation" is what the parent needs first.
+  - `rejected` — no open request, and the most recent request was rejected. Carries
+    `request.rejection_reason` so the parent can act on it and resubmit. Also outranks
+    `partially_paid` — a declined submission matters more than the balance.
+  - `partially_paid` — some money recorded, not all of it. **Added because `unpaid` was
+    actively misleading:** a ₹300 fee with ₹200 recorded read exactly like one with
+    nothing paid. Renders as "Partly paid" in amber, keeps the "I've paid" button (the
+    remaining balance is exactly what still needs reporting), and shows
+    "₹100 still to pay — ₹200 of ₹300 received".
+  - `unpaid` — nothing recorded and no claim.
+- **Anything short of the full amount stays visible in every portal until settled.** A
+  part payment reduces what is owed; it never removes the obligation from view.
+- **`request`** is the single most relevant request (the open one if any, else the
+  latest by `submitted_at`), or `null` if the parent has never claimed against this fee.
+  `has_proof` is a boolean rather than the path - the object path is private and a
+  parent has no read route for it.
+- **Errors:** `400` non-parent role without a resolvable link; `403` parent not linked to `student_id`.
+
+#### `POST /parent/child/{student_id}/fees/{fee_record_id}/payment-request`
+Raise a claim that this fee has been paid outside the system. **`multipart/form-data`,**
+because of the optional proof photo.
+- **Roles:** parent (linked to `student_id` only)
+- **Form fields:** `payment_method` (UPI | Bank Transfer | Cash | Other), `payment_reference`, `amount`, optional `proof_file`
+- **Response:** the created request, same shape as `request` above plus `fee_record_id`.
+- **Validates, in this order:** parent is linked to the student → the fee record
+  belongs to that student → the record isn't already `paid` → no `pending` request
+  already exists → `amount > 0` → `amount <= outstanding balance`.
+- **`amount` may be less than the outstanding balance** - part payments are normal and
+  land the record on `partial` when confirmed. It may not exceed it.
+- **`proof_file`** is stored in the **private `payment-proofs` bucket**, not the
+  `resources` bucket: `resources` is RAG source material that `POST /bots/reindex`
+  reads back and re-chunks, so a fee receipt in there would become bot-retrievable.
+  `proof_url` holds the object path, and the only read route is the admin one below.
+- **On success, notifies every admin and principal in the student's school** via
+  `dispatch_bulk`, `source_type="fee_payment_request"`, title naming parent, child and
+  amount. (Note for demo: school 5707 has exactly one admin and no principal, so this
+  is legitimately one row.)
+- **Errors:** `400` bad method, non-positive amount, amount over the outstanding balance, record already paid, or a pending request already exists; `403` not linked; `404` fee record not found for this student; `502` proof upload failed.
+
+**FRONTEND SHAPE:** the review queue is a **tab on the Fees page**
+(`/{role}/fees?tab=requests`), not a separate screen - a claim is a fee record awaiting
+a decision, so the queue and the fee Status list are two views of one row, and keeping
+them on separate screens is what let them drift out of sync twice. `/{role}/fee-payment-requests`
+still resolves, as a redirect to that tab, because the dashboard tile, the sidebar
+badge and the `fee_payment_request` notifications all point at it.
+
+#### `GET /admin/fee-payment-requests?status=`
+The review queue. **Explicitly scoped to the caller's own school** through
+`fee_records → users.school_id` (`fee_payment_requests` has no `school_id` of its own),
+the same bug class already fixed in `fees.py`, `admissions.py`, `approvals.py` and
+`risk.py`.
+- **Roles:** admin, principal
+- **Query:** `?status=` — `pending` | `confirmed` | `rejected` | omitted for all
+- **Response:**
+```json
+{ "items": [
+  { "id": 3, "fee_record_id": 1742, "student_id": 21546, "student_name": "Diya Kumar",
+    "class_name": "Grade 3 - A", "parent_id": 21565, "parent_name": "Rohan Kumar",
+    "fee_type": "Term 1 Tuition", "amount": 4500.0, "amount_due": 4500.0,
+    "amount_paid": 0.0, "outstanding": 4500.0, "payment_method": "UPI",
+    "payment_reference": "UPI/428817263541", "has_proof": true, "status": "pending",
+    "submitted_at": "2026-08-17T10:00:00Z", "reviewed_by_name": null,
+    "reviewed_at": null, "rejection_reason": null }
+], "pending_count": 1 }
+```
+- **`pending_count`** is the school's total pending count **ignoring the `status`
+  filter**, so the admin dashboard badge and the queue can share one request.
+- Ordered pending-first, then newest `submitted_at` first.
+
+#### `GET /admin/fee-payment-requests/{id}/proof`
+Streams the stored proof image back. Exists because `proof_url` is a path in a private
+bucket - there is no public URL to link to.
+- **Roles:** admin, principal (own school only)
+- **Response:** the raw bytes, `Content-Type` from the stored object.
+- **Errors:** `404` unknown id, outside the caller's school, or no proof attached; `502` storage read failed.
+
+#### `PUT /admin/fee-payment-requests/{id}/confirm`
+Approve a claim and **write through to the canonical fee record.**
+- **Roles:** admin, principal (own school only)
+- **Request:** `{}` (no body fields — the amount is the one the parent claimed)
+- **Response:** `{ "request": {...}, "fee_record": { "fee_record_id": 1742, "amount_paid": 4500.0, "amount_due": 4500.0, "status": "paid" } }`
+- **Reuses the exact `record_payment` arithmetic** rather than duplicating it: that
+  logic was inline in the handler and is now
+  `app/services/fee_payments.py::apply_payment_to_record`, which both this and
+  `POST /admin/fees/records/{id}/payment` call. The amount/status derivation exists in
+  one place only.
+- Sets `status="confirmed"`, `reviewed_by`, `reviewed_at`. Notifies the submitting
+  parent (`source_type="fee_payment_confirmed"`). Writes **two** audit rows, because
+  two entities changed: `record_payment` on `fee_records` (from the shared service) and
+  `confirm_fee_payment_request` on `fee_payment_requests`.
+- **Errors:** `400` request is not `pending`; `404` unknown id or outside the caller's school.
+
+#### `PUT /admin/fee-payment-requests/{id}/reject`
+Decline a claim. The fee record is **not** touched, so it stays overdue and keeps
+attracting reminders.
+- **Roles:** admin, principal (own school only)
+- **Request:** `{ "rejection_reason": "No matching UPI credit on the 14 Aug statement" }` — **required, non-blank**
+- **Response:** the updated request.
+- Notifies the parent (`source_type="fee_payment_rejected"`) quoting the reason. Audit
+  row `reject_fee_payment_request` on `fee_payment_requests`.
+- The parent may then submit a fresh request for the same fee - permitted precisely
+  because the uniqueness index is partial on `status = 'pending'`.
+- **Errors:** `400` blank/missing reason, or request is not `pending`; `404` unknown id or outside the caller's school.
 
 ### Admissions
 
@@ -2547,12 +2808,12 @@ validate against.
 
 ### Class chat + doubt threads
 
-> **Note:** the `POST /doubts` / `GET /doubts/{thread_id}` stubs below describe
-> **human-to-human doubt threads** — a student posts, a teacher replies. They are
-> still unimplemented and are **not** satisfied by the Doubt Bot above, nor by the
-> Top Doubts clustering in the bot-insights section: those answer questions with an
-> LLM and aggregate them for teachers respectively, and neither creates a thread or a
-> reply anyone can post into. Left as-is for whoever builds them.
+> **✅ BUILT — as `/threads/*`, not `/doubts/*`.** The stubs below described
+> human-to-human doubt threads and are now implemented, with divergences, in the
+> **Doubt threads** section that follows them. The stubs are kept verbatim for
+> reference; the divergence table is the reconciliation. They were never satisfied by
+> the Doubt Bot or by Top Doubts — those answer questions with an LLM and aggregate
+> them for teachers, and neither creates a thread or a reply anyone can post into.
 
 #### `GET /classroom/{class_id}/chat`
 Fetch class chat messages.
@@ -2582,6 +2843,110 @@ Fetch a doubt thread.
 ```json
 { "thread_id": 9, "subject_id": 3, "messages": [ { "id": 40, "sender_id": 15, "message": "Don't understand Q3", "created_at": "2026-08-09T06:00:00Z" } ] }
 ```
+
+### Doubt threads (implements the two stubs above)
+
+Students post doubts to their class; classmates and the teacher reply; **the teacher
+marks one reply as the verified answer, and that answer is ingested into the bot's
+knowledge base.** Backed by `doubt_threads` + `thread_replies`
+(`backend/app/models/doubt.py`, migration `bbf5b96300f8`).
+
+**Reconciliation with the `POST /doubts` / `GET /doubts/{thread_id}` stubs:**
+
+| Stub | Built | Why it diverged |
+| --- | --- | --- |
+| `POST /doubts` did double duty (new thread *and* reply, via a nullable `thread_id`) | `POST /threads` + `POST /threads/{id}/reply` | Different auth (posting needs class membership; replying needs a thread you can already see) and different validation. One endpoint branching on a nullable field hides both. |
+| `/doubts/*` | `/threads/*` | `/doubts` now collides conceptually with the Doubt **Bot** (`/bots/student/ask`) and **Top Doubts** (`/bots/insights/top-doubts`), both shipped. `threads` is unambiguous about which of the three you're calling. |
+| `message` | `title` + `body` | A thread list needs something scannable; `message` alone renders as a column of paragraph openings. |
+| flat `messages[]` | `replies[]` + `verified_reply_id` | The stub had no notion of a verified answer, which is the entire point of the feature. |
+| — | `PUT .../verify/{reply_id}`, `PUT .../unverify` | Not in the stub at all; they are what feeds and retracts KB content. |
+
+**THE SCOPE ASYMMETRY — deliberate.** A thread is **class-scoped**; its verified answer
+is ingested at **grade level**. A doubt belongs to the room it was asked in, so 3-B
+cannot open 3-A's threads. But once a teacher certifies an answer it stops being
+classroom chatter and becomes curriculum — exactly as reusable as an uploaded handout,
+and resources are already grade-scoped for the same reason. So 3-B's students *do* get
+3-A's verified answers through the bot while never seeing the thread. Verifying widens
+an answer's audience from one class to a whole grade; that is the intended trade, and
+it is why unverify must **delete** the `kb_chunks` rows rather than just clear a flag.
+
+**Teacher scope, two different rules on purpose.** Read/reply accept the homeroom
+teacher **or** any teacher with ≥1 active `TimetableSlot` for that class — a subject
+teacher who teaches Grade 1-A Math must be able to answer a Grade 1-A Math doubt.
+
+**Verify/unverify are homeroom-teacher only** (`scoping.teacher_class_ids`), and this
+narrower rule is **deliberate — do not widen it.** "The teacher who owns the class
+certifies what enters the knowledge base" is a cleaner authority story than "anyone who
+teaches a period here," and a verified answer is grade-wide content, not a classroom
+reply. Consequence, accepted: a subject teacher can reply in a class but not verify
+there. Distinct from the attendance router, which *did* widen teacher scope for its new
+endpoints — that widening was about who may record a fact, this restriction is about who
+may certify content for a shared corpus. Note this is a narrower rule than
+`_teaching_class_ids` used elsewhere in the same router, on purpose.
+
+#### `POST /threads`
+- **Roles:** student (enrolled), teacher (of that class)
+- **Request:** `{ "class_id": 5208, "subject_id": 3, "title": "Why does ice float?", "body": "Everything else sinks when solid." }`
+- **`class_id` is validated against the caller's own enrollment / teaching assignment server-side.** Never trusted from the body — that is the same boundary `assert_student_class_access` enforces for the bot.
+- **Response:** the created thread, same shape as a `GET /threads/{id}` item without replies.
+- **Errors:** `400` blank title/body; `403` not a member of that class; `404` unknown class.
+
+#### `GET /threads?class_id=&resolved=`
+- **Roles:** student (enrolled), teacher (of that class), admin/principal (own school)
+- **Query:** `class_id` required; `resolved` optional (`true`/`false`)
+- **Response:**
+```json
+{ "items": [ { "id": 9, "class_id": 5208, "subject_id": 3, "title": "Why does ice float?",
+               "body": "...", "author_id": 21533, "author_name": "Aarav Kumar",
+               "resolved": true, "reply_count": 3, "created_at": "...",
+               "verified_reply": { "id": 40, "author_id": 22398, "author_name": "Meera Iyer",
+                                   "body": "Water expands when it freezes...", "created_at": "..." } } ] }
+```
+- **Unresolved first**, then newest — a thread list is a work queue for the teacher.
+- `verified_reply` is `null` unless resolved.
+
+#### `GET /threads/{id}`
+- **Roles:** as the list
+- **Response:** the thread plus `replies[]` **chronological**, each with `is_verified`.
+- **Errors:** `403` not a member of the thread's class; `404` unknown thread.
+
+#### `POST /threads/{id}/reply`
+- **Roles:** student (enrolled in the thread's class), teacher (homeroom or teaching it)
+- **Request:** `{ "body": "I think it's about density." }`
+- **Response:** the created reply.
+- **Errors:** `400` blank body; `403` not a member; `404` unknown thread.
+
+#### `PUT /threads/{id}/verify/{reply_id}`
+Certify a reply as the answer **and ingest it into the knowledge base.**
+- **Roles:** teacher, **homeroom teacher of that class only**
+- **Request:** no body
+- **Response:** `{ "thread": {...}, "chunks_written": 1, "kb_note": "Added to the Grade 3 knowledge base" }`
+- Sets `resolved=true` and `verified_reply_id`, writes an audit row
+  (`verify_doubt_answer` on `doubt_threads`), notifies the thread author
+  (`source_type="doubt_answer_verified"`), then calls
+  `ingestion.ingest_verified_doubt_answer`.
+- **SYNCHRONOUS ingestion, ~2.7s measured** for one Q&A pair (embedding round-trip).
+  Same inline-on-write precedent as `POST /resources/upload` and
+  `POST /admin/fees/schedules`. Short enough not to need a job queue; long enough that
+  the UI must show a real pending state.
+- **Idempotent** via `kb_chunks`' unique `(source_type, source_id, chunk_index)` —
+  re-verifying updates chunk 0 in place rather than appending a duplicate.
+- **Errors:** `400` reply doesn't belong to this thread, or the class has no `grade_level` (nothing to scope the chunk by); `403` not the homeroom teacher; `404` unknown thread or reply.
+
+#### `PUT /threads/{id}/unverify`
+- **Roles:** teacher, homeroom teacher of that class only
+- **Response:** `{ "thread": {...}, "chunks_deleted": 1 }`
+- Clears `resolved`/`verified_reply_id` **and deletes the corresponding `kb_chunks`
+  rows.** Leaving them would mean unretractable content in the bot: a teacher who
+  withdraws a wrong answer would keep seeing it cited.
+- Audit row `unverify_doubt_answer`. Idempotent — unverifying an unverified thread is a `400`, but a thread with no chunks deletes zero and still succeeds.
+- **Errors:** `400` thread is not currently verified; `403` not the homeroom teacher; `404` unknown thread.
+
+**Citations carry teacher attribution.** A verified-answer chunk cites as
+`Verified answer · Meera Iyer · "Why does ice float?"`, built by
+`retrieval.verified_answer_title`, and `Citation.source_type` is
+`verified_doubt_answer` so the UI can label and style it distinctly from a document.
+See the ⚠️ note under `POST /bots/student/ask` about the join that makes this correct.
 
 ### Announcements
 
@@ -2762,10 +3127,14 @@ check built in. `/parent/child/{id}/summary` still carries the 30-day aggregate 
 dashboard card renders; use `/attendance/my-records` for the drill-down. Don't build
 a parent-only copy of either.
 
-#### ~~`GET /parent/children/{student_id}/fees`~~ - superseded, never built
-This stub was never implemented as its own endpoint. A parent's fee view instead
-lives on the shared `GET /admin/fees/status?student_id={id}` (see the Fees section
-above) - same data, no separate parent-only copy to keep in sync.
+#### ~~`GET /parent/children/{student_id}/fees`~~ - superseded, now built at a different path
+**Built as `GET /parent/child/{student_id}/fees`** (singular `child`, matching
+`/parent/child/{id}/summary`) - see "Fee payment confirmation loop" in the Fees
+section. It exists as its own endpoint rather than reusing
+`GET /admin/fees/status?student_id={id}` because the parent view needs a status the
+canonical record cannot express: `payment_pending` and `rejected` come from
+`fee_payment_requests`, not from `fee_records.status`. The shared status endpoint is
+still the right call for the raw record view.
 
 #### `POST /parent/messages`
 Send a message from a parent to a teacher/school.
@@ -2810,3 +3179,16 @@ Global search across announcements, resources, and people.
       student/slot/date, flags `status_mismatch` / `cv_only` / `rfid_only`) but
       nothing populates or resolves it yet - no RFID ingestion endpoint exists, and no
       job compares CV vs RFID rows. Next session.
+- [ ] **HARDENING: app-clock vs DB-clock skew on review timestamps.** Creation
+      timestamps (`submitted_at`, `marked_at`, `created_at`, …) come from the DB via
+      `server_default=func.now()`, while every review/decision timestamp
+      (`reviewed_at`, `resolved_at`, `decided_at`, …) is set in Python with
+      `datetime.now(timezone.utc)`. When the app host's clock differs from the DB's,
+      a review can carry a timestamp *earlier* than the thing it reviewed - observed
+      as an ~88ms inversion on a fee payment request during this session's
+      walkthrough (`reviewed_at` 13:52:44.232 vs `submitted_at` 13:52:44.320).
+      Cosmetic at demo scale and consistent across the whole codebase, so it was
+      deliberately NOT changed mid-feature. The fix is to source both from the same
+      clock - either `server_default`/`onupdate` for review columns too, or
+      `func.now()` passed as the value on assignment. One change, applied
+      repo-wide, in its own commit.

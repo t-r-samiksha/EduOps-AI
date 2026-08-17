@@ -4,9 +4,10 @@ from app.models.attendance import AttendanceReconciliation, AttendanceRecord, Fa
 from app.models.audit import AuditLogEntry
 from app.models.class_ import SchoolClass
 from app.models.document import Document, ExtractedEntity, OcrResult
+from app.models.doubt import DoubtThread, ThreadReply
 from app.models.enrollment import Enrollment
 from app.models.exams import Exam, ExamRoomAssignment, InvigilationAssignment, SeatingAssignment
-from app.models.fees import FeeRecord, FeeReminder, FeeSchedule
+from app.models.fees import FeePaymentRequest, FeeRecord, FeeReminder, FeeSchedule
 from app.models.knowledge import ChatbotLog, KbChunk
 from app.models.notification import Notification
 from app.models.parent_student import ParentStudent
@@ -38,11 +39,13 @@ __all__ = [
     "ChatbotLog",
     "ClassSubjectRequirement",
     "Document",
+    "DoubtThread",
     "Enrollment",
     "Exam",
     "ExamRoomAssignment",
     "ExtractedEntity",
     "FaceEmbedding",
+    "FeePaymentRequest",
     "FeeRecord",
     "FeeReminder",
     "FeeSchedule",
@@ -70,6 +73,7 @@ __all__ = [
     "TeacherProfile",
     "TeacherSubject",
     "TeacherUnavailability",
+    "ThreadReply",
     "TimetableSlot",
     "User",
 ]

@@ -496,6 +496,148 @@ def _ensure_grade3b_slots(session: Session, school_class: SchoolClass, counts: d
     return created
 
 
+# --- Doubt threads --------------------------------------------------------------------
+# Human-to-human threads in Grade 3 - A. Three already answered so the list doesn't look
+# empty, and ONE deliberately left open with its answer written and waiting - that is the
+# thread to verify live on stage.
+#
+# THE OPEN THREAD'S QUESTION MUST NOT BE ANSWERABLE FROM ANY UPLOADED DOCUMENT. If a
+# resource already covered it, verifying the reply would change nothing observable and
+# the whole demo beat fails - the bot would answer identically before and after. So it
+# asks about a made-up Riverside marking convention with a specific number in it: nothing
+# in DEMO_RESOURCES mentions it, and the answer cannot be inferred from general knowledge
+# either. Checked against the three seeded documents.
+#
+# (author, title, body, [(reply_author, reply_body, verified?), ...])
+# author/reply_author: "student" = Aarav, "teacher" = 3-A's homeroom teacher (Meera).
+DEMO_THREADS: tuple[tuple[str, str, str, tuple[tuple[str, str, bool], ...]], ...] = (
+    (
+        "student",
+        "Why do we carry the 1 when adding 47 and 38?",
+        "I get 15 for 7 plus 8 but I don't understand where the 1 goes.",
+        (
+            ("student", "I think you write the 5 and move the 1 to the tens column?", False),
+            (
+                "teacher",
+                "That's right, and here is why. 7 + 8 = 15, which is one ten and five ones. "
+                "The ones column can only hold a single digit, so the five stays there and the "
+                "one ten moves across to the tens column. Then 4 + 3 + 1 = 8, giving 85. "
+                "Regrouping is just moving a full group of ten into the next column.",
+                True,
+            ),
+        ),
+    ),
+    (
+        "student",
+        "Is 'happiness' a noun or an adjective?",
+        "Happy is an adjective so I thought happiness would be too.",
+        (
+            (
+                "teacher",
+                "Happiness is a noun - it names a thing you can have. Happy is the adjective, "
+                "because it describes somebody. A good test: if you can put 'the' in front of it "
+                "and it still makes sense, it's a noun. 'The happiness' works; 'the happy' does not.",
+                True,
+            ),
+        ),
+    ),
+    (
+        "student",
+        "Do plants eat the soil to make their food?",
+        "My cousin said plants eat soil but the chapter talks about sunlight.",
+        (
+            ("student", "I think they use sunlight, not soil.", False),
+            (
+                "teacher",
+                "Plants do not eat soil. They make their own food in their leaves using sunlight, "
+                "water and carbon dioxide from the air - that is photosynthesis. Soil holds the "
+                "water and a few minerals the plant needs, but it is not the food itself.",
+                True,
+            ),
+        ),
+    ),
+    # ---- THE LIVE DEMO THREAD: left unverified, with its answer ready to certify ----
+    (
+        "student",
+        "What is the Riverside three-star rule for a science diagram?",
+        "Ma'am mentioned a rule about labelling diagrams before the test but I forgot how many "
+        "stars each part is worth.",
+        (
+            (
+                "teacher",
+                "At Riverside we mark every science diagram with the three-star rule. One star for "
+                "drawing the outline in pencil, one star for labelling at least three parts in "
+                "lowercase, and one star for ruled pointer lines that never cross each other. "
+                "All three stars must be earned for full marks - a beautiful drawing with only two "
+                "labels still loses a star, and pointer lines drawn freehand lose one even if every "
+                "label is correct.",
+                False,
+            ),
+        ),
+    ),
+)
+
+UNVERIFIED_DEMO_THREAD_TITLE = DEMO_THREADS[-1][1]
+"""The thread to verify on stage. Named so the summary output can point at it."""
+
+
+def _get_or_create_doubt_threads(
+    session: Session, school_class: SchoolClass, student: User, teacher: User | None, counts: dict
+) -> list:
+    """Seed the demo doubt threads. Natural key: (class_id, title).
+
+    Idempotent in the strong sense: an existing thread is left EXACTLY as found,
+    including its verified/unverified state. That matters more here than elsewhere -
+    re-running this script after a rehearsal must not silently re-verify the thread you
+    just unverified to reset the demo, or the live beat is gone with no warning.
+    """
+    from app.models.doubt import DoubtThread, ThreadReply
+
+    authors = {"student": student, "teacher": teacher or student}
+    threads = []
+    for author_key, title, body, replies in DEMO_THREADS:
+        existing = (
+            session.query(DoubtThread)
+            .filter(DoubtThread.class_id == school_class.id, DoubtThread.title == title)
+            .one_or_none()
+        )
+        if existing is not None:
+            threads.append(existing)
+            continue
+
+        thread = DoubtThread(
+            school_id=SCHOOL_ID,
+            class_id=school_class.id,
+            subject_id=None,
+            author_id=authors[author_key].id,
+            title=title,
+            body=body,
+            resolved=False,
+        )
+        session.add(thread)
+        session.flush()
+        counts["doubt_threads"] = counts.get("doubt_threads", 0) + 1
+
+        for reply_author_key, reply_body, is_verified in replies:
+            reply = ThreadReply(
+                thread_id=thread.id, author_id=authors[reply_author_key].id, body=reply_body
+            )
+            session.add(reply)
+            session.flush()
+            counts["thread_replies"] = counts.get("thread_replies", 0) + 1
+            if is_verified:
+                # Sets the flag WITHOUT ingesting - embedding is the verify endpoint's
+                # job, and this script stays free of any Gemini dependency (same choice
+                # as resources being seeded with indexed_at NULL). Run POST
+                # /bots/reindex or re-verify through the API to embed these.
+                thread.resolved = True
+                thread.verified_reply_id = reply.id
+        threads.append(thread)
+
+    session.commit()
+    return threads
+
+
 def _get_or_create_resources(session: Session, school_class: SchoolClass, uploader: User, counts: dict) -> list[Resource]:
     """Upload the three demo curriculum documents as real Resource rows + real stored
     objects. Natural key: (class_id, title).
@@ -844,6 +986,11 @@ def seed(session: Session, counts: dict) -> dict:
     resources = _get_or_create_resources(session, grade_3a, uploader, counts)
     doubt_logs = _get_or_create_doubt_logs(session, grade_3a, grade_3b, counts)
 
+    # Human doubt threads in 3-A - three answered, one left open for the live
+    # verify-and-the-bot-learns beat. Aarav asks; 3-A's homeroom teacher answers.
+    demo_student = next((c for c in children if (c.full_name or "").startswith("Aarav")), children[0])
+    threads = _get_or_create_doubt_threads(session, grade_3a, demo_student, uploader, counts)
+
     # --- Parent-portal profiles: make the two children read differently ---
     attendance_patterns = {"Aarav": AARAV_ATTENDANCE_PATTERN, "Diya": DIYA_ATTENDANCE_PATTERN}
     remark_sets = {"Aarav": AARAV_REMARKS, "Diya": DIYA_REMARKS}
@@ -873,6 +1020,7 @@ def seed(session: Session, counts: dict) -> dict:
         "records": records, "flags": flags, "class": school_class,
         "grade_3a": grade_3a, "grade_3b": grade_3b, "grade_3b_students": grade_3b_students,
         "grade_3b_slots": slots_created, "resources": resources,
+        "threads": threads,
     }
 
 
@@ -936,13 +1084,31 @@ def main() -> None:
                   f"   |   sibling section: {data['grade_3b'].id} ({data['grade_3b'].name})")
             print("=" * 72)
 
+        open_thread = next(
+            (t for t in data["threads"] if t.title == UNVERIFIED_DEMO_THREAD_TITLE), None
+        )
+        if open_thread is not None:
+            print("\n" + "=" * 72)
+            print("  THE LIVE DEMO THREAD - verify this one on stage")
+            print(f"    thread id : {open_thread.id}   (Grade 3 - A, {data['grade_3a'].id})")
+            print(f"    question  : {open_thread.title}")
+            print(f"    state     : {'VERIFIED ALREADY - unverify it before demoing' if open_thread.resolved else 'open, reply ready'}")
+            print("    beat      : teacher /teacher/doubts -> Mark verified")
+            print("                student /student/doubt-bot -> ask the same question")
+            print("                the answer now cites 'Verified answer - <teacher> - \"...\"'")
+            print("    NOTE: nothing in the seeded documents mentions the three-star rule,")
+            print("          so the bot genuinely cannot answer it until you verify.")
+            print("=" * 72)
+
         print(
             "\nNotifications are NOT created by this script - they are a side effect of the\n"
             "real endpoints. To make the bell light up for this parent, call:\n"
             "  POST /admin/fees/reminders  {\"overdue_only\": true}   -> fee_reminder\n"
             "  POST /risk/flag             {...}                     -> early_warning\n"
             "Resources are seeded UNINDEXED - to embed them, call:\n"
-            "  POST /bots/reindex          {}                        -> chunks written"
+            "  POST /bots/reindex          {}                        -> chunks written\n"
+            "Seeded VERIFIED threads are flagged but NOT embedded (same reason - no Gemini\n"
+            "dependency here). Re-verify one through the API to put it in the KB."
         )
     finally:
         session.close()

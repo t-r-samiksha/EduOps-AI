@@ -9,6 +9,7 @@ import StatTile from "@/components/shared/StatTile";
 import { useMyAttendanceRecords } from "@/api/hooks/useAttendance";
 import { ApiError } from "@/api/client";
 import { DAY_LABELS } from "@/lib/constants";
+import { daysAgoIso } from "@/lib/dates";
 import { csvFilename, downloadCsv, toCsv } from "@/lib/csv";
 import type { AttendanceStatus, MyRecordDay } from "@/api/types";
 import { cn } from "@/lib/utils";
@@ -22,11 +23,7 @@ const STATUS_BADGE: Record<AttendanceStatus, "positive" | "urgent" | "warning"> 
   late: "warning",
 };
 
-function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
-}
+const daysAgo = daysAgoIso;
 
 function dayTone(day: MyRecordDay): string {
   if (day.present_pct >= 90) return "bg-positive/70";

@@ -27,6 +27,7 @@ import InvigilationDutiesPage from "@/components/exams/InvigilationDutiesPage";
 import StudentSeatLookup from "@/components/exams/StudentSeatLookup";
 import SchoolManagementPage from "@/components/admin/SchoolManagementPage";
 import StudentDoubtBot from "@/components/bots/StudentDoubtBot";
+import DoubtThreadsPage from "@/components/doubts/DoubtThreadsPage";
 import ChildSummary from "@/routes/parent/ChildSummary";
 import ChildAttendance from "@/routes/parent/ChildAttendance";
 import ParentBot from "@/routes/parent/ParentBot";
@@ -50,6 +51,14 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/approvals", role: "principal", element: <ApprovalsInbox /> },
   { path: "/principal/ocr", role: "principal", element: <OcrPage /> },
   { path: "/principal/fees", role: "principal", element: <FeesPage /> },
+  // The payment-request queue is a tab on the Fees page now, not its own screen.
+  // Kept as a redirect rather than deleted: the dashboard badge, the sidebar and the
+  // `fee_payment_request` notifications all point at this path.
+  {
+    path: "/principal/fee-payment-requests",
+    role: "principal",
+    element: <Navigate to="/principal/fees?tab=requests" replace />,
+  },
   { path: "/principal/admissions", role: "principal", element: <AdmissionsPage /> },
   { path: "/principal/exams", role: "principal", element: <ExamsPage /> },
   { path: "/principal/school-management", role: "principal", element: <SchoolManagementPage /> },
@@ -63,6 +72,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/approvals", role: "admin", element: <ApprovalsInbox /> },
   { path: "/admin/ocr", role: "admin", element: <OcrPage /> },
   { path: "/admin/fees", role: "admin", element: <FeesPage /> },
+  { path: "/admin/fee-payment-requests", role: "admin", element: <Navigate to="/admin/fees?tab=requests" replace /> },
   { path: "/admin/admissions", role: "admin", element: <AdmissionsPage /> },
   { path: "/admin/exams", role: "admin", element: <ExamsPage /> },
   { path: "/admin/school-management", role: "admin", element: <SchoolManagementPage /> },
@@ -75,6 +85,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/syllabus", role: "teacher", element: <SyllabusPage /> },
   { path: "/teacher/fees", role: "teacher", element: <FeesPage /> },
   { path: "/teacher/exams", role: "teacher", element: <InvigilationDutiesPage /> },
+  { path: "/teacher/doubts", role: "teacher", element: <DoubtThreadsPage /> },
 
   { path: "/student", role: "student", element: <StudentDashboard /> },
   { path: "/student/attendance", role: "student", element: <StudentAttendance /> },
@@ -82,6 +93,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/student/fees", role: "student", element: <FeesPage /> },
   { path: "/student/exams", role: "student", element: <StudentSeatLookup /> },
   { path: "/student/doubt-bot", role: "student", element: <StudentDoubtBot /> },
+  { path: "/student/doubts", role: "student", element: <DoubtThreadsPage /> },
 
   { path: "/parent", role: "parent", element: <ParentDashboard /> },
   { path: "/parent/child", role: "parent", element: <ChildSummary /> },

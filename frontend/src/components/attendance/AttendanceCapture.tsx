@@ -34,6 +34,7 @@ import LiveCameraCapture from "@/components/attendance/LiveCameraCapture";
 import AttendanceRegister from "@/components/attendance/AttendanceRegister";
 import AttendanceAnalytics from "@/components/attendance/AttendanceAnalytics";
 import { DEFAULT_ACADEMIC_YEAR, DAY_LABELS } from "@/lib/constants";
+import { daysAgoIso, todayIso } from "@/lib/dates";
 import { ApiError } from "@/api/client";
 import type { TimetableSlot } from "@/api/types";
 import { cn } from "@/lib/utils";
@@ -246,7 +247,7 @@ function MarkTab({ schoolId }: { schoolId: number }) {
   const lookup = useReferenceLookup(schoolId);
   const [mode, setMode] = useState<CaptureMode>("upload");
   const [slotId, setSlotId] = useState<string>("");
-  const [date, setDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState<string>(todayIso);
   const [file, setFile] = useState<File | null>(null);
   const mark = useMarkAttendance();
   const review = useReviewAttendanceRecord();
@@ -455,11 +456,7 @@ function MarkTab({ schoolId }: { schoolId: number }) {
   );
 }
 
-function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
-}
+const daysAgo = daysAgoIso;
 
 function SummaryTab({ schoolId }: { schoolId: number }) {
   const lookup = useReferenceLookup(schoolId);
