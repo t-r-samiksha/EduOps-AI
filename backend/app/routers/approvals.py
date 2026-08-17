@@ -8,10 +8,11 @@ from app.database import get_db
 from app.models.admissions import AdmissionApplication
 from app.models.staffing import LeaveRequest
 from app.routers.admissions import decide_admission_application
-from app.routers.staffing import decide_leave_request
+from app.routers.staffing import _leave_decision_body, decide_leave_request
 from app.services.approval_aggregator import aggregate_approvals
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
+from app.services.notify import dispatch_notification
 
 router = APIRouter(tags=["approvals"])
 
@@ -33,10 +34,20 @@ def _decide_leave_request(db: Session, entity_id: int, decision: str, body: "Dec
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Leave request is already {leave.status}, not pending")
 
     db_decision = "approved" if decision == "approve" else "rejected"
-    decide_leave_request(db, leave, db_decision, user.id, body.academic_year)
+    # body.comment is now persisted onto the leave request itself, not just recorded
+    # in the audit detail below - the audit log is admin/principal-only (GET /audit/*),
+    # so a comment that lived only there was invisible to the teacher it was written
+    # for. See LeaveRequest.decision_comment.
+    decide_leave_request(db, leave, db_decision, user.id, body.academic_year, body.comment)
     write_audit_log(
         db, actor_id=user.id, action=decision, entity_type="leave_requests", entity_id=leave.id,
         detail={"comment": body.comment, "via": "unified_approvals_inbox"},
+    )
+    dispatch_notification(
+        db, user_id=leave.teacher_id, source_type="leave_decision",
+        title=f"Leave request {leave.status}",
+        body=_leave_decision_body(leave),
+        priority="important", source_id=leave.id,
     )
     return leave.status
 

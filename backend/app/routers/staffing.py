@@ -16,6 +16,7 @@ from app.models.timetable import TeacherSubject, TeacherUnavailability, Timetabl
 from app.models.user import User
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.notify import dispatch_notification
 from app.services.staffing_forecast import HistoricalGapObservation, forecast_staffing_gaps, has_sufficient_data
 from app.services.substitute_solver import SubstituteCandidate, SubstituteSuggestion, find_fallback_substitutes, find_substitutes
 
@@ -368,6 +369,10 @@ class LeaveRequestOut(BaseModel):
     requested_at: datetime
     decided_by: int | None
     decided_at: datetime | None
+    decision_comment: str | None
+    """The approver's note, null while pending or when they left it blank. This is
+    the teacher's only durable view of WHY - see the column's docstring in
+    models/staffing.py."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -411,6 +416,11 @@ class ApproveLeaveRequest(BaseModel):
     """"approved" or "rejected"."""
     academic_year: str | None = None
     """Required when decision == "approved" - needed to resolve which timetable slots are affected."""
+    comment: str | None = None
+    """Optional note back to the teacher, persisted to LeaveRequest.decision_comment
+    and echoed in their notification. Mirrors the Approvals Inbox's own `comment`
+    field (POST /admin/approvals/{id}/decision) so both entry points to the same
+    decision carry the same information rather than one silently dropping it."""
 
 
 class ApproveLeaveResponse(BaseModel):
@@ -418,8 +428,22 @@ class ApproveLeaveResponse(BaseModel):
     substitutions: list[SubstitutionOut]
 
 
+def _leave_decision_body(leave: LeaveRequest) -> str:
+    """Notification body for a decided leave request, shared by both decision entry
+    points (PUT /staff/approve_leave and the Approvals Inbox's POST
+    /admin/approvals/{id}/decision) so a teacher gets the same text either way.
+    Appends the approver's note when there is one - without it the teacher was told
+    only that their request was rejected, echoed back their OWN reason, and was given
+    no way anywhere in the product to find out why."""
+    base = f"{leave.start_date.isoformat()} to {leave.end_date.isoformat()}: {leave.reason}"
+    if leave.decision_comment:
+        return f"{base}\n\nNote from approver: {leave.decision_comment}"
+    return base
+
+
 def decide_leave_request(
-    db: Session, leave: LeaveRequest, decision: str, actor_id: int, academic_year: str | None
+    db: Session, leave: LeaveRequest, decision: str, actor_id: int, academic_year: str | None,
+    comment: str | None = None,
 ) -> list[SubstitutionOut]:
     """Applies an approve/reject decision to a LeaveRequest, including the
     substitute-finding side effect on approval. `decision` must already be
@@ -435,6 +459,11 @@ def decide_leave_request(
     leave.status = decision
     leave.decided_by = actor_id
     leave.decided_at = datetime.now(timezone.utc)
+    # Only overwrite on a non-empty comment: a caller that omits it (PUT
+    # /staff/approve_leave's quick approve path) must not blank out a note an earlier
+    # decision already recorded.
+    if comment is not None and comment.strip():
+        leave.decision_comment = comment.strip()
 
     substitutions_out: list[SubstitutionOut] = []
     if decision == "approved":
@@ -498,14 +527,24 @@ def approve_leave(
     if leave is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Leave request not found")
 
-    substitutions_out = decide_leave_request(db, leave, body.decision, user.id, body.academic_year)
+    substitutions_out = decide_leave_request(db, leave, body.decision, user.id, body.academic_year, body.comment)
     write_audit_log(
         db,
         actor_id=user.id,
         action="approve" if body.decision == "approved" else "reject",
         entity_type="leave_requests",
         entity_id=leave.id,
-        detail={"academic_year": body.academic_year, "substitutions_affected": len(substitutions_out)},
+        detail={
+            "academic_year": body.academic_year,
+            "substitutions_affected": len(substitutions_out),
+            "comment": leave.decision_comment,
+        },
+    )
+    dispatch_notification(
+        db, user_id=leave.teacher_id, source_type="leave_decision",
+        title=f"Leave request {body.decision}",
+        body=_leave_decision_body(leave),
+        priority="important", source_id=leave.id,
     )
     db.commit()
     db.refresh(leave)
@@ -769,6 +808,12 @@ def confirm_substitution(
         entity_type="substitutions",
         entity_id=sub.id,
         detail={"substitute_teacher_id": target_teacher_id, "qualification_overridden": bool(conflicts)},
+    )
+    dispatch_notification(
+        db, user_id=target_teacher_id, source_type="substitute_assigned",
+        title="You have been assigned a substitution",
+        body=f"Covering {leave.start_date.isoformat()} to {leave.end_date.isoformat()}",
+        priority="important", source_id=sub.id,
     )
     db.commit()
     db.refresh(sub)

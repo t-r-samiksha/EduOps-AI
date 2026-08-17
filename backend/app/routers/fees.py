@@ -14,6 +14,7 @@ from app.models.user import User
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.fee_reminder_engine import determine_reminder
+from app.services.notify import dispatch_bulk
 from scripts.run_monthly_fee_invoicing import AUTO_GENERATE_WINDOW_DAYS, generate_fee_records_for_schedule, run_monthly_invoicing
 
 router = APIRouter(tags=["fees"])
@@ -202,7 +203,15 @@ def trigger_reminders(
     db: Session = Depends(get_db),
 ):
     today = date.today()
-    query = db.query(FeeRecord)
+    # Scoped to the caller's own school - same fix as GET /admin/fees/status and
+    # POST /admin/fees/records/{id}/payment above, and the same bug class fixed in
+    # admissions.py/approvals.py/risk.py. FeeRecord has no school_id of its own
+    # (only student_id), so the scoping has to go through User. Without this, an
+    # admin from ANY school reminded EVERY school's overdue records - which was
+    # merely invisible while a reminder was just a FeeReminder row nobody read, and
+    # became a real cross-tenant leak the moment this endpoint started dispatching
+    # notifications to actual parents (below).
+    query = db.query(FeeRecord).join(User, FeeRecord.student_id == User.id).filter(User.school_id == user.school_id)
     if body.class_id is not None:
         query = query.join(FeeSchedule, FeeRecord.fee_schedule_id == FeeSchedule.id).filter(FeeSchedule.class_id == body.class_id)
     if body.overdue_only:
@@ -217,6 +226,21 @@ def trigger_reminders(
         decision = determine_reminder(days_overdue, already_sent)
         if decision.should_send:
             db.add(FeeReminder(fee_record_id=record.id, cadence_reason=decision.cadence_reason, sent_at=None))
+            # Reaches the parents the reminder is actually for - the FeeReminder row
+            # on its own only records that a reminder was decided on, it never told
+            # anyone. Commits atomically with that row via the db.commit() below.
+            dispatch_bulk(
+                db,
+                user_ids=[
+                    r.parent_id
+                    for r in db.query(ParentStudent.parent_id).filter(ParentStudent.student_id == record.student_id)
+                ],
+                source_type="fee_reminder",
+                title=f"Fee payment {'overdue' if record.status == 'overdue' else 'due'}",
+                body=f"{record.fee_schedule.fee_type}: {record.amount_due - record.amount_paid:.2f} due {record.due_date.isoformat()}",
+                priority="urgent" if record.status == "overdue" else "normal",
+                source_id=record.id,
+            )
             sent_count += 1
 
     db.commit()

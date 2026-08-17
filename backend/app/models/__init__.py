@@ -7,7 +7,10 @@ from app.models.document import Document, ExtractedEntity, OcrResult
 from app.models.enrollment import Enrollment
 from app.models.exams import Exam, ExamRoomAssignment, InvigilationAssignment, SeatingAssignment
 from app.models.fees import FeeRecord, FeeReminder, FeeSchedule
+from app.models.knowledge import ChatbotLog, KbChunk
+from app.models.notification import Notification
 from app.models.parent_student import ParentStudent
+from app.models.resource import Resource
 from app.models.risk import Intervention, RemarkStub, RiskFlag
 from app.models.role import Role
 from app.models.school import School
@@ -32,6 +35,7 @@ __all__ = [
     "AttendanceReconciliation",
     "AttendanceRecord",
     "AuditLogEntry",
+    "ChatbotLog",
     "ClassSubjectRequirement",
     "Document",
     "Enrollment",
@@ -44,10 +48,13 @@ __all__ = [
     "FeeSchedule",
     "Intervention",
     "InvigilationAssignment",
+    "KbChunk",
     "LeaveRequest",
+    "Notification",
     "OcrResult",
     "ParentStudent",
     "RemarkStub",
+    "Resource",
     "RiskFlag",
     "Role",
     "Room",

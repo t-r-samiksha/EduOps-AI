@@ -46,6 +46,10 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.class_ import SchoolClass
 from app.models.school import School
+from app.models.timetable import TimetableSlot
+from app.services.doubt_insights import teachers_for_grade_subject, top_doubts
+from app.services.ingestion import ingest_pending
+from app.services.notify import dispatch_notification
 from scripts.run_monthly_fee_invoicing import AUTO_GENERATE_WINDOW_DAYS, run_monthly_invoicing
 from scripts.run_nightly_admin_briefing import BRIEFING_OUTPUT_DIR, compile_briefing
 from scripts.run_nightly_risk_scoring import run_nightly_scoring
@@ -67,6 +71,8 @@ JOB_ID_RISK_SCORING = "nightly_risk_scoring"
 JOB_ID_SYLLABUS_ANOMALY_SCAN = "nightly_syllabus_anomaly_scan"
 JOB_ID_ADMIN_BRIEFING = "nightly_admin_briefing"
 JOB_ID_FEE_INVOICING = "monthly_fee_invoicing"
+JOB_ID_RESOURCE_REINDEX = "nightly_resource_reindex"
+JOB_ID_WEEKLY_TOP_DOUBTS = "weekly_top_doubts"
 
 
 def _active_school_academic_year_pairs(session: Session) -> list[tuple[int, str]]:
@@ -165,6 +171,105 @@ def run_monthly_fee_invoicing_job() -> dict:
     return totals
 
 
+def run_resource_reindex_job() -> dict:
+    """Ingest any resource whose inline ingestion never completed.
+
+    A SAFETY NET, not the primary path - POST /resources/upload ingests synchronously
+    and a successful upload is already searchable. This exists because that inline
+    ingestion can fail on a transient Gemini rate limit or storage blip, which rolls
+    the upload back; and because a resource inserted directly (e.g. by the seed script)
+    has no request to ingest it. Selecting on `indexed_at IS NULL` means an already
+    indexed resource is never re-embedded, so this costs nothing on a normal night.
+
+    Runs for EVERY school (school_id=None) - unlike POST /bots/reindex, which is
+    scoped to the calling admin's own school. A background job has no caller whose
+    tenant it could be confined to.
+    """
+    logger.info("resource reindex: starting")
+    session = SessionLocal()
+    totals = {"resources_indexed": 0, "chunks_written": 0}
+    try:
+        resources, chunks = ingest_pending(session, school_id=None)
+        session.commit()
+        totals["resources_indexed"] = resources
+        totals["chunks_written"] = chunks
+    except Exception:
+        session.rollback()
+        logger.exception("resource reindex: FAILED")
+        raise
+    finally:
+        session.close()
+    logger.info("resource reindex: done - %s", totals)
+    return totals
+
+
+def run_weekly_top_doubts_job() -> dict:
+    """Monday morning: tell each teacher what their students got stuck on last week.
+
+    Clusters per (school, grade_level, subject) that has real teaching staff, then
+    dispatches one notification per teacher naming the top concept. Uses
+    services/notify.py's dispatch_notification (db.add, no commit - this function
+    commits once at the end, so a labelling failure mid-loop rolls the whole run back
+    rather than half-notifying).
+
+    Registered but NOT the demo surface - GET /bots/insights/my-top-doubts is computed
+    live and is what the dashboard widget calls. This job exists so the insight reaches
+    a teacher who never opens the dashboard.
+    """
+    logger.info("weekly top doubts: starting")
+    session = SessionLocal()
+    totals = {"pairs_examined": 0, "notifications": 0}
+    try:
+        pairs = (
+            session.query(SchoolClass.school_id, SchoolClass.grade_level, TimetableSlot.subject_id)
+            .join(TimetableSlot, TimetableSlot.class_id == SchoolClass.id)
+            .filter(SchoolClass.is_active.is_(True), TimetableSlot.is_active.is_(True))
+            .distinct()
+            .all()
+        )
+        for school_id, grade_level, subject_id in pairs:
+            if grade_level is None:
+                continue
+            totals["pairs_examined"] += 1
+            clusters = top_doubts(
+                session, school_id=school_id, grade_level=grade_level,
+                subject_id=subject_id, days=7, limit=5,
+            )
+            # Only a real, labelled cluster is worth interrupting someone for - a
+            # single unclustered question is noise, not an insight.
+            top = next((c for c in clusters if c.question_count > 1), None)
+            if top is None:
+                continue
+
+            teacher_ids = teachers_for_grade_subject(
+                session, school_id=school_id, grade_level=grade_level, subject_id=subject_id
+            )
+            concept = top.label or top.sample_questions[0][:60]
+            spread = f" across {len(top.sections)} sections" if len(top.sections) > 1 else ""
+            for teacher_id in teacher_ids:
+                dispatch_notification(
+                    session,
+                    user_id=teacher_id,
+                    source_type="top_doubts",
+                    title=f"Top doubt this week: {concept}",
+                    body=(
+                        f"{top.question_count} questions from {top.distinct_student_count} students"
+                        f"{spread} ({', '.join(top.sections)}). Open your dashboard to see examples."
+                    ),
+                    priority="normal",
+                )
+                totals["notifications"] += 1
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("weekly top doubts: FAILED")
+        raise
+    finally:
+        session.close()
+    logger.info("weekly top doubts: done - %s", totals)
+    return totals
+
+
 _scheduler: BackgroundScheduler | None = None
 
 
@@ -190,6 +295,15 @@ def build_scheduler() -> BackgroundScheduler:
     # UniqueConstraint check) and determine_reminder tracks tier-by-index so it
     # never resends/regresses a reminder (see fee_reminder_engine.py).
     scheduler.add_job(run_monthly_fee_invoicing_job, CronTrigger(hour=2, minute=45), id=JOB_ID_FEE_INVOICING, replace_existing=True)
+    # 03:00, after the other four - it makes external API calls (Gemini embeddings)
+    # and can be slow or rate-limited, so it should not delay the DB-only jobs.
+    scheduler.add_job(run_resource_reindex_job, CronTrigger(hour=3, minute=0), id=JOB_ID_RESOURCE_REINDEX, replace_existing=True)
+    # Monday 06:00 UTC - early enough that a teacher sees it before the week's
+    # first lesson, late enough that Sunday's questions are already logged.
+    scheduler.add_job(
+        run_weekly_top_doubts_job, CronTrigger(day_of_week='mon', hour=6, minute=0),
+        id=JOB_ID_WEEKLY_TOP_DOUBTS, replace_existing=True,
+    )
     return scheduler
 
 

@@ -174,6 +174,9 @@ export interface LeaveRequest {
   requested_at: string;
   decided_by: number | null;
   decided_at: string | null;
+  /** The approver's note back to the teacher. Null while pending, or when the
+   * approver left the Approvals Inbox comment box blank. */
+  decision_comment: string | null;
 }
 
 export interface SubstitutionCandidate {
@@ -673,4 +676,105 @@ export interface InvigilationDuty {
   start_time: string;
   end_time: string;
   status: string;
+}
+
+// --- Notification center ---------------------------------------------------
+// Hand-written, like everything else in this file - there is no codegen here.
+// Mirrors app/routers/notifications.py's NotificationOut / NotificationPage.
+
+/** One of app/models/notification.py's SOURCE_TYPES. Kept as a union so the
+ * bell's icon map is exhaustive-checked, with a string fallback so a new
+ * backend source_type renders with a default icon instead of crashing. */
+export type NotificationSourceType =
+  | "early_warning"
+  | "fee_reminder"
+  | "fee_payment_request"
+  | "fee_payment_confirmed"
+  | "fee_payment_rejected"
+  | "report_card"
+  | "substitute_assigned"
+  | "announcement"
+  | "remark_posted"
+  | "leave_decision"
+  | "admission_decision";
+
+export type NotificationPriority = "normal" | "important" | "urgent";
+
+export interface Notification {
+  id: number;
+  source_type: NotificationSourceType | string;
+  source_id: number | null;
+  title: string;
+  body: string | null;
+  priority: NotificationPriority | string;
+  /** null = unread */
+  read_at: string | null;
+  acknowledged_at: string | null;
+  created_at: string;
+}
+
+export interface NotificationPage {
+  items: Notification[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface UnreadCountResponse {
+  count: number;
+}
+
+/** Payload pushed by GET /notifications/stream. */
+export interface NotificationStreamSnapshot {
+  unread_count: number;
+  latest: Notification[];
+}
+
+// --- RAG chatbots ----------------------------------------------------------
+// Mirrors app/routers/bots.py's StudentAskRequest / StudentAskResponse.
+
+export interface BotAskRequest {
+  query: string;
+  /** SECURITY BOUNDARY, not a filter - the backend validates this against the
+   * caller's own enrollment before retrieving anything. See api-contract.md. */
+  class_id: number;
+  subject_id?: number;
+}
+
+export interface Citation {
+  chunk_id: number;
+  source_id: number;
+  title: string | null;
+  snippet: string;
+}
+
+export interface BotAskResponse {
+  answer: string;
+  citations: Citation[];
+}
+
+// --- Top Doubts (bot insights) ---------------------------------------------
+// Mirrors app/routers/bots.py's DoubtClusterOut / MyTopDoubtsResponse.
+
+export interface DoubtCluster {
+  /** Null in degraded mode (fewer than 3 clusterable logs) or if Gemini labelling
+   * failed - the UI must render the sample question instead, never "null". */
+  label: string | null;
+  description: string | null;
+  question_count: number;
+  distinct_student_count: number;
+  /** Class names contributing. More than one = the cross-section insight. */
+  sections: string[];
+  sample_questions: string[];
+}
+
+export interface GradeSubjectDoubts {
+  grade_level: number;
+  subject_id: number;
+  subject_name: string;
+  clusters: DoubtCluster[];
+}
+
+export interface MyTopDoubtsResponse {
+  items: GradeSubjectDoubts[];
 }

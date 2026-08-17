@@ -10,8 +10,10 @@ from app.models.school import School
 from app.scheduler import (
     JOB_ID_ADMIN_BRIEFING,
     JOB_ID_FEE_INVOICING,
+    JOB_ID_RESOURCE_REINDEX,
     JOB_ID_RISK_SCORING,
     JOB_ID_SYLLABUS_ANOMALY_SCAN,
+    JOB_ID_WEEKLY_TOP_DOUBTS,
     _active_school_academic_year_pairs,
     build_scheduler,
     get_scheduler,
@@ -21,10 +23,20 @@ from app.scheduler import (
 )
 
 
-def test_build_scheduler_registers_all_4_jobs():
+def test_build_scheduler_registers_all_jobs():
+    """Was "all_4_jobs" - the RAG work added two more (nightly resource reindex,
+    weekly top doubts), so the count moved 4 -> 6. Asserting the exact id SET rather
+    than a count is what made this a one-line update instead of a silent gap."""
     scheduler = build_scheduler()
     job_ids = {j.id for j in scheduler.get_jobs()}
-    assert job_ids == {JOB_ID_RISK_SCORING, JOB_ID_SYLLABUS_ANOMALY_SCAN, JOB_ID_ADMIN_BRIEFING, JOB_ID_FEE_INVOICING}
+    assert job_ids == {
+        JOB_ID_RISK_SCORING,
+        JOB_ID_SYLLABUS_ANOMALY_SCAN,
+        JOB_ID_ADMIN_BRIEFING,
+        JOB_ID_FEE_INVOICING,
+        JOB_ID_RESOURCE_REINDEX,
+        JOB_ID_WEEKLY_TOP_DOUBTS,
+    }
 
 
 def test_start_scheduler_is_idempotent():
@@ -34,7 +46,8 @@ def test_start_scheduler_is_idempotent():
         first = start_scheduler()
         second = start_scheduler()
         assert first is second
-        assert len(first.get_jobs()) == 4
+        # 6 since the RAG work added the resource-reindex and weekly-top-doubts jobs.
+        assert len(first.get_jobs()) == 6
     finally:
         shutdown_scheduler()
 

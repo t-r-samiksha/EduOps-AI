@@ -293,7 +293,11 @@ def overdue_record(db_session, seed):
 
 
 def test_trigger_reminders_creates_reminder_for_overdue_record(client, db_session, seed, overdue_record):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    # school_id is now required for this endpoint to see anything - POST
+    # /admin/fees/reminders became school-scoped when it started dispatching real
+    # notifications (see fees.py's comment there). Matches how every other
+    # school-scoped endpoint's tests in this file build their admin.
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.post("/admin/fees/reminders", json={"class_id": seed["class"].id, "overdue_only": True})
     assert resp.status_code == 200
     assert resp.json()["sent_count"] == 1
@@ -304,10 +308,54 @@ def test_trigger_reminders_creates_reminder_for_overdue_record(client, db_sessio
 
 
 def test_trigger_reminders_does_not_resend_same_tier(client, seed, overdue_record):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     client.post("/admin/fees/reminders", json={"class_id": seed["class"].id, "overdue_only": True})
     resp2 = client.post("/admin/fees/reminders", json={"class_id": seed["class"].id, "overdue_only": True})
     assert resp2.json()["sent_count"] == 0
+
+
+def test_trigger_reminders_is_scoped_to_the_callers_school(client, db_session, seed, overdue_record):
+    """An overdue record belonging to a different school must not be reminded by this
+    school's admin - mirrors test_run_invoicing_is_scoped_to_the_callers_school below.
+
+    This endpoint dispatches real notifications to real parents (see fees.py's
+    dispatch_bulk call), so an unscoped query here isn't a silent data leak - it
+    messages another school's families. The happy-path reminder tests above pass a
+    school_id and would still pass if the filter were removed, which is exactly why
+    this negative case is needed.
+    """
+    other_school = School(name="Other School")
+    db_session.add(other_school)
+    db_session.flush()
+    other_class = SchoolClass(name="9A", academic_year=ACADEMIC_YEAR, school_id=other_school.id)
+    db_session.add(other_class)
+    student_role = db_session.query(Role).filter(Role.name == "student").one()
+    other_student = _make_user(db_session, student_role, "other-student", other_school)
+    db_session.flush()
+    other_schedule = FeeSchedule(
+        school_id=other_school.id, class_id=other_class.id, academic_year=ACADEMIC_YEAR,
+        fee_type="tuition", amount=9999.0, due_date=date.today() - timedelta(days=8),
+    )
+    db_session.add(other_schedule)
+    db_session.flush()
+    # Overdue by the same 8 days as the `overdue_record` fixture, so it sits in the
+    # exact same reminder tier - it is skipped for being another school's, not for
+    # failing to qualify.
+    other_record = FeeRecord(
+        student_id=other_student.id, fee_schedule_id=other_schedule.id, amount_due=9999.0,
+        amount_paid=0.0, status="overdue", due_date=other_schedule.due_date,
+    )
+    db_session.add(other_record)
+    db_session.commit()
+
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
+    resp = client.post("/admin/fees/reminders", json={"overdue_only": True})
+    assert resp.status_code == 200
+
+    # The caller's own school's record still gets its reminder...
+    assert db_session.query(FeeReminder).filter(FeeReminder.fee_record_id == overdue_record.id).count() == 1
+    # ...and the other school's identically-qualifying record gets nothing.
+    assert db_session.query(FeeReminder).filter(FeeReminder.fee_record_id == other_record.id).count() == 0
 
 
 # --- GET /admin/fees/status ---

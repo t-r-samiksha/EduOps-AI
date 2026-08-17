@@ -16,13 +16,17 @@ from app.routers import (
     attendance,
     audit,
     auth,
+    bots,
     documents,
     exams,
     fees,
     master_data,
+    notifications,
     parent,
     parents,
     reference,
+    remarks,
+    resources,
     risk,
     staffing,
     students,
@@ -72,6 +76,10 @@ app.include_router(master_data.router)
 app.include_router(teachers.router)
 app.include_router(students.router)
 app.include_router(parents.router)
+app.include_router(remarks.router)
+app.include_router(notifications.router)
+app.include_router(resources.router)
+app.include_router(bots.router)
 
 
 @app.get("/health")

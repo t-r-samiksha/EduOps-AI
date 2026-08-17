@@ -214,6 +214,52 @@ def test_decision_writes_audit_log_entry(client, db_session, seed, pending_leave
     assert entry.detail["comment"] == "not enough notice"
 
 
+def test_decision_comment_is_persisted_on_the_leave_request(client, db_session, seed, pending_leave):
+    """The comment used to be written ONLY into the audit log detail (asserted by the
+    test above) - a table teachers can't read, since GET /audit/* is admin/principal
+    only. It now also lands on the record the teacher can actually see."""
+    _override_user("admin", user_id=seed["admin_user"].id)
+    resp = client.post(
+        f"/admin/approvals/leave_request:{pending_leave.id}/decision",
+        json={"decision": "reject", "comment": "not enough notice"},
+    )
+    assert resp.status_code == 200
+
+    db_session.refresh(pending_leave)
+    assert pending_leave.decision_comment == "not enough notice"
+
+
+def test_decision_comment_reaches_the_teacher_via_leave_requests_endpoint(client, db_session, seed, pending_leave):
+    """End-to-end visibility: the teacher who filed the request reads their own
+    decision note back off GET /staff/leave_requests."""
+    _override_user("admin", user_id=seed["admin_user"].id)
+    assert client.post(
+        f"/admin/approvals/leave_request:{pending_leave.id}/decision",
+        json={"decision": "reject", "comment": "short-staffed that week"},
+    ).status_code == 200
+
+    _override_user("teacher", user_id=pending_leave.teacher_id)
+    resp = client.get("/staff/leave_requests")
+    assert resp.status_code == 200
+    mine = next(r for r in resp.json() if r["id"] == pending_leave.id)
+    assert mine["decision_comment"] == "short-staffed that week"
+
+
+def test_blank_decision_comment_does_not_clobber_an_existing_note(db_session, seed, pending_leave):
+    """decide_leave_request() is shared by two endpoints, only one of which sends a
+    comment - the quick-approve path must not blank out a note already recorded."""
+    from app.routers.staffing import decide_leave_request
+
+    decide_leave_request(db_session, pending_leave, "rejected", seed["admin_user"].id, None, "first note")
+    assert pending_leave.decision_comment == "first note"
+
+    decide_leave_request(db_session, pending_leave, "rejected", seed["admin_user"].id, None, "   ")
+    assert pending_leave.decision_comment == "first note"
+
+    decide_leave_request(db_session, pending_leave, "rejected", seed["admin_user"].id, None, None)
+    assert pending_leave.decision_comment == "first note"
+
+
 # --- admission_application as 2nd real source: real HTTP-level integration ---
 
 

@@ -11,6 +11,12 @@ frontend/dist/
 frontend/.vite/
 *.log
 npm-debug.log*
+# tsc -b artifacts: tsconfig.node.json sets "composite": true, so a project build
+# emits an incremental cache plus a compiled copy of vite.config.ts NEXT TO the
+# source (not into dist/). Build output, never source - see frontend/tsconfig.node.json.
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 # Backend (Python)
 __pycache__/
@@ -24,6 +30,10 @@ backend/.venv/
 .pytest_cache/
 .pip-tmp/
 backend/var/
+# pytest-cov output (added with the pytest-cov dev dep in requirements.txt)
+.coverage
+.coverage.*
+htmlcov/
 
 # Editor / OS
 .vscode/

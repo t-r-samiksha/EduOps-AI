@@ -82,6 +82,75 @@ def create_admin_auth_account(*, email: str, password: str, full_name: str | Non
     return create_auth_account(email=email, password=password, full_name=full_name, role="admin")
 
 
+RESOURCES_BUCKET = "resources"
+"""Private bucket holding teaching resources (RAG source documents). Private, not
+public: a resource belongs to one class and the read path is GET /resources, which
+applies role scoping. A public bucket would make every object URL-guessable and route
+around that entirely."""
+
+
+def ensure_resources_bucket() -> None:
+    """Create the `resources` bucket if it does not exist. Safe to call on every
+    upload - a bucket that already exists is left alone.
+
+    Supabase raises rather than returning a flag when the bucket already exists, and
+    the error text/status has varied across supabase-py versions, so this checks the
+    listing first and treats a create-time "already exists" as success too.
+    """
+    client = _new_client()
+    try:
+        existing = {b.name if hasattr(b, "name") else b.get("name") for b in client.storage.list_buckets()}
+    except Exception:  # noqa: BLE001 - listing is an optimization, not a gate
+        existing = set()
+    if RESOURCES_BUCKET in existing:
+        return
+    try:
+        client.storage.create_bucket(RESOURCES_BUCKET, options={"public": False})
+    except Exception as exc:  # noqa: BLE001
+        if "already exist" in str(exc).lower() or "duplicate" in str(exc).lower():
+            return
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Could not create the {RESOURCES_BUCKET!r} storage bucket: {exc}"
+        ) from exc
+
+
+def upload_resource_file(*, path: str, data: bytes, content_type: str) -> str:
+    """Persist bytes to the resources bucket and return the object path.
+
+    UNLIKE routers/documents.py's OCR upload, which builds a descriptive file_url
+    string and throws the bytes away, this actually stores the file - which is what
+    makes POST /bots/reindex able to re-chunk a resource without a re-upload.
+
+    `upsert` is on so re-uploading the same path replaces rather than 409s, keeping the
+    seed script idempotent.
+    """
+    ensure_resources_bucket()
+    client = _new_client()
+    try:
+        client.storage.from_(RESOURCES_BUCKET).upload(
+            path=path,
+            file=data,
+            file_options={"content-type": content_type, "upsert": "true"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Failed to store the uploaded file: {exc}"
+        ) from exc
+    return path
+
+
+def download_resource_file(path: str) -> bytes:
+    """Fetch a stored resource back. Used by ingestion so re-indexing reads from
+    storage rather than requiring the original upload request's bytes."""
+    client = _new_client()
+    try:
+        return client.storage.from_(RESOURCES_BUCKET).download(path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"Failed to read stored file {path!r}: {exc}"
+        ) from exc
+
+
 def sign_in_and_get_access_token(*, email: str, password: str) -> str:
     """Real Supabase Auth sign-in, server-side - used right after a fresh
     signup so the response can hand back a genuine access_token immediately,

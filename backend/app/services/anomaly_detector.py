@@ -109,6 +109,11 @@ class ClassAttendanceWindow:
     """The class's typical attendance rate to compare against (e.g. a longer-window
     average). Caller-supplied since "typical" is a lookback-window judgment call this
     pure function shouldn't make on its own."""
+    class_name: str | None = None
+    """Display name for the generated message. Optional and caller-supplied because
+    this module stays ORM-free (see the module docstring) - it can't look a name up
+    itself. Defaults to None so existing positional constructions and unit tests keep
+    working; the message falls back to "Class {id}" exactly as before when unset."""
 
 
 ATTENDANCE_DROP_THRESHOLD = 0.15
@@ -131,7 +136,10 @@ def detect_attendance_drops(windows: list[ClassAttendanceWindow]) -> list[Detect
                 entity_type="classes",
                 entity_id=w.class_id,
                 severity="urgent" if drop >= URGENT_ATTENDANCE_DROP_THRESHOLD else "normal",
-                message=f"Class {w.class_id} attendance dropped to {recent_rate:.0%} (baseline {w.baseline_rate:.0%})",
+                message=(
+                    f"{w.class_name or f'Class {w.class_id}'} attendance dropped to "
+                    f"{recent_rate:.0%} (baseline {w.baseline_rate:.0%})"
+                ),
                 detail={"recent_rate": round(recent_rate, 3), "baseline_rate": round(w.baseline_rate, 3), "drop": round(drop, 3)},
             )
         )
@@ -184,6 +192,9 @@ def detect_document_backlogs(items: list[DocumentBacklogItem]) -> list[DetectedA
 class TeacherLoadObservation:
     teacher_id: int
     periods_per_week: int
+    teacher_name: str | None = None
+    """Display name for the generated message - same caller-supplied pattern and
+    fallback behaviour as ClassAttendanceWindow.class_name above."""
 
 
 MIN_TEACHERS_FOR_MODEL = 6
@@ -200,7 +211,10 @@ def _build_overload_anomaly(observation: TeacherLoadObservation, baseline: float
         entity_type="users",
         entity_id=observation.teacher_id,
         severity="urgent" if baseline > 0 and observation.periods_per_week >= baseline * 2 else "normal",
-        message=f"Teacher {observation.teacher_id} is teaching {observation.periods_per_week} periods/week vs a peer average of ~{baseline:.1f}",
+        message=(
+            f"{observation.teacher_name or f'Teacher {observation.teacher_id}'} is teaching "
+            f"{observation.periods_per_week} periods/week vs a peer average of ~{baseline:.1f}"
+        ),
         detail={"periods_per_week": observation.periods_per_week, "peer_baseline": round(baseline, 1)},
     )
 

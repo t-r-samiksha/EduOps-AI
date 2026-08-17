@@ -811,12 +811,12 @@ Approve or reject a leave request. On approval, resolves every distinct timetabl
 slot the teacher has during the leave window and creates a `Substitution` row per
 slot, pre-populated with the solver's top suggestion (if any).
 - **Roles:** admin, principal
-- **Request:** `{ "leave_request_id": 12, "decision": "approved", "academic_year": "2026-27" }`
-(`academic_year` required when `decision` is `"approved"` - needed to resolve affected timetable slots; omit for `"rejected"`)
+- **Request:** `{ "leave_request_id": 12, "decision": "approved", "academic_year": "2026-27", "comment": null }`
+(`academic_year` required when `decision` is `"approved"` - needed to resolve affected timetable slots; omit for `"rejected"`. `comment` is optional - an approver's note back to the teacher, persisted to `leave_requests.decision_comment` and appended to the teacher's notification. A null/blank `comment` never overwrites a note an earlier decision already recorded.)
 - **Response:**
 ```json
 {
-  "leave_request": { "id": 12, "teacher_id": 97, "start_date": "2026-08-14", "end_date": "2026-08-14", "reason": "Feeling unwell", "status": "approved", "requested_at": "2026-08-10T10:00:00Z", "decided_by": 41, "decided_at": "2026-08-10T10:05:00Z" },
+  "leave_request": { "id": 12, "teacher_id": 97, "start_date": "2026-08-14", "end_date": "2026-08-14", "reason": "Feeling unwell", "status": "approved", "requested_at": "2026-08-10T10:00:00Z", "decided_by": 41, "decided_at": "2026-08-10T10:05:00Z", "decision_comment": "Approved - Meera covers your Friday periods." },
   "substitutions": [
     {
       "id": 5, "leave_request_id": 12, "timetable_slot_id": 501, "original_teacher_id": 97, "substitute_teacher_id": 99,
@@ -871,7 +871,14 @@ system (no school-scoping yet, same simplification as `/timetable/active` and
 `/attendance/summary`) and may filter by `teacher_id`.
 - **Roles:** teacher, admin, principal
 - **Query:** `?status=&teacher_id=` (both optional)
-- **Response:** array of the same leave-request shape as `/staff/request_leave`'s response.
+- **Response:** array of the same leave-request shape as `/staff/request_leave`'s response, including `decision_comment` (`null` while pending, or when the approver left it blank).
+
+  `decision_comment` is the teacher's only durable view of *why* a request was
+  decided the way it was. The Approvals Inbox has always accepted a `comment` on
+  `POST /admin/approvals/{id}/decision`, but it was previously written **only** into
+  `audit_log_entries.detail` - and `GET /audit/*` is admin/principal-only, so the note
+  was unreadable by the person it was written for. It is now persisted on the leave
+  request itself and rendered on the teacher's own leave card.
 
 #### `GET /admin/staffing/forecast`
 Predictive staffing shortage forecast for a week. Recomputes from historical approved
@@ -995,6 +1002,46 @@ was already coding against it.
 ```json
 { "items": [ { "student_id": 103, "risk_level": "high", "reasons": ["attendance rate 40% is below the 90% threshold"], "flagged_at": "2026-08-11T02:00:00Z" } ] }
 ```
+
+### Remarks (read)
+
+Read access to the teacher remarks that feed the early-warning scorer. Until this
+endpoint existed, `remark_stubs` rows were only reachable indirectly - the sentiment
+that came out of them showed up inside a `RiskFlag`'s `reasons` strings, but nothing
+could show a parent or student the actual remark text behind a flag.
+
+**Reads the placeholder table, deliberately.** `remark_stubs` is Person B's
+stand-in (see the Early-warning section above and `app/models/risk.py`'s
+`RemarkStub` docstring). This endpoint is a thin read over whatever that table
+holds; when Person B's real remarks system lands, repoint the query and the
+response shape below stays the same. It is read-only on purpose - creating remarks
+is Person B's domain, not this one.
+
+`sentiment` is computed per-request by `app/services/remark_sentiment.py` (VADER),
+not stored - there is no sentiment column on the table.
+
+#### `GET /remarks/student/{student_id}`
+Remarks written about one student, newest first. Role-scoped the same way as
+`GET /admin/fees/status`: a student may only read their own (`403` otherwise); a
+parent must name a linked child (`403` if not linked); a teacher sees only students
+in classes where they are `class_teacher` (`403` otherwise); admin/principal are
+scoped to their own school via `User.school_id` (`404` for a student outside it).
+- **Roles:** student, parent, teacher, admin, principal
+- **Response:**
+```json
+{
+  "items": [
+    {
+      "id": 12, "student_id": 103, "teacher_id": 97, "teacher_name": "Asha Rao",
+      "remark_text": "Missed three consecutive homework submissions.",
+      "sentiment": { "label": "negative", "compound": -0.4019 },
+      "created_at": "2026-08-11T09:15:00Z"
+    }
+  ]
+}
+```
+- **Errors:** `403` not authorized for this student (any role's scoping failure);
+  `404` unknown `student_id`, or a student outside an admin/principal's own school.
 
 ### Admin command center
 
@@ -1268,6 +1315,7 @@ unified endpoint that silently does less.
 - **Roles:** admin, principal
 - **Request:** `{ "decision": "approve", "comment": null, "academic_year": "2026-27" }`
   (`academic_year` is an **addition beyond the original stub** - required only when deciding a `leave_request` approval with `decision="approve"`, needed to resolve affected timetable slots, exactly like `PUT /staff/approve_leave` already requires. Flagged here rather than silently extending the shape.)
+  (`comment` for a `leave_request` decision is now **persisted to `leave_requests.decision_comment`** and surfaced to the teacher via `GET /staff/leave_requests` + their notification - not only recorded in the audit detail as before. See that endpoint's note.)
 - **Response:** `{ "id": "leave_request:47", "status": "approved" }`
 - **Errors:** `400` invalid `decision`, malformed id, missing `academic_year` on an approve, or the request is no longer pending; `404` unknown type or entity_id.
 
@@ -2142,26 +2190,184 @@ sync, search, the three RAG chatbots._
 This section is Person C's to extend — add/adjust endpoints here without touching
 Person A/B's sections.
 
-### RAG chatbots
+### Teaching resources (RAG source documents)
 
-#### `POST /chat/student-bot`
-Ask the student-facing RAG chatbot.
-- **Roles:** student
-- **Request:** `{ "message": "When is the Ch.4 assignment due?", "conversation_id": null }`
+The corpus the bots retrieve from. Uploaded files are **actually persisted** to
+Supabase Storage (bucket `resources`) and the returned `file_url` is a real,
+fetchable object path — deliberately unlike `documents.file_url` in Person A's OCR
+flow, which is a fabricated descriptive string for an image that is discarded after
+text extraction (see `routers/documents.py`). Do not copy that behaviour here.
+
+> **SCOPED BY GRADE, NOT CLASS.** Resources and their `kb_chunks` are scoped to
+> `(school_id, grade_level)`. Sections of a grade follow the same curriculum, so a
+> Grade 3 handout is Grade 3 material — uploading it once per section was duplicated
+> work and left 3-B unable to read 3-A's notes. This also aligns retrieval with Top
+> Doubts, which already aggregates by `(school_id, grade_level, subject_id)`.
+>
+> **`school_id` is load-bearing.** `grade_level` is a plain integer, not an FK — grade
+> 1 exists in every school — so filtering on grade alone would cross tenants. Both
+> columns are always applied together.
+>
+> **Consequence:** a Grade 3 - A student can now retrieve material uploaded for Grade
+> 3 - B. That is the intended widening, covered by
+> `test_sibling_sections_of_a_grade_now_share_material`.
+
+#### `POST /resources/upload`
+Upload a teaching resource and ingest it into the vector store synchronously.
+- **Roles:** teacher, admin, principal
+- **Request:** `multipart/form-data` — `file`, `title`, `grade_level`, `subject_id` (optional)
+- **Accepted types:** `.txt`, `.md`, **`.pdf`**. Max 20 MB.
+  **PDF extraction is text-layer only** (`pypdf`) — it does **not** OCR. A scanned PDF
+  whose pages are images extracts to nothing and returns `422` rather than being
+  stored as an unretrievable resource. Tesseract exists in this codebase
+  (`services/ocr_engine.py`) but serves the separate `documents` admin flow and is
+  deliberately not bridged in.
+- **Scoping:** a teacher may upload for a grade they actually teach (homeroom class or
+  any grade they hold timetable slots for). Admin/principal may upload for any grade
+  **in their own school**. `school_id` is taken from the caller's token and is not a
+  request field, so targeting another tenant is structurally impossible rather than
+  merely forbidden.
+- **Ingestion is inline and synchronous**, following the `POST /admin/fees/schedules`
+  precedent (which triggers invoicing directly rather than via a queue). The response
+  is returned only after chunks are embedded and stored, so `chunk_count` is truthful.
 - **Response:**
 ```json
-{ "conversation_id": 12, "reply": "It's due Aug 15.", "sources": [ { "title": "Ch. 4 problems", "url": null } ] }
+{ "id": 27, "title": "FECU101 — Science", "school_id": 6318, "grade_level": 1, "subject_id": 3802,
+  "file_url": "6318/grade-1/27-fecu101-science.pdf", "mime_type": "application/pdf",
+  "indexed_at": "2026-08-17T04:10:00Z", "chunk_count": 7 }
+```
+- **Errors:** `400` no class exists at that grade in the caller's school (the resource
+  would be unreachable); `403` teacher uploading for a grade they don't teach; `413`
+  over 20 MB; `415` unsupported file type; `422` no readable text extracted (scanned
+  PDF); `502` storage or embedding failure. Nothing is left half-written — the
+  `resources` row is only committed once ingestion succeeds.
+
+#### `GET /resources`
+List teaching resources, role-scoped.
+- **Roles:** any authenticated
+- **Query:** `?grade_level=&subject_id=` (both optional)
+- **Scoping:** student → their own enrolled grade; teacher → grades they teach;
+  admin/principal → their own school. `school_id` is applied for **every** role. A
+  `grade_level` outside the caller's scope is `403`, never silently empty.
+- **Response:** `{ "items": [ { "id": 27, "title": "...", "school_id": 6318, "grade_level": 1, "subject_id": 3802, "mime_type": "application/pdf", "indexed_at": "2026-08-17T04:10:00Z", "created_at": "2026-08-17T04:09:58Z" } ] }`
+
+### RAG chatbots
+
+**This section replaces the original `/chat/{student,teacher,parent}-bot` stub.**
+Same reconcile-in-place treatment as the notification-center stub above: the built
+shape differs from the proposal in several ways that matter, so the doc now describes
+what is live rather than what was once proposed.
+
+| Original stub | As built | Why |
+| --- | --- | --- |
+| `POST /chat/student-bot` | `POST /bots/student/ask` | One `/bots` namespace covering ask + reindex + insights, rather than three sibling `/chat/*` paths that would collide with the class-chat stubs below. |
+| `{ "message": ... }` | `{ "query": ... }` | Matches the retrieval vocabulary used throughout (`embed_query`, `RETRIEVAL_QUERY`). |
+| — | `class_id` **required** | **`class_id` is the security boundary.** See the callout below. |
+| — | `subject_id` optional | Narrows retrieval when a student is asking within one subject. |
+| `{ "reply": ... }` | `{ "answer": ... }` | — |
+| `sources: [{title, url}]` | `citations: [{chunk_id, source_id, title, snippet}]` | A `url` to an object-storage path is useless to a student; a text `snippet` plus the `chunk_id` that produced it is the visible proof of grounding. |
+| `conversation_id` | **not built** | Multi-turn conversation state is not implemented. Each ask is stateless. `chatbot_logs` records history for analytics, not for context carry-over. Do not build a UI that assumes follow-up questions retain context. |
+
+> **`class_id` is a security boundary, not a filter.** The `class_id` in the request
+> body is validated server-side against the caller's own primary `Enrollment` before
+> any retrieval happens, and the retrieval scope — `(school_id, grade_level)` — is then
+> derived from that *validated* class.
+>
+> The request still names a **class**, not a grade, even though scope is grade-level:
+> a client that supplied `grade_level` directly could name any grade in the school,
+> whereas a class is something it must prove membership of. Covered by
+> `test_student_cannot_claim_a_class_they_are_not_enrolled_in`.
+
+#### `POST /bots/student/ask`
+Ask the student Doubt Bot. Retrieval-augmented, grounded, and refuses outside its context.
+- **Roles:** student
+- **Request:** `{ "query": "why do we carry the one when multiplying?", "class_id": 5208, "subject_id": 3631 }`
+- **Behaviour:** embeds the query (`RETRIEVAL_QUERY`), retrieves top-5 `kb_chunks` by
+  cosine distance filtered to the validated `class_id`, and passes only those chunks
+  to the model. **If the retrieved context does not cover the question the bot says
+  so rather than answering from general knowledge** — the grounded refusal is
+  intended behaviour, not a failure.
+- **Response:**
+```json
+{ "answer": "Your notes call it regrouping...",
+  "citations": [ { "chunk_id": 41, "source_id": 12, "title": "Grade 3 Math — Multiplication", "snippet": "When a column adds to more than 9..." } ] }
+```
+- **Errors:** `400` empty query; `403` `class_id` the caller is not enrolled in;
+  `502` embedding or generation failure.
+
+#### `POST /bots/reindex`
+Manually re-ingest resources. Idempotent — re-running never duplicates chunks
+(`kb_chunks` has a unique key on `(source_type, source_id, chunk_index)`).
+- **Roles:** admin, principal
+- **Request:** `{ "resource_id": 12 }` — omit to reindex every not-yet-indexed
+  resource in the caller's school.
+- **Response:** `{ "resources_indexed": 3, "chunks_written": 21 }`
+
+### Bot insights — Top Doubts
+
+When students across several sections of the same grade ask about the same concept,
+the teacher who teaches that subject at that grade sees one ranked list of confusions
+rather than several disconnected question logs.
+
+> **Aggregation is by `(school_id, grade_level, subject_id)` — deliberately NOT by
+> `class_id`.** Confusion shared between Grade 3 - A and Grade 3 - B is *one* insight,
+> not two. **This supersedes the older `POST /doubts` thread stubs' per-class framing**
+> below; those describe human-to-human threads and are still unbuilt. Same
+> reconcile-in-place treatment as the notification and chatbot stubs.
+
+Clusters are computed **live** from `chatbot_logs.query_embedding` — the vector already
+stored when the student asked, never re-embedded. Nothing is persisted; there is no
+`doubt_clusters` table to keep fresh.
+
+#### `GET /bots/insights/top-doubts`
+Ranked confusions for one (grade, subject).
+- **Roles:** teacher (only grades/subjects they actually teach), admin, principal
+  (any, within their own school). Everyone else `403`.
+- **Query:** `?grade_level=3&subject_id=3631&days=7&limit=5`
+- **Teaching assignment is resolved from `timetable_slots`** joined to `classes` on
+  `grade_level`, not from `teacher_subjects` — a timetable slot is evidence of actually
+  teaching that grade, whereas `teacher_subjects` only records qualification. Falls
+  back to `teacher_subjects` when a grade has no slots at all.
+- **Response:**
+```json
+{ "items": [
+  { "label": "Regrouping when multiplying",
+    "description": "Students are unsure what the carried digit represents.",
+    "question_count": 6, "distinct_student_count": 5,
+    "sections": ["Grade 3 - A", "Grade 3 - B"],
+    "sample_questions": ["why do we carry the one", "i dont get the small number on top"] } ] }
+```
+- **`sections`** is the cross-section proof — two section names on one cluster is the
+  whole point of the feature.
+- **Degraded mode:** with fewer than 3 usable logs, returns the most recent distinct
+  questions with `label: null` and `description: null` rather than an empty panel or a
+  crash. A widget must handle `label === null`.
+
+#### `GET /bots/insights/my-top-doubts`
+The teacher-dashboard convenience call. Resolves the caller's own
+`(grade_level, subject_id)` pairs from `timetable_slots` and returns clusters per pair.
+- **Roles:** teacher (admin/principal get an empty `items`, since they teach nothing)
+- **Query:** `?days=7&limit=5`
+- **Response:**
+```json
+{ "items": [ { "grade_level": 3, "subject_id": 3631, "subject_name": "Math", "clusters": [ /* as above */ ] } ] }
 ```
 
-#### `POST /chat/teacher-bot`
-Ask the teacher-facing RAG chatbot. Same request/response shape as `/chat/student-bot`.
-- **Roles:** teacher
-
-#### `POST /chat/parent-bot`
-Ask the parent-facing RAG chatbot. Same request/response shape as `/chat/student-bot`.
-- **Roles:** parent
+#### Teacher and Parent bots
+`POST /bots/teacher/ask` and `POST /bots/parent/ask` are **not built yet**. They will
+reuse the same retrieval core with a different scope resolver (a teacher's taught
+classes; a parent's linked children's classes). The original stub's claim that they
+share the student bot's request shape no longer holds — they will not take a raw
+`class_id`, since neither role has a single enrollment to validate against.
 
 ### Class chat + doubt threads
+
+> **Note:** the `POST /doubts` / `GET /doubts/{thread_id}` stubs below describe
+> **human-to-human doubt threads** — a student posts, a teacher replies. They are
+> still unimplemented and are **not** satisfied by the Doubt Bot above, nor by the
+> Top Doubts clustering in the bot-insights section: those answer questions with an
+> LLM and aggregate them for teachers respectively, and neither creates a thread or a
+> reply anyone can post into. Left as-is for whoever builds them.
 
 #### `GET /classroom/{class_id}/chat`
 Fetch class chat messages.
@@ -2211,19 +2417,96 @@ Fetch announcements targeted at the current user.
 
 ### Notification center
 
+**BUILT — and it diverges from the stub that was here. Read this before coding
+against it.** This section previously held a 2-endpoint stub (`GET /notifications`
+with `?unread_only=&page=`, and `POST /notifications/{id}/read`) that nothing
+implemented. It has now been built for real, out of Person A's session, because
+six of Person A's handlers already computed a notification audience and dropped it
+on the floor. Same reconciliation situation as `GET /parent/children` below - the
+implementation is the source of truth; the differences from the old stub are:
+
+| Stub said | Actually built | Why |
+|---|---|---|
+| `?unread_only=` | `?read=true\|false` | Tri-state: omit for all, `false` for unread, `true` for read. `unread_only=false` couldn't express "only read ones". |
+| `POST /{id}/read` | `PUT /{id}/read` | Idempotent state set, not a creation. Matches `PUT /risk/{id}/acknowledge` elsewhere in this doc. |
+| `type` | `source_type` | Avoids shadowing a JS builtin-ish name, and matches the column. |
+| `message` | `title` + `body` | The bell needs a one-line title and an optional longer body; one field couldn't serve both. |
+| `read: false` (bool) | `read_at: null` (timestamp) | "When did they see it" is answerable, not just "did they". `null` = unread. |
+| — | `priority`, `source_id`, `acknowledged_at` | Urgency styling, deep-linking to the originating entity, and explicit dismissal. |
+
+The `{items, total, page, page_size}` envelope is unchanged from the stub - and
+note this is the **first actually-paginated endpoint in the repo**; every other
+list route returns an unpaginated `{"items": [...]}` despite this doc's
+Conventions section specifying pagination. New list endpoints should follow this
+one, not the older routers.
+
+Notifications are written only by `app/services/notify.py`, inside the
+transaction of the state change that caused them (see that module's docstring).
+There is no endpoint to create one: a notification is a side effect of something
+real happening, never a thing a client posts.
+
 #### `GET /notifications`
-Fetch the current user's notification feed.
+The caller's own inbox, newest first. **There is deliberately no `user_id`
+parameter** - a user reads their own inbox and nobody else's, so there is nothing
+to authorize and nothing to leak.
 - **Roles:** any authenticated
-- **Query:** `?unread_only=&page=`
+- **Query:** `?read=true|false&page=1&page_size=20` (`read` omitted = both; `page_size` max 100)
 - **Response:**
 ```json
-{ "items": [ { "id": 30, "type": "grade_posted", "message": "New grade posted for Ch. 4", "read": false, "created_at": "2026-08-09T06:00:00Z" } ], "total": 1, "page": 1, "page_size": 20 }
+{
+  "items": [
+    {
+      "id": 30, "source_type": "early_warning", "source_id": 1435,
+      "title": "Aarav Kumar flagged as high risk",
+      "body": "attendance rate 40% is below the 90% threshold",
+      "priority": "urgent", "read_at": null, "acknowledged_at": null,
+      "created_at": "2026-08-16T06:00:00Z"
+    }
+  ],
+  "total": 1, "page": 1, "page_size": 20
+}
 ```
+- **Errors:** `400` `page` < 1, or `page_size` outside 1-100.
 
-#### `POST /notifications/{id}/read`
-Mark a notification as read.
+#### `GET /notifications/unread-count`
+Cheap count for the bell badge - hit frequently, served by the
+`(user_id, read_at)` composite index.
 - **Roles:** any authenticated
-- **Response:** `{ "id": 30, "read": true }`
+- **Response:** `{ "count": 3 }`
+
+#### `PUT /notifications/{id}/read`
+Mark one notification read. Idempotent: re-reading an already-read one leaves the
+original `read_at` untouched rather than bumping it.
+- **Roles:** any authenticated (own notifications only)
+- **Response:** the updated notification, same item shape as `GET /notifications`.
+- **Errors:** `404` unknown id **or** someone else's notification - deliberately
+  not `403`, which would confirm the row exists.
+
+#### `PUT /notifications/read-all`
+Mark every one of the caller's unread notifications read.
+- **Roles:** any authenticated
+- **Response:** `{ "updated": 7 }`
+
+#### `PUT /notifications/{id}/acknowledge`
+Explicitly acknowledge/dismiss. Independent of read state rather than implying it
+(same separation as `PUT /risk/{id}/acknowledge` vs `resolve`).
+- **Roles:** any authenticated (own notifications only)
+- **Response:** the updated notification.
+- **Errors:** `404` unknown id or not the caller's.
+
+#### `GET /notifications/stream`
+SSE live feed of the caller's own unread count and most recent notifications.
+Same mechanism and the same `_format_sse_event` shape as `GET /admin/alerts/stream`
+(see that endpoint's "SSE, not Socket.io" note - still no Socket.io in this repo,
+still no new dependency). Polls on an interval rather than pushing on write.
+- **Roles:** any authenticated
+- **Response:** `text/event-stream`, each event `data: {...}\n\n`:
+```json
+{ "unread_count": 3, "latest": [ { "id": 30, "source_type": "early_warning", "title": "...", "priority": "urgent", "read_at": null, "created_at": "..." } ] }
+```
+- **Auth caveat:** as with the alerts stream, `EventSource` can't send an
+  `Authorization` header - the frontend reads this with `fetch` + a
+  `ReadableStream` reader instead.
 
 ### Parent portal
 

@@ -12,6 +12,7 @@ from app.models.risk import Intervention, RiskFlag
 from app.models.user import User
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.notify import dispatch_bulk
 
 router = APIRouter(tags=["early-warning"])
 
@@ -138,9 +139,25 @@ def create_flag(
     score = body.score if body.score is not None else RISK_LEVEL_DEFAULT_SCORE[body.risk_level]
     flag = RiskFlag(student_id=body.student_id, risk_level=body.risk_level, score=score, reasons=body.reasons, status="open")
     db.add(flag)
+    # Flush (not commit) so flag.id exists for source_id and _enrich_flag_out can
+    # resolve the audience - the notification then commits atomically with the flag
+    # below, per services/notify.py's contract.
+    db.flush()
+    out = _enrich_flag_out(db, flag)
+    # The parent_ids/homeroom_teacher_id enrichment above was built for exactly this
+    # and had no consumer until now (see _enrich_flag_out's docstring).
+    dispatch_bulk(
+        db,
+        user_ids=[*out.parent_ids, *([out.homeroom_teacher_id] if out.homeroom_teacher_id is not None else [])],
+        source_type="early_warning",
+        title=f"{out.student_name or 'A student'} flagged as {flag.risk_level} risk",
+        body="; ".join(flag.reasons),
+        priority="urgent" if flag.risk_level == "high" else "important",
+        source_id=flag.id,
+    )
     db.commit()
     db.refresh(flag)
-    return _enrich_flag_out(db, flag)
+    return out
 
 
 # --- GET /risk/flagged -------------------------------------------------------------

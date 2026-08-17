@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
   Armchair,
+  Bot,
   BookOpenCheck,
   CalendarClock,
   ClipboardList,
@@ -63,6 +64,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   ],
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
+    { label: "Doubt Bot", path: "/student/doubt-bot", icon: Bot },
     { label: "Timetable", path: "/student/timetable", icon: CalendarClock },
     { label: "Fees", path: "/student/fees", icon: Wallet },
     { label: "Exam Seats", path: "/student/exams", icon: Armchair },

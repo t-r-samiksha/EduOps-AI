@@ -24,6 +24,14 @@ class LeaveRequest(Base):
     requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_comment: Mapped[str | None] = mapped_column(String(500))
+    """The approver's note back to the teacher ("short-staffed that week, refile for
+    September"). Same role AdmissionApplication.decision_justification plays for an
+    admission decision. Previously the Approvals Inbox accepted a `comment` and wrote
+    it ONLY into audit_log_entries.detail - a table teachers can't read (GET /audit/*
+    is admin/principal-only) - so the decision reason was invisible to the one person
+    it was written for. Persisted here so it survives on the record itself rather than
+    only inside a notification the teacher may have already dismissed."""
 
     teacher: Mapped["User"] = relationship(foreign_keys=[teacher_id])
     decider: Mapped["User | None"] = relationship(foreign_keys=[decided_by])

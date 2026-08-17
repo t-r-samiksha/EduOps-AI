@@ -2,6 +2,7 @@ import { CalendarClock, AlertTriangle, ScanFace, Users, BookOpenCheck } from "lu
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
 import QuickLinkCard from "@/components/shared/QuickLinkCard";
+import TopDoubtsWidget from "@/components/bots/TopDoubtsWidget";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
@@ -71,6 +72,10 @@ export default function TeacherDashboard() {
           tone={behindCount > 0 ? "urgent" : "positive"}
         />
       </div>
+
+      {/* Above the schedule deliberately: this is the one panel that tells a teacher
+          something they could not already work out from their own timetable. */}
+      <TopDoubtsWidget />
 
       <Card>
         <CardHeader>

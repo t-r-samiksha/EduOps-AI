@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -271,7 +271,13 @@ def test_summary_teacher_only_sees_own_subjects(client, seed):
 
 def test_summary_admin_sees_plan_with_correct_pace_fields(client, seed):
     _override_user("admin", user_id=seed["admin_user"].id)
-    today = date.today()
+    # UTC, not date.today(). GET /syllabus/summary computes elapsed days from
+    # datetime.now(timezone.utc).date() (routers/syllabus.py), so building the term
+    # window from a LOCAL date made this test fail whenever local and UTC dates
+    # disagree - i.e. every run between 00:00 and 05:30 IST, where it computed
+    # 34/70 = 0.486 instead of 35/70 = 0.5. A latent bug in the test, not the
+    # endpoint: the server is consistently UTC, the test was not.
+    today = datetime.now(timezone.utc).date()
     plan_id = client.post(
         "/syllabus/plan",
         json={

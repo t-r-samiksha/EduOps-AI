@@ -132,6 +132,29 @@ def test_pending_leave_request_is_normal(db_session, base):
     assert _find(leave_request_alerts(db_session), f"leave_request:{lr.id}").severity == "normal"
 
 
+def test_leave_request_alert_names_the_teacher(db_session, base):
+    lr = LeaveRequest(teacher_id=base["teacher"].id, start_date=date.today(), end_date=date.today(), reason="sick", status="pending")
+    db_session.add(lr)
+    db_session.commit()
+
+    message = _find(leave_request_alerts(db_session), f"leave_request:{lr.id}").message
+    assert base["teacher"].full_name in message
+    assert f"Teacher {base['teacher'].id}" not in message
+
+
+def test_leave_request_alert_falls_back_to_id_for_unresolvable_teacher(db_session, base):
+    """The name lookup is a batched query, not a join - a teacher row that can't be
+    found must still leave the alert identifying SOMETHING rather than rendering an
+    empty name."""
+    lr = LeaveRequest(teacher_id=base["teacher"].id, start_date=date.today(), end_date=date.today(), reason="sick", status="pending")
+    db_session.add(lr)
+    db_session.commit()
+
+    from app.services.alert_aggregator import _named
+
+    assert _named({}, 4242, "Teacher") == "Teacher 4242"
+
+
 def test_approved_leave_request_is_excluded(db_session, base):
     lr = LeaveRequest(teacher_id=base["teacher"].id, start_date=date.today(), end_date=date.today(), reason="sick", status="approved")
     db_session.add(lr)
@@ -362,7 +385,11 @@ def test_recently_overdue_fee_is_normal_severity(db_session, base):
     assert alert.severity == "normal"
     assert alert.entity_type == "fee_records"
     assert alert.entity_id == record.id
-    assert str(base["student"].id) in alert.message
+    # Identifies the student by display name, not a bare user id - the message is a
+    # flat pre-formatted string the frontend renders verbatim, so an id here reaches
+    # the admin as "Student 74141" with nothing to resolve it against.
+    assert base["student"].full_name in alert.message
+    assert f"Student {base['student'].id}" not in alert.message
 
 
 def test_severely_overdue_fee_is_urgent(db_session, base):

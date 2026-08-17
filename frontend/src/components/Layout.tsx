@@ -6,6 +6,7 @@ import { signOut } from "@/api/auth";
 import { queryClient } from "@/api/queryClient";
 import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
+import { NotificationBell } from "@/components/notifications/NotificationBell";
 import { NAV_ITEMS, ROLE_LABEL } from "@/lib/navConfig";
 import { cn } from "@/lib/utils";
 
@@ -132,6 +133,7 @@ export default function Layout() {
           </div>
           <div className="flex items-center gap-3 text-sm">
             <span className="hidden truncate text-ink-muted sm:inline">{user?.email}</span>
+            <NotificationBell />
             <ThemeToggle />
             <Button variant="outline" size="sm" onClick={handleLogout}>
               <LogOut className="h-3.5 w-3.5" />

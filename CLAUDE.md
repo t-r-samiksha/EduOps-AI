@@ -72,6 +72,16 @@ Team of 3, vertical domain ownership:
   The manual CLI scripts (`python -m scripts.run_nightly_risk_scoring --school-id ...
   --academic-year ...`, etc.) still work unchanged for on-demand/single-school runs.
 - Backend deps: `pip install -r requirements.txt --break-system-packages` (or use a venv)
+- **Always run backend tooling through the venv interpreter, not a bare command.**
+  There is a venv at `backend/venv`, and the project's deps are installed only there.
+  A bare `alembic ...` / `pytest ...` / `python ...` on this machine resolves to the
+  global Python 3.14, which has no `pgvector` — every such command dies with
+  `ModuleNotFoundError: No module named 'pgvector'` from `app/models/attendance.py`,
+  which looks like a code error but is purely an interpreter-resolution problem.
+  Use `backend/venv/Scripts/python.exe -m alembic <cmd>` (and `-m pytest`) instead.
+  Ad-hoc one-off scripts that import `app.*` also need `PYTHONPATH=.` set from
+  `/backend`, since only `alembic/env.py` and pytest add the app root to `sys.path`
+  themselves: `PYTHONPATH=. backend/venv/Scripts/python.exe myscript.py`.
 - **System dependency (not a pip package):** Document OCR (`backend/app/services/
   ocr_engine.py`) needs the actual Tesseract OCR engine binary installed separately -
   `pytesseract` is only a subprocess wrapper around it. Windows: `winget install

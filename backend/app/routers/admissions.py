@@ -27,6 +27,7 @@ from app.services.admissions_rules import (
 )
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, require_role
+from app.services.notify import dispatch_notification
 from app.services.supabase_admin import create_auth_account
 
 router = APIRouter(tags=["admissions"])
@@ -323,6 +324,19 @@ def decide_admission_application(
     application.decided_at = datetime.now(timezone.utc)
     if decision_justification is not None:
         application.decision_justification = decision_justification
+
+    # Placed here, before the reject-path early return below, so ONE call covers both
+    # outcomes. Only reaches a guardian who ALREADY has an account: on the accept path
+    # a brand-new parent account may be created further down, and that guardian has no
+    # user row to notify at this point (they get their credentials out-of-band anyway).
+    guardian = db.query(User).filter(User.email == application.guardian_email).one_or_none()
+    if guardian is not None:
+        dispatch_notification(
+            db, user_id=guardian.id, source_type="admission_decision",
+            title=f"Admission application {new_status}",
+            body=f"{application.applicant_name}, grade {application.grade_applied}",
+            priority="important", source_id=application.id,
+        )
 
     if new_status != "accepted":
         return AdmissionDecisionOutcome(enrollment_created=False)

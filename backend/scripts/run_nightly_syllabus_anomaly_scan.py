@@ -146,7 +146,8 @@ def _detect_attendance_drops_for_school(session: Session, school_id: int, academ
         recent_present = sum(1 for r in recent_rows if r.status == "present")
         windows.append(
             ClassAttendanceWindow(
-                class_id=c.id, recent_present_count=recent_present, recent_total_count=len(recent_rows), baseline_rate=baseline_rate
+                class_id=c.id, recent_present_count=recent_present, recent_total_count=len(recent_rows), baseline_rate=baseline_rate,
+                class_name=c.name,
             )
         )
 
@@ -175,7 +176,19 @@ def _detect_teacher_overload_for_school(session: Session, school_id: int, academ
         .group_by(TimetableSlot.teacher_id)
         .all()
     )
-    observations = [TeacherLoadObservation(teacher_id=teacher_id, periods_per_week=count) for teacher_id, count in rows]
+    # Resolve teacher display names here rather than in the detector: anomaly_detector
+    # is deliberately ORM-free, and the message it builds is PERSISTED into
+    # anomaly_flags.detail["message"], so a bare id baked in at write time can never be
+    # fixed up later by the reader (services/alert_aggregator.py just replays it).
+    teacher_ids = [teacher_id for teacher_id, _count in rows]
+    names = {
+        u.id: (u.full_name or u.email or f"Teacher {u.id}")
+        for u in session.query(User.id, User.full_name, User.email).filter(User.id.in_(teacher_ids)).all()
+    } if teacher_ids else {}
+    observations = [
+        TeacherLoadObservation(teacher_id=teacher_id, periods_per_week=count, teacher_name=names.get(teacher_id))
+        for teacher_id, count in rows
+    ]
     return detect_teacher_overload(observations)
 
 

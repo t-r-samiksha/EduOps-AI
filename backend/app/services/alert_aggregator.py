@@ -79,7 +79,7 @@ invigilation duties.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
@@ -91,7 +91,9 @@ from app.models.document import Document, ExtractedEntity
 from app.models.fees import FeeRecord
 from app.models.risk import RiskFlag
 from app.models.staffing import LeaveRequest, Substitution
+from app.models.subject import Subject
 from app.models.syllabus import AnomalyFlag, SyllabusPlan
+from app.models.timetable import TimetableSlot
 from app.models.user import User
 
 SEVERITY_LEVELS = ("normal", "urgent")
@@ -149,6 +151,54 @@ def _class_ids_in_school(db: Session, school_id: int | None) -> set[int]:
     return {row.id for row in db.query(SchoolClass.id).filter(SchoolClass.school_id == school_id)}
 
 
+def _user_names(db: Session, user_ids: Iterable[int | None]) -> dict[int, str]:
+    """user_id -> display name, batched into one query per source function.
+
+    Alert.message is a single pre-formatted string the frontend renders verbatim
+    (components/alerts/AlertRow.tsx passes it straight through to EntityCard) - there
+    is no structured teacher_id/student_id field on the alert for the client to
+    resolve against GET /reference/lookup itself, so a human-readable name has to be
+    baked in here at build time. That's why this lives in the aggregator rather than
+    being pushed to the client like every other id->name resolution in this codebase.
+
+    Falls back full_name -> email -> "User {id}" so a user row with no profile name
+    still reads as something identifiable instead of blanking out.
+    """
+    ids = {i for i in user_ids if i is not None}
+    if not ids:
+        return {}
+    rows = db.query(User.id, User.full_name, User.email).filter(User.id.in_(ids)).all()
+    return {row.id: (row.full_name or row.email or f"User {row.id}") for row in rows}
+
+
+def _slot_descriptions(db: Session, slot_ids: Iterable[int | None]) -> dict[int, str]:
+    """timetable_slot_id -> "Period 3, Mathematics (Class 8A)". Same reasoning as
+    _user_names: a bare "Slot 4821" in the substitution alert is as unreadable as a
+    bare teacher id was, and the client can't resolve it from the flat message string.
+    Slots missing from the map (deleted/regenerated timetable) fall back to the id."""
+    ids = {i for i in slot_ids if i is not None}
+    if not ids:
+        return {}
+    rows = (
+        db.query(TimetableSlot.id, TimetableSlot.period_number, Subject.name, SchoolClass.name)
+        .join(Subject, TimetableSlot.subject_id == Subject.id)
+        .join(SchoolClass, TimetableSlot.class_id == SchoolClass.id)
+        .filter(TimetableSlot.id.in_(ids))
+        .all()
+    )
+    return {
+        slot_id: f"Period {period}, {subject_name} ({class_name})"
+        for slot_id, period, subject_name, class_name in rows
+    }
+
+
+def _named(names: dict[int, str], user_id: int, role_label: str) -> str:
+    """Renders a user for message text, degrading to the old id-only form only when
+    the user row genuinely can't be found (deleted account, cross-school row filtered
+    out of the batch) - never silently dropping the identifier entirely."""
+    return names.get(user_id, f"{role_label} {user_id}")
+
+
 # --- individual alert sources ------------------------------------------------------
 # Every source below takes an optional `school_id`, defaulting to None ("no
 # scoping - return every school's rows") so the existing single-school unit tests in
@@ -194,13 +244,17 @@ def leave_request_alerts(db: Session, school_id: int | None = None) -> list[Aler
     if school_id is not None:
         query = query.filter(LeaveRequest.teacher_id.in_(_user_ids_in_school(db, school_id) or [-1]))
     requests = query.all()
+    names = _user_names(db, (lr.teacher_id for lr in requests))
     return [
         Alert(
             id=f"leave_request:{lr.id}",
             source="leave_request",
             severity="normal",
             title="Pending leave request",
-            message=f"Teacher {lr.teacher_id} requested leave {lr.start_date} to {lr.end_date}: {lr.reason}",
+            message=(
+                f"{_named(names, lr.teacher_id, 'Teacher')} requested leave "
+                f"{lr.start_date} to {lr.end_date}: {lr.reason}"
+            ),
             entity_type="leave_requests",
             entity_id=lr.id,
             created_at=lr.requested_at,
@@ -227,6 +281,8 @@ def substitution_alerts(db: Session, school_id: int | None = None, today: date |
     if school_id is not None:
         query = query.filter(LeaveRequest.teacher_id.in_(_user_ids_in_school(db, school_id) or [-1]))
     subs = query.all()
+    names = _user_names(db, (sub.original_teacher_id for sub, _leave in subs))
+    slots = _slot_descriptions(db, (sub.timetable_slot_id for sub, _leave in subs))
     alerts = []
     for sub, leave in subs:
         days_until = (leave.start_date - today).days
@@ -238,7 +294,8 @@ def substitution_alerts(db: Session, school_id: int | None = None, today: date |
                 severity="urgent" if urgent else "normal",
                 title="Unconfirmed substitution",
                 message=(
-                    f"Slot {sub.timetable_slot_id} (originally teacher {sub.original_teacher_id}) "
+                    f"{slots.get(sub.timetable_slot_id, f'Slot {sub.timetable_slot_id}')} "
+                    f"(normally {_named(names, sub.original_teacher_id, 'teacher')}) "
                     f"needs a confirmed substitute - covering leave starts {leave.start_date}"
                 ),
                 entity_type="substitutions",
@@ -325,13 +382,17 @@ def attendance_reconciliation_alerts(db: Session, school_id: int | None = None) 
     if school_id is not None:
         query = query.filter(AttendanceReconciliation.student_id.in_(_user_ids_in_school(db, school_id) or [-1]))
     rows = query.all()
+    names = _user_names(db, (r.student_id for r in rows))
     return [
         Alert(
             id=f"attendance_reconciliation:{r.id}",
             source="attendance_reconciliation",
             severity="normal",
             title="Attendance record mismatch",
-            message=f"Student {r.student_id} attendance on {r.date} needs manual review ({r.reason})",
+            message=(
+                f"{_named(names, r.student_id, 'Student')}'s attendance on {r.date} "
+                f"needs manual review ({r.reason})"
+            ),
             entity_type="attendance_reconciliations",
             entity_id=r.id,
             created_at=r.created_at,
@@ -408,6 +469,7 @@ def fee_overdue_alerts(db: Session, school_id: int | None = None, today: date | 
     if school_id is not None:
         query = query.filter(FeeRecord.student_id.in_(_user_ids_in_school(db, school_id) or [-1]))
     records = query.all()
+    names = _user_names(db, (r.student_id for r in records))
     alerts = []
     for r in records:
         days_overdue = (today - r.due_date).days
@@ -418,7 +480,10 @@ def fee_overdue_alerts(db: Session, school_id: int | None = None, today: date | 
                 source="fee_overdue",
                 severity="urgent" if days_overdue >= FEE_OVERDUE_URGENT_DAYS else "normal",
                 title="Overdue fee",
-                message=f"Student {r.student_id} has {balance} overdue, {days_overdue} days past due date {r.due_date}",
+                message=(
+                    f"{_named(names, r.student_id, 'Student')} has {balance} overdue, "
+                    f"{days_overdue} days past due date {r.due_date}"
+                ),
                 entity_type="fee_records",
                 entity_id=r.id,
                 created_at=r.created_at,

@@ -61,3 +61,18 @@ apscheduler>=3.10,<4.0
 # dev/test
 pytest>=8.3.0
 httpx>=0.27.0
+pytest-cov>=5.0.0  # dev-only: coverage reporting for the test suite, never imported by app code
+# Gemini SDK - embeddings (RAG ingestion + retrieval) and generation (Doubt Bot).
+# See app/services/llm.py, which documents why gemini-embedding-001 is pinned in code
+# over the newer -2 (task types + per-item batching, both of which -2 drops silently).
+# Deliberately NOT accompanied by LangChain/LlamaIndex: three SDK calls do not need a
+# framework, and a framework would add a second place for the task-type and
+# normalization rules to be wrong.
+google-genai>=2.18.0
+
+# PDF text extraction for teaching resources (services/ingestion.py::extract_text).
+# TEXT-LAYER ONLY - pypdf reads text a PDF already carries and does NOT do OCR, so a
+# scanned/image-only PDF extracts to nothing and the upload endpoint 422s rather than
+# storing an unretrievable resource. Tesseract (services/ocr_engine.py) exists for the
+# separate `documents` admin flow and is deliberately not bridged into RAG ingestion.
+pypdf>=6.0.0

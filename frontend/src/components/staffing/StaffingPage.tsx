@@ -382,6 +382,15 @@ function TeacherLeaveView({ schoolId }: { schoolId: number }) {
             message={lr.reason}
             meta={`Requested ${new Date(lr.requested_at).toLocaleDateString()}`}
           >
+            {/* The approver's note. Previously this was accepted by the Approvals
+                Inbox and written only to the audit log, which teachers cannot read -
+                so a rejected request gave no reason anywhere in the product. */}
+            {lr.decision_comment && (
+              <div className="rounded-xl border border-border bg-elevated/40 px-3.5 py-2.5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Note from approver</p>
+                <p className="mt-1 whitespace-pre-line text-sm text-ink">{lr.decision_comment}</p>
+              </div>
+            )}
             {lr.status === "approved" && <InlineSubstitutions schoolId={schoolId} leaveRequestId={lr.id} readOnly />}
           </EntityCard>
         ))}
@@ -568,6 +577,14 @@ function AdminLeaveApprovalView({ schoolId }: { schoolId: number }) {
             }
             meta={`Requested ${new Date(lr.requested_at).toLocaleDateString()}`}
           >
+            {/* Same note the teacher now sees on their own card - shown here so the
+                approver can confirm what was actually communicated. */}
+            {lr.decision_comment && (
+              <div className="rounded-xl border border-border bg-elevated/40 px-3.5 py-2.5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Note sent to teacher</p>
+                <p className="mt-1 whitespace-pre-line text-sm text-ink">{lr.decision_comment}</p>
+              </div>
+            )}
             {lr.status === "approved" && <InlineSubstitutions schoolId={schoolId} leaveRequestId={lr.id} readOnly={false} />}
           </EntityCard>
         ))}
