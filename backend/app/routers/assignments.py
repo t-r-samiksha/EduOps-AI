@@ -351,11 +351,10 @@ def list_my_assignments(
         query = query.filter(Assignment.class_id.in_(student_class_ids))
     elif user.role == "teacher":
         teacher_classes = _classes_taught_by(db, user.id)
-        if not teacher_classes:
-            return []
-        query = query.filter(
-            or_(Assignment.class_id.in_(teacher_classes), Assignment.teacher_id == user.id)
-        )
+        conditions = [Assignment.teacher_id == user.id]
+        if teacher_classes:
+            conditions.append(Assignment.class_id.in_(teacher_classes))
+        query = query.filter(or_(*conditions))
     elif user.role == "parent":
         child_ids = [
             row.student_id

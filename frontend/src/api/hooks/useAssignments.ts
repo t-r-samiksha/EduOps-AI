@@ -50,6 +50,8 @@ export function useCreateAssignment() {
     onSuccess: (_, input) => {
       queryClient.invalidateQueries({ queryKey: ["assignments"] });
       queryClient.invalidateQueries({ queryKey: ["class-assignments", input.class_id] });
+      queryClient.invalidateQueries({ queryKey: ["homework-calendar"] });
+      queryClient.invalidateQueries({ queryKey: ["user-calendar"] });
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
       queryClient.invalidateQueries({ queryKey: ["notifications-unread-count"] });
     },

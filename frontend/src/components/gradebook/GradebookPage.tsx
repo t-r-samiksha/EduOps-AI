@@ -3,7 +3,6 @@ import {
   GraduationCap,
   Award,
   BookOpen,
-  Plus,
   Edit2,
   TrendingUp,
   Save,
@@ -60,6 +59,10 @@ export default function GradebookPage() {
   const handleSaveEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!entrySubjectId || !entryClassId) return;
+    if (!entryStudentId) {
+      setEntryError("No student selected. Please use the 'Enter Marks' button next to a student in the list.");
+      return;
+    }
     setEntryError(null);
     try {
       await upsertMutation.mutateAsync({
@@ -127,13 +130,6 @@ export default function GradebookPage() {
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </select>
-              <Button
-                onClick={() => setIsEntryOpen(true)}
-                className="flex items-center gap-1.5 shadow-sm text-xs font-medium"
-              >
-                <Plus className="h-4 w-4" />
-                Record Mark
-              </Button>
             </>
           )}
         </div>

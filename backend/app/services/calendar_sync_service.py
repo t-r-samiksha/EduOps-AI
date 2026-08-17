@@ -168,23 +168,44 @@ def sync_user_calendar(
 
 def get_homework_calendar_events(
     db: Session,
-    student_id: int,
+    user_id: int,
 ) -> list[dict[str, Any]]:
     """Aggregates normalized academic deadlines (assignments, quizzes, exams) for homework calendar."""
-    student_class_ids = [
-        row.class_id
-        for row in db.query(Enrollment.class_id).filter(Enrollment.student_id == student_id).all()
-    ]
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return []
+
+    from app.models.school import SchoolClass
+    from app.models.parent_student import ParentStudent
+    from app.routers.assignments import _classes_taught_by
+    from sqlalchemy import or_
+
+    class_ids = []
+    if user.role.name == "student":
+        class_ids = [
+            row.class_id
+            for row in db.query(Enrollment.class_id).filter(Enrollment.student_id == user.id).all()
+        ]
+    elif user.role.name == "teacher":
+        class_ids = list(_classes_taught_by(db, user.id))
+    elif user.role.name == "parent":
+        child_ids = [row.student_id for row in db.query(ParentStudent.student_id).filter(ParentStudent.parent_id == user.id).all()]
+        class_ids = [row.class_id for row in db.query(Enrollment.class_id).filter(Enrollment.student_id.in_(child_ids)).all()]
+    else:
+        class_ids = [c.id for c in db.query(SchoolClass.id).filter(SchoolClass.school_id == user.school_id).all()]
 
     events = []
     now = datetime.now(timezone.utc)
 
     # Assignments
-    assignments = (
-        db.query(Assignment)
-        .filter(Assignment.class_id.in_(student_class_ids))
-        .all()
-    )
+    assign_query = db.query(Assignment)
+    if user.role.name == "teacher":
+        conds = [Assignment.teacher_id == user.id]
+        if class_ids:
+            conds.append(Assignment.class_id.in_(class_ids))
+        assignments = assign_query.filter(or_(*conds)).all()
+    else:
+        assignments = assign_query.filter(Assignment.class_id.in_(class_ids)).all() if class_ids else []
     for a in assignments:
         dl_utc = _to_utc(a.deadline)
         is_overdue = dl_utc < now
@@ -201,11 +222,15 @@ def get_homework_calendar_events(
         })
 
     # Quizzes
-    quizzes = (
-        db.query(Quiz)
-        .filter(Quiz.class_id.in_(student_class_ids))
-        .all()
-    )
+    quiz_query = db.query(Quiz)
+    if user.role.name == "teacher":
+        conds = [Quiz.teacher_id == user.id]
+        if class_ids:
+            conds.append(Quiz.class_id.in_(class_ids))
+        quizzes = quiz_query.filter(or_(*conds)).all()
+    else:
+        quizzes = quiz_query.filter(Quiz.class_id.in_(class_ids)).all() if class_ids else []
+        
     for q in quizzes:
         start_t = _to_utc(q.available_from) if q.available_from else now
         end_t = _to_utc(q.available_until) if q.available_until else (start_t + timedelta(hours=2))
@@ -221,7 +246,7 @@ def get_homework_calendar_events(
         })
 
     # Exams
-    exams = db.query(Exam).filter(Exam.class_id.in_(student_class_ids)).all() if student_class_ids else []
+    exams = db.query(Exam).filter(Exam.class_id.in_(class_ids)).all() if class_ids else []
     for ex in exams:
         ex_start = datetime.combine(ex.exam_date, ex.start_time).replace(tzinfo=timezone.utc)
         ex_end = datetime.combine(ex.exam_date, ex.end_time).replace(tzinfo=timezone.utc)
