@@ -127,6 +127,7 @@ def ingest_resource(db: Session, resource_id: int) -> int:
     text = extract_text(raw, mime_type=resource.mime_type, filename=resource.file_url)
     chunks = chunk_text(text)
     if not chunks:
+        resource.needs_reindex = False
         resource.indexed_at = datetime.now(timezone.utc)
         return 0
 
@@ -173,6 +174,7 @@ def ingest_resource(db: Session, resource_id: int) -> int:
         if index >= len(chunks):
             db.delete(row)
 
+    resource.needs_reindex = False
     resource.indexed_at = datetime.now(timezone.utc)
     db.flush()
     return len(chunks)

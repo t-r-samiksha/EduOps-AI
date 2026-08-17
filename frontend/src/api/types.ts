@@ -851,3 +851,48 @@ export interface UploadAttachmentResponse {
   file_type: string;
   file_size: number;
 }
+
+// --- Resources Library (Person B) -------------------------------------------
+
+export interface ResourceItem {
+  id: number;
+  title: string;
+  description: string | null;
+  unit: string | null;
+  school_id: number;
+  grade_level: number;
+  class_id: number | null;
+  class_name: string | null;
+  subject_id: number | null;
+  subject_name: string | null;
+  teacher_id: number;
+  teacher_name: string | null;
+  file_url: string;
+  mime_type: string;
+  file_size: number;
+  needs_reindex: boolean;
+  indexed_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface ResourceUploadResponse extends ResourceItem {
+  chunk_count: number;
+}
+
+export interface ResourceListResponse {
+  items: ResourceItem[];
+}
+
+export interface UnitsListResponse {
+  units: string[];
+}
+
+export interface ResourceFilters {
+  class_id?: number;
+  grade_level?: number;
+  subject_id?: number;
+  unit?: string;
+  file_type?: string;
+  q?: string;
+}

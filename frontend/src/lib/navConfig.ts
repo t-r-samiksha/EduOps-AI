@@ -8,6 +8,7 @@ import {
   CalendarClock,
   ClipboardList,
   FileCheck2,
+  FolderKanban,
   LayoutGrid,
   School,
   ScanText,
@@ -29,6 +30,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   admin: [
     { label: "Command Center", path: "/admin", icon: LayoutGrid, end: true },
     { label: "Classroom", path: "/admin/classroom", icon: BookOpen },
+    { label: "Resources", path: "/admin/resources", icon: FolderKanban },
     { label: "Timetable", path: "/admin/timetable", icon: CalendarClock },
     { label: "Attendance", path: "/admin/attendance", icon: ScanFace },
     { label: "Staffing", path: "/admin/staffing", icon: Users },
@@ -44,6 +46,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   principal: [
     { label: "Dashboard", path: "/principal", icon: LayoutGrid, end: true },
     { label: "Classroom", path: "/principal/classroom", icon: BookOpen },
+    { label: "Resources", path: "/principal/resources", icon: FolderKanban },
     { label: "Timetable", path: "/principal/timetable", icon: CalendarClock },
     { label: "Staffing", path: "/principal/staffing", icon: Users },
     { label: "Early-Warning", path: "/principal/risk", icon: AlertTriangle },
@@ -58,6 +61,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   teacher: [
     { label: "Dashboard", path: "/teacher", icon: LayoutGrid, end: true },
     { label: "Classroom", path: "/teacher/classroom", icon: BookOpen },
+    { label: "Resources", path: "/teacher/resources", icon: FolderKanban },
     { label: "Timetable", path: "/teacher/timetable", icon: CalendarClock },
     { label: "Attendance", path: "/teacher/attendance", icon: ScanFace },
     { label: "Staffing", path: "/teacher/staffing", icon: Users },
@@ -69,6 +73,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
     { label: "Classroom", path: "/student/classroom", icon: BookOpen },
+    { label: "Resources", path: "/student/resources", icon: FolderKanban },
     { label: "Doubt Bot", path: "/student/doubt-bot", icon: Bot },
     { label: "Timetable", path: "/student/timetable", icon: CalendarClock },
     { label: "Fees", path: "/student/fees", icon: Wallet },
@@ -77,6 +82,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   parent: [
     { label: "Dashboard", path: "/parent", icon: LayoutGrid, end: true },
     { label: "Classroom", path: "/parent/classroom", icon: BookOpen },
+    { label: "Resources", path: "/parent/resources", icon: FolderKanban },
     { label: "Timetable", path: "/parent/timetable", icon: CalendarClock },
     { label: "Early-Warning", path: "/parent/risk", icon: AlertTriangle },
     { label: "Fees", path: "/parent/fees", icon: Wallet },

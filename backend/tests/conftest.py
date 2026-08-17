@@ -26,11 +26,19 @@ try:
 except ImportError:
     pass
 
+from sqlalchemy.pool import StaticPool
+
 db_url = os.environ.get("DATABASE_URL", "")
 if not db_url or "your-project-ref" in db_url:
-    db_url = "sqlite:///./test_eduops.db"
+    db_url = "sqlite:///:memory:"
+    _engine = create_engine(
+        db_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    _engine = create_engine(db_url)
 
-_engine = create_engine(db_url)
 _TestingSessionLocal = sessionmaker(bind=_engine)
 
 
