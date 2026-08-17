@@ -18,15 +18,24 @@ import { cn } from "@/lib/utils";
  * go in the request body) arrives as a prop. Nothing in here knows what a student is.
  */
 
-interface ChatShellProps {
+interface ChatShellProps<TBody> {
   /** e.g. "/bots/student/ask". The whole reason this component is reusable. */
   endpoint: string;
   placeholder: string;
-  /** Bot-specific scope fields merged into every request body (class_id for the
-   * student bot; the parent bot will send its own). */
-  extraBody: Record<string, unknown>;
-  /** Shown before the first question, instead of an empty void. */
+  /** Bot-specific scope fields merged into every request body: `class_id` for the
+   * student bot, `student_id` for the parent bot. Typed via TBody so the compiler
+   * checks each bot is sending its own required field - this replaced an `as never`
+   * cast that disabled request-body type-checking for both bots. */
+  extraBody: Omit<TBody, "query">;
+  /** Heading shown before the first question. Defaults to the student framing. */
+  emptyTitle?: string;
+  /** Shown under the heading, instead of an empty void. */
   emptyHint: string;
+  /** What the citation footnote calls its sources. The student bot cites class notes;
+   * the parent bot cites the child's own record, so this is NOT a constant. */
+  citationLabel?: string;
+  /** Fallback title for a citation with no source title of its own. */
+  citationFallbackTitle?: string;
   /** Blocks sending with an explanation - e.g. the student has no enrolled class yet,
    * so there is no class_id to scope retrieval by. */
   disabledReason?: string;
@@ -43,7 +52,17 @@ interface Turn {
 /** Citations as expandable footnotes - the visible proof the answer is grounded in
  * the class's own material rather than the model's general knowledge. Collapsed by
  * default so the answer stays readable; one click shows the exact retrieved text. */
-function Citations({ citations, turnId }: { citations: Citation[]; turnId: number }) {
+function Citations({
+  citations,
+  turnId,
+  label,
+  fallbackTitle,
+}: {
+  citations: Citation[];
+  turnId: number;
+  label: string;
+  fallbackTitle: string;
+}) {
   const [open, setOpen] = useState(false);
   if (citations.length === 0) return null;
 
@@ -60,7 +79,7 @@ function Citations({ citations, turnId }: { citations: Citation[]; turnId: numbe
       >
         <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
         <span>
-          {citations.length} source{citations.length === 1 ? "" : "s"} from your class notes
+          {citations.length} source{citations.length === 1 ? "" : "s"} {label}
         </span>
         <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-180")} aria-hidden="true" />
       </button>
@@ -70,7 +89,7 @@ function Citations({ citations, turnId }: { citations: Citation[]; turnId: numbe
           {citations.map((citation, index) => (
             <li key={citation.chunk_id} className="rounded-lg bg-elevated/50 px-3 py-2">
               <p className="font-display text-xs font-semibold text-ink">
-                [{index + 1}] {citation.title ?? "Class material"}
+                [{index + 1}] {citation.title ?? fallbackTitle}
               </p>
               <p className="mt-1 text-xs leading-relaxed text-ink-muted">{citation.snippet}…</p>
             </li>
@@ -81,14 +100,17 @@ function Citations({ citations, turnId }: { citations: Citation[]; turnId: numbe
   );
 }
 
-export default function ChatShell({
+export default function ChatShell<TBody extends { query: string }>({
   endpoint,
   placeholder,
   extraBody,
+  emptyTitle = "Ask about anything you've covered in class",
   emptyHint,
+  citationLabel = "from your class notes",
+  citationFallbackTitle = "Class material",
   disabledReason,
-}: ChatShellProps) {
-  const ask = useBotAsk(endpoint);
+}: ChatShellProps<TBody>) {
+  const ask = useBotAsk<TBody>(endpoint);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const nextId = useRef(1);
@@ -109,7 +131,7 @@ export default function ChatShell({
     setDraft("");
 
     ask.mutate(
-      { query: question, ...extraBody } as never,
+      { query: question, ...extraBody } as TBody,
       {
         onSuccess: (data) =>
           setTurns((prev) =>
@@ -154,7 +176,7 @@ export default function ChatShell({
         {turns.length === 0 && !ask.isPending && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
             <Bot className="h-8 w-8 text-ink-faint" aria-hidden="true" />
-            <p className="font-display text-sm font-medium text-ink">Ask about anything you've covered in class</p>
+            <p className="font-display text-sm font-medium text-ink">{emptyTitle}</p>
             <p className="max-w-sm text-xs text-ink-muted">{emptyHint}</p>
           </div>
         )}
@@ -191,7 +213,12 @@ export default function ChatShell({
                   ) : (
                     <>
                       <p className="whitespace-pre-line text-sm leading-relaxed text-ink">{turn.answer}</p>
-                      <Citations citations={turn.citations} turnId={turn.id} />
+                      <Citations
+                        citations={turn.citations}
+                        turnId={turn.id}
+                        label={citationLabel}
+                        fallbackTitle={citationFallbackTitle}
+                      />
                     </>
                   )}
                 </div>

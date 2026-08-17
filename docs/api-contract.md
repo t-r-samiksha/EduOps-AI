@@ -2353,12 +2353,44 @@ The teacher-dashboard convenience call. Resolves the caller's own
 { "items": [ { "grade_level": 3, "subject_id": 3631, "subject_name": "Math", "clusters": [ /* as above */ ] } ] }
 ```
 
-#### Teacher and Parent bots
-`POST /bots/teacher/ask` and `POST /bots/parent/ask` are **not built yet**. They will
-reuse the same retrieval core with a different scope resolver (a teacher's taught
-classes; a parent's linked children's classes). The original stub's claim that they
-share the student bot's request shape no longer holds — they will not take a raw
-`class_id`, since neither role has a single enrollment to validate against.
+#### `POST /bots/parent/ask` — Parent Assistant Bot
+Answers a parent's question about their own child, grounded in that child's record.
+
+> **STRUCTURED CONTEXT, NOT RAG.** A child's attendance, remarks, risk and fees are
+> **never embedded and never enter `kb_chunks`**. That corpus is grade-scoped teaching
+> material shared across a whole grade, so putting one child's record into it would let
+> another family's question retrieve it. Instead the handler calls
+> `GET /parent/child/{id}/summary`'s own function and serializes the result into the
+> prompt — which also means the bot can never disagree with the portal page the parent
+> is looking at.
+
+- **Roles:** parent (own linked child only)
+- **Request:** `{ "query": "how is my child doing?", "student_id": 21546 }`
+- **`student_id` is a security boundary** — revalidated with
+  `scoping.assert_parent_linked` on **every** request. The frontend child selector is
+  never trusted. Covered by `test_parent_bot_cannot_be_asked_about_an_unlinked_child`.
+- **Response:** same shape as the student bot (`{answer, citations}`) so `ChatShell`
+  needs no branching. **`citations` is always `[]`** — nothing was retrieved; the
+  "source" is the child's own record, already on screen.
+- **Guardrails in the system prompt:** no medical, psychological or diagnostic opinions;
+  no prediction; no invented numbers; and an explicit "say so plainly" when the record
+  doesn't cover the question. Verified live — asked whether a child has ADHD it declines
+  and points at the school and a doctor; asked for exam marks it states there is no
+  grade data in the system.
+- **`chatbot_logs`:** written with `bot_type="parent"` and **`query_embedding = NULL`,
+  deliberately.** Top Doubts clusters that table by (school, grade, subject) to show
+  teachers what *students* are stuck on, and it skips null-embedding rows. Embedding a
+  parent query would surface "how is my child doing" in a teacher's cluster feed as
+  though a child had asked it. Guarded by
+  `test_parent_ask_never_writes_a_query_embedding`.
+- **Errors:** `400` empty query; `403` not linked to that student.
+
+#### Teacher bot
+`POST /bots/teacher/ask` is **not built**. It would reuse the student bot's retrieval
+core with a taught-classes scope resolver. The original stub's claim that all three bots
+share one request shape no longer holds: the student bot takes `class_id`, the parent bot
+takes `student_id`, and a teacher has neither a single enrollment nor a single child to
+validate against.
 
 ### Class chat + doubt threads
 
@@ -2531,19 +2563,48 @@ silent edit - this doc is now describing what's live, not the original proposal.
 - **Response (as implemented):** `{ "items": [ { "id": 103, "name": "Demo Student Class 8A #01", "class_id": 41, "class_name": "Class 8A" } ] }`
 - ~~**Response (original stub, not what's running):** `{ "items": [ { "student_id": 15, "full_name": "Jane Doe", "class_id": 2 } ] }`~~
 
-#### `GET /parent/children/{student_id}/performance`
-Child's academic performance summary.
-- **Roles:** parent (own child only)
+#### `GET /parent/child/{student_id}/summary` — **the parent portal's single call**
+Everything the parent portal shows for one child, in one round trip.
+
+**Supersedes the `/performance` and `/attendance` stubs below**, which are unbuilt and
+would have needed three or four sequential calls to fill one screen. A phone on venue
+wifi making four round trips is a visibly slow page; this is one. Nothing here is
+re-implemented — it composes the existing attendance-summary logic, `risk_flags`, the
+Day 1 remarks query, and fee status.
+
+- **Roles:** parent (own linked child only, via `scoping.assert_parent_linked`);
+  admin/principal within their own school. Everyone else `403`.
 - **Response:**
 ```json
-{ "student_id": 15, "gradebook_summary": [ { "subject_id": 3, "average": 17.5 } ], "attendance_summary": { "present_pct": 92.5 } }
+{
+  "student": {"id": 21546, "name": "Diya Kumar", "class_id": 5208, "class_name": "Grade 3 - A", "grade_level": 3},
+  "attendance": {"present_pct": 47.6, "present_count": 10, "absent_count": 11, "late_count": 0, "days": 30},
+  "risk": {"level": "medium", "score": 0.464, "reasons": ["attendance rate 48% is below the 90% threshold"], "flagged_at": "..."},
+  "remarks": [{"id": 9, "teacher_name": "Kavya Reddy", "remark_text": "...", "sentiment": {"label": "negative", "compound": -0.85}, "created_at": "..."}],
+  "fees": [{"fee_record_id": 1742, "fee_type": "Term 1 Tuition", "amount_due": 4500.0, "amount_paid": 0.0, "status": "overdue", "due_date": "2026-07-26"}],
+  "upcoming": []
+}
 ```
+- `risk` is the most recent **open** flag, or `null` — `null` is the healthy case and
+  the UI must hide the banner entirely rather than render an empty one.
+- **`attendance.days` is a 30-CALENDAR-day window, deliberately matching
+  `run_nightly_risk_scoring.ATTENDANCE_LOOKBACK_DAYS`.** If the card used a different
+  window from the scorer, the banner would quote one attendance figure while the card
+  above it showed another — which is exactly the contradiction this endpoint exists to
+  avoid. Change one, change both.
+- `remarks` is the last 10, newest first, with sentiment computed per-request (never
+  stored — see `remark_stubs`).
+- `upcoming` is currently always `[]`. Deliberately deferred rather than faked; the
+  field is in the contract so adding exams/timetable events later is not a shape change.
+- **Errors:** `403` not linked / wrong school; `404` unknown student.
 
-#### `GET /parent/children/{student_id}/attendance`
-Child's attendance record.
-- **Roles:** parent (own child only)
-- **Query:** `?from=&to=`
-- **Response:** `{ "student_id": 15, "items": [ { "date": "2026-08-09", "status": "present" } ] }`
+#### ~~`GET /parent/children/{student_id}/performance`~~ — superseded, never built
+Would have returned a `gradebook_summary`, which is unbuildable: there is no gradebook
+table in this schema. The attendance half is served by the summary endpoint above.
+
+#### ~~`GET /parent/children/{student_id}/attendance`~~ — superseded, never built
+Per-day attendance rows. The summary endpoint returns the aggregate the portal actually
+renders; nothing in the UI needs the day-by-day list yet.
 
 #### ~~`GET /parent/children/{student_id}/fees`~~ - superseded, never built
 This stub was never implemented as its own endpoint. A parent's fee view instead

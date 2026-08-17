@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
 import { AlertTriangle, CalendarClock, ScanFace, Users } from "lucide-react";
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import { useParentChildren } from "@/api/hooks/useParent";
+import { useSelectedChild } from "@/hooks/useSelectedChild";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useAttendanceSummary } from "@/api/hooks/useAttendance";
 import { useFlaggedStudents } from "@/api/hooks/useRisk";
@@ -23,18 +22,12 @@ function todayDow(): number {
 }
 
 export default function ParentDashboard() {
-  const children = useParentChildren();
+  const { children, selectedChildId, setSelectedChildId, showSelector, isLoading: childrenLoading } =
+    useSelectedChild();
   const lookup = useReferenceLookup(useCurrentUser().data?.school_id);
   const email = useAuthStore((s) => s.user?.email);
-  const [selectedId, setSelectedId] = useState<string>("");
 
-  useEffect(() => {
-    if (!selectedId && children.data?.items.length) {
-      setSelectedId(String(children.data.items[0].id));
-    }
-  }, [children.data, selectedId]);
-
-  const studentId = selectedId ? Number(selectedId) : undefined;
+  const studentId = selectedChildId;
   const dow = todayDow();
 
   const timetable = useTimetableActive({ academicYear: DEFAULT_ACADEMIC_YEAR, studentId, enabled: studentId !== undefined });
@@ -54,13 +47,13 @@ export default function ParentDashboard() {
         title="Parent Dashboard"
         description="Your linked children's attendance, timetable, and early-warning status."
         actions={
-          (children.data?.items.length ?? 0) > 1 ? (
-            <Select value={selectedId} onValueChange={setSelectedId}>
+          showSelector ? (
+            <Select value={String(selectedChildId ?? "")} onValueChange={(v) => setSelectedChildId(Number(v))}>
               <SelectTrigger className="w-56">
                 <SelectValue placeholder="Select child" />
               </SelectTrigger>
               <SelectContent>
-                {children.data?.items.map((c) => (
+                {children.map((c) => (
                   <SelectItem key={c.id} value={String(c.id)}>
                     {c.name} {c.class_name ? `· ${c.class_name}` : ""}
                   </SelectItem>
@@ -71,9 +64,9 @@ export default function ParentDashboard() {
         }
       />
 
-      {children.isLoading && <div className="h-24 animate-pulse rounded-2xl bg-elevated/60" />}
+      {childrenLoading && <div className="h-24 animate-pulse rounded-2xl bg-elevated/60" />}
 
-      {!children.isLoading && (children.data?.items.length ?? 0) === 0 && (
+      {!childrenLoading && children.length === 0 && (
         <Card>
           <CardContent className="flex flex-col items-center gap-1 py-6 text-center">
             <Users className="h-6 w-6 text-ink-muted" />

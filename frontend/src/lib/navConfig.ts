@@ -71,6 +71,8 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   ],
   parent: [
     { label: "Dashboard", path: "/parent", icon: LayoutGrid, end: true },
+    { label: "My Child", path: "/parent/child", icon: UserIcon },
+    { label: "Ask", path: "/parent/bot", icon: Bot },
     { label: "Timetable", path: "/parent/timetable", icon: CalendarClock },
     { label: "Early-Warning", path: "/parent/risk", icon: AlertTriangle },
     { label: "Fees", path: "/parent/fees", icon: Wallet },

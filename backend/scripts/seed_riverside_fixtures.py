@@ -36,12 +36,13 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.models.attendance import AttendanceRecord
 from app.models.class_ import SchoolClass
 from app.models.enrollment import Enrollment
 from app.models.fees import FeeRecord, FeeSchedule
@@ -77,9 +78,73 @@ login below. A shared known password is correct for demo fixtures on a throwaway
 project; it is obviously not a pattern for real accounts."""
 
 DEMO_LOGINS = [
-    ("aarav.student@riverside-school.test", "Doubt Bot demo (student, Grade 3 - A)"),
-    ("meera.teacher@riverside-school.test", "Top Doubts demo (teacher, Math across 3-A + 3-B)"),
+    ("aarav.student@riverside-school.test", "student  - Doubt Bot, Grade 3 - A"),
+    ("meera.teacher@riverside-school.test", "teacher  - Top Doubts, Math across 3-A + 3-B"),
+    ("guardian.kumar@riverside-school.test", "parent   - portal + Parent Bot, 2 children"),
+    ("founder@riverside-school.test", "admin    - Command Center, resources, approvals"),
 ]
+
+# --- Parent-portal demo profiles -----------------------------------------------------
+# The two children must read DIFFERENTLY or the child selector looks decorative. Before
+# this, Aarav had 5 attendance rows (all one day) and Diya had none at all, both had the
+# same overdue fee, and neither had a single remark - so switching child changed almost
+# nothing on screen and emptied the attendance card.
+#
+# Every number below is chosen against services/risk_scorer.py's real arithmetic, so the
+# flags that come out of the NIGHTLY SCORER (not hand-written reasons) land where the
+# demo needs them. With no gradebook, effective weights are attendance 0.50 / remarks
+# 0.15 of a 0.65 total:
+#   Aarav  28 present + 1 absent + 1 late of 30 = 93% -> attendance risk 0.0,
+#          positive remarks -> remark risk 0.0 -> score 0.0 -> LOW -> NO FLAG.
+#   Diya   19 present + 11 absent of 30 = 63%  -> attendance risk (0.90-0.63)/0.90
+#          = 0.30, negative remarks (avg compound ~-0.3) -> score ~0.32 -> MEDIUM -> FLAGGED.
+# That asymmetry is the point: the at-risk banner appears and disappears as you switch
+# child, which reads far better on stage than two identically-flagged children.
+ATTENDANCE_SCHOOL_DAYS = 30
+
+# (present_count, absent_count, late_count) is NOT how these are built - the ORDER
+# matters. Diya's absences are deliberately clustered into the most recent run so the
+# feed shows a visible decline rather than a low average scattered through the term.
+AARAV_ATTENDANCE_PATTERN = ["present"] * 21 + ["late"] + ["present"] * 8
+"""One late, no absences. Deliberately cleaner than it looks like it needs to be,
+because Aarav ALSO carries 5 real `source="cv"` rows from an actual CV-attendance run
+on 2026-08-15 - 5 period-level records for a single day, 4 of them absent. Those are
+genuine feature output, not fixture junk, so they are left alone; this pattern is
+sized so his overall rate still lands comfortably clear of a flag despite them.
+
+Worth knowing: attendance_records mixes granularities - `manual` rows here are
+DAY-level, `cv` rows are PERIOD-level - so one heavily-absent CV day counts as much as
+four absent days. That is a pre-existing modelling wrinkle, not something introduced
+here, but it is why Aarav's headline percentage is lower than a 30-day all-present
+pattern would suggest."""
+DIYA_ATTENDANCE_PATTERN = ["present"] * 18 + ["absent"] + ["present"] + ["absent"] * 10
+
+# 6 remarks each, from the teachers who genuinely teach Grade 3 - A (resolved from
+# timetable_slots at runtime, not hardcoded ids). Aarav skews positive, Diya negative.
+# Sentiment is scored per-request by services/remark_sentiment.py - nothing is stored -
+# so the text itself has to do the work. Note REMARK_LOOKBACK_COUNT=5 in the nightly
+# scorer: only the 5 most RECENT remarks feed the risk score, so Diya's newest five are
+# the negative ones.
+AARAV_REMARKS = [
+    ("Math", 38, "Aarav volunteered to show his ladder method on the board and explained every rung clearly. Excellent work."),
+    ("English", 31, "A thoughtful, well-structured burger paragraph this week. He is using stronger adjectives without being reminded."),
+    ("Science", 24, "Aarav ran the Pot D measurement carefully and spotted that the petroleum jelly was the only difference. Sharp observation."),
+    ("Math", 17, "Confident with regrouping now. He helped Kabir understand carrying the tens, which was kind and patient."),
+    ("English", 10, "Reads aloud with lovely expression. A pleasure to teach."),
+    ("Science", 4, "Consistently curious and asks genuinely good questions about the experiment."),
+]
+DIYA_REMARKS = [
+    ("Science", 40, "Diya enjoyed setting up the bean pots and labelled all four correctly."),
+    ("Math", 33, "Struggling with regrouping. She gets frustrated and gives up quickly when the first attempt is wrong."),
+    ("English", 26, "Diya has not handed in the last two writing tasks. She is quiet and withdrawn in class."),
+    ("Math", 18, "Absent again for the multiplication test. She is falling behind the rest of the class."),
+    ("Science", 11, "Disruptive during the group activity and refused to take part. This is unlike her earlier in the term."),
+    ("English", 5, "Worried about Diya. She is disengaged, rarely speaks, and her attendance is getting worse."),
+]
+
+FEE_PAID_STUDENT = "Aarav"
+"""Aarav's fee record is SET to paid and Diya's left overdue, so the fees card also
+changes on child switch. Before this both children had an identical 4500 overdue row."""
 """Accounts whose passwords are reset to SEEDED_STUDENT_PASSWORD on every run and
 printed at the end. Both were created through the admin endpoints with a caller-
 supplied password that was never recorded anywhere in this repo, so without this reset
@@ -552,6 +617,178 @@ def _get_or_create_doubt_logs(
     return created
 
 
+def _school_days_back(count: int, *, end: date | None = None) -> list[date]:
+    """The last `count` weekdays, oldest first. Weekends skipped - attendance on a
+    Saturday would be obviously wrong to anyone reading the feed on stage."""
+    day = end or date.today()
+    days: list[date] = []
+    while len(days) < count:
+        if day.weekday() < 5:
+            days.append(day)
+        day -= timedelta(days=1)
+    return list(reversed(days))
+
+
+def _get_or_create_attendance(session: Session, student: User, class_id: int, pattern: list[str], counts: dict) -> int:
+    """Seed one attendance row per school day, following `pattern` oldest-first.
+
+    Natural key: (student_id, date, source). timetable_slot_id is left NULL - these are
+    day-level records, not tied to a generated period, so they stay valid regardless of
+    whether POST /timetable/generate has been run. source="manual" matches the rows that
+    already existed, so nothing here reads as fabricated CV output.
+    """
+    days = _school_days_back(len(pattern))
+    created = 0
+    for day, status in zip(days, pattern):
+        existing = (
+            session.query(AttendanceRecord)
+            .filter(
+                AttendanceRecord.student_id == student.id,
+                AttendanceRecord.date == day,
+                AttendanceRecord.source == "manual",
+            )
+            .one_or_none()
+        )
+        if existing is not None:
+            continue
+        session.add(
+            AttendanceRecord(
+                student_id=student.id, class_id=class_id, timetable_slot_id=None,
+                date=day, status=status, source="manual",
+            )
+        )
+        created += 1
+    if created:
+        session.flush()
+        counts["attendance_records"] = counts.get("attendance_records", 0) + created
+    return created
+
+
+def _get_or_create_remarks(session: Session, student: User, remarks: list[tuple[str, int, str]], counts: dict) -> int:
+    """Seed teacher remarks, authored by the teacher who actually teaches that subject
+    to this student's class (resolved from timetable_slots).
+
+    `created_at` is backdated by the given number of days so the feed looks lived-in
+    rather than six remarks all posted this morning - and so the nightly scorer's
+    "5 most recent" window picks the intended ones.
+    """
+    from app.models.risk import RemarkStub
+
+    enrollment = (
+        session.query(Enrollment)
+        .filter(Enrollment.student_id == student.id, Enrollment.is_primary.is_(True))
+        .first()
+    )
+    if enrollment is None:
+        return 0
+
+    teacher_by_subject = {
+        subject_name: teacher_id
+        for subject_name, teacher_id in session.query(Subject.name, TimetableSlot.teacher_id)
+        .join(TimetableSlot, TimetableSlot.subject_id == Subject.id)
+        .filter(TimetableSlot.class_id == enrollment.class_id)
+        .distinct()
+    }
+
+    created = 0
+    for subject_name, days_ago, text in remarks:
+        teacher_id = teacher_by_subject.get(subject_name)
+        if teacher_id is None:
+            continue
+        existing = (
+            session.query(RemarkStub)
+            .filter(RemarkStub.student_id == student.id, RemarkStub.remark_text == text)
+            .one_or_none()
+        )
+        if existing is not None:
+            continue
+        row = RemarkStub(student_id=student.id, teacher_id=teacher_id, remark_text=text)
+        session.add(row)
+        session.flush()
+        # created_at has a server_default, so it must be overwritten AFTER the insert.
+        row.created_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        created += 1
+    if created:
+        session.flush()
+        counts["remark_stubs"] = counts.get("remark_stubs", 0) + created
+    return created
+
+
+def _differentiate_fees(session: Session, records: list[FeeRecord], children: list[User], counts: dict) -> None:
+    """Mark the healthier child's fee PAID and leave the other overdue.
+
+    An idempotent SET, not a get-or-create - unlike everything else in this script. The
+    whole point is to force a known state: both children previously carried an identical
+    4500-overdue row, so the fees card did not change at all on child switch.
+    """
+    by_student = {r.student_id: r for r in records}
+    for child in children:
+        record = by_student.get(child.id)
+        if record is None:
+            continue
+        should_be_paid = FEE_PAID_STUDENT.lower() in (child.full_name or "").lower()
+        if should_be_paid and record.status != "paid":
+            record.amount_paid = record.amount_due
+            record.status = "paid"
+            counts["fee_records_marked_paid"] = counts.get("fee_records_marked_paid", 0) + 1
+        elif not should_be_paid and record.status != "overdue":
+            record.amount_paid = 0.0
+            record.status = "overdue"
+            counts["fee_records_marked_overdue"] = counts.get("fee_records_marked_overdue", 0) + 1
+    session.flush()
+
+
+def _rescore_risk_flags(session: Session, children: list[User], counts: dict) -> dict:
+    """Clear the hand-written flags and regenerate them from Person A's real scorer.
+
+    WHY NOT JUST EDIT THE REASONS: the three pre-existing flags carried reasons like
+    "attendance rate 60% is below the 90% threshold" against a child who had ZERO
+    attendance rows - a number nothing else in the app could corroborate. Since the
+    parent portal now SHOWS `risk_flags.reasons` in its at-risk banner, a hand-written
+    reason is a banner that contradicts the attendance card two rows below it.
+
+    Resolving (not deleting) the old flags keeps the audit trail intact. The nightly
+    scorer then rebuilds from the attendance and remarks seeded above, so what the
+    banner says is what the rest of the page shows.
+
+    Note the scorer SKIPS low-risk students entirely (no flag row), which is what makes
+    the banner appear for Diya and vanish for Aarav.
+    """
+    from app.services.risk_scorer import score_student
+    from scripts.run_nightly_risk_scoring import (
+        _build_attendance_signal,
+        _build_remark_signal,
+        ATTENDANCE_LOOKBACK_DAYS,
+        run_nightly_scoring,
+    )
+
+    # Resolve ONLY flags the scorer will no longer regenerate - i.e. students who now
+    # score low. run_nightly_scoring skips low-risk students entirely (it never closes a
+    # flag for someone who improved), so without this Aarav would keep a stale open flag
+    # forever. Blanket-resolving every flag instead would churn: Diya's would be
+    # resolved and recreated on every run, so this script would never be idempotent.
+    since = date.today() - timedelta(days=ATTENDANCE_LOOKBACK_DAYS)
+    for child in children:
+        result = score_student(
+            _build_attendance_signal(session, child.id, since),
+            grades=None,
+            remarks=_build_remark_signal(session, child.id),
+        )
+        if result.risk_level != "low":
+            continue
+        for flag in session.query(RiskFlag).filter(
+            RiskFlag.student_id == child.id, RiskFlag.status == "open"
+        ):
+            flag.status = "resolved"
+            flag.resolved_at = datetime.now(timezone.utc)
+            counts["risk_flags_resolved"] = counts.get("risk_flags_resolved", 0) + 1
+    session.commit()
+
+    # Everyone still at risk gets their existing open flag UPDATED in place by the real
+    # scorer, so reasons always match the attendance the portal displays.
+    return run_nightly_scoring(session, SCHOOL_ID, ACADEMIC_YEAR)
+
+
 def _reset_demo_passwords() -> list[tuple[str, str]]:
     """Reset every DEMO_LOGINS account to a known password, every run.
 
@@ -581,7 +818,13 @@ def seed(session: Session, counts: dict) -> dict:
 
     schedule = _get_or_create_fee_schedule(session, parent.school_id, counts)
     records = [_get_or_create_fee_record(session, child, schedule, counts) for child in children]
-    flags = [_get_or_create_risk_flag(session, child, counts) for child in children]
+    # Risk flags are NO LONGER hand-written here - see _rescore_risk_flags(), which runs
+    # Person A's real nightly scorer against the attendance and remarks seeded below so
+    # each flag's `reasons` match what the parent portal actually displays. The old
+    # _get_or_create_risk_flag() invented a flag with a fixed reason string for every
+    # child; keeping it alongside the scorer produced an endless churn (it recreated
+    # Aarav's flag, the re-score resolved it, every single run).
+    flags: list[RiskFlag] = []
     school_class = _ensure_homeroom_teacher(session, children, counts)
 
     # --- RAG / Top Doubts fixtures ---
@@ -601,8 +844,31 @@ def seed(session: Session, counts: dict) -> dict:
     resources = _get_or_create_resources(session, grade_3a, uploader, counts)
     doubt_logs = _get_or_create_doubt_logs(session, grade_3a, grade_3b, counts)
 
+    # --- Parent-portal profiles: make the two children read differently ---
+    attendance_patterns = {"Aarav": AARAV_ATTENDANCE_PATTERN, "Diya": DIYA_ATTENDANCE_PATTERN}
+    remark_sets = {"Aarav": AARAV_REMARKS, "Diya": DIYA_REMARKS}
+    for child in children:
+        first_name = (child.full_name or "").split()[0]
+        enrollment = (
+            session.query(Enrollment)
+            .filter(Enrollment.student_id == child.id, Enrollment.is_primary.is_(True))
+            .first()
+        )
+        if enrollment is None:
+            continue
+        pattern = attendance_patterns.get(first_name)
+        if pattern:
+            _get_or_create_attendance(session, child, enrollment.class_id, pattern, counts)
+        if first_name in remark_sets:
+            _get_or_create_remarks(session, child, remark_sets[first_name], counts)
+
+    _differentiate_fees(session, records, children, counts)
+    # Must run LAST: it scores against the attendance and remarks seeded just above.
+    scoring = _rescore_risk_flags(session, children, counts)
+
     return {
         "doubt_logs": doubt_logs,
+        "scoring": scoring,
         "parent": parent, "children": children, "schedule": schedule,
         "records": records, "flags": flags, "class": school_class,
         "grade_3a": grade_3a, "grade_3b": grade_3b, "grade_3b_students": grade_3b_students,
@@ -640,6 +906,23 @@ def main() -> None:
             state = "indexed" if resource.indexed_at else "NOT yet indexed"
             print(f"  [{resource.id}] {resource.title}  ({state})")
         print(f"\nSeeded doubt logs created this run: {data['doubt_logs']}")
+        print(f"Risk re-scoring (real nightly scorer): {data['scoring']}")
+        print("\nParent-portal profiles:")
+        for child in children:
+            att = session.query(AttendanceRecord).filter(AttendanceRecord.student_id == child.id).all()
+            present = sum(1 for a in att if a.status == "present")
+            flag = (
+                session.query(RiskFlag)
+                .filter(RiskFlag.student_id == child.id, RiskFlag.status == "open")
+                .one_or_none()
+            )
+            fee = session.query(FeeRecord).filter(FeeRecord.student_id == child.id).first()
+            from app.models.risk import RemarkStub
+
+            n_remarks = session.query(RemarkStub).filter(RemarkStub.student_id == child.id).count()
+            pct = f"{100 * present / len(att):.0f}%" if att else "n/a"
+            print(f"  {child.full_name:14} attendance {present}/{len(att)} ({pct})  remarks {n_remarks}  "
+                  f"fee {fee.status if fee else '-':8} flag {flag.risk_level if flag else 'NONE (low risk)'}")
         print(f"Rows created this run: {counts or 'none - everything already existed'}")
 
         reset = _reset_demo_passwords()

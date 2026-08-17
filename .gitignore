@@ -18,6 +18,14 @@ frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
 
+# Source PDFs dropped at the repo root for one-off resource uploads. fecu101.pdf is a
+# 2.7 MB NCERT Grade 6 science chapter that got swept into commit 548c5e1 by a
+# `git add -A`. This rule does NOT untrack it - git ignores only UNtracked paths - it
+# just stops it (and its siblings) being re-added after a future removal. To actually
+# stop tracking it without rewriting history: `git rm --cached fecu101.pdf`, which
+# leaves the file on disk and the old commit intact.
+/*.pdf
+
 # Backend (Python)
 __pycache__/
 *.pyc

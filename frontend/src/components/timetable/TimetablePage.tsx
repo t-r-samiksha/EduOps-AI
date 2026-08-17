@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Users } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
-import { useParentChildren } from "@/api/hooks/useParent";
+import { useSelectedChild } from "@/hooks/useSelectedChild";
 import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
@@ -17,19 +17,13 @@ export default function TimetablePage() {
   const schoolId = useCurrentUser().data?.school_id;
   const lookup = useReferenceLookup(schoolId);
   const [classId, setClassId] = useState<number | undefined>(undefined);
-  const children = useParentChildren();
-  const [selectedChildId, setSelectedChildId] = useState<string>("");
+  const { children, selectedChildId, setSelectedChildId, showSelector, isLoading: childrenLoading } =
+    useSelectedChild();
 
   const isAdminLike = role === "admin" || role === "principal";
 
-  useEffect(() => {
-    if (role === "parent" && !selectedChildId && children.data?.items.length) {
-      setSelectedChildId(String(children.data.items[0].id));
-    }
-  }, [role, children.data, selectedChildId]);
-
-  const parentStudentId = role === "parent" && selectedChildId ? Number(selectedChildId) : undefined;
-  const showChildSelect = role === "parent" && (children.data?.items.length ?? 0) > 1;
+  const parentStudentId = role === "parent" ? selectedChildId : undefined;
+  const showChildSelect = role === "parent" && showSelector;
 
   const { data, isLoading, error } = useTimetableActive({
     academicYear: DEFAULT_ACADEMIC_YEAR,
@@ -84,12 +78,12 @@ export default function TimetablePage() {
             {isAdminLike && schoolId != null && <GenerateTimetableForm schoolId={schoolId} />}
 
             {showChildSelect && (
-              <Select value={selectedChildId} onValueChange={setSelectedChildId}>
+              <Select value={String(selectedChildId ?? "")} onValueChange={(v) => setSelectedChildId(Number(v))}>
                 <SelectTrigger className="w-56">
                   <SelectValue placeholder="Select child" />
                 </SelectTrigger>
                 <SelectContent>
-                  {children.data?.items.map((c) => (
+                  {children.map((c) => (
                     <SelectItem key={c.id} value={String(c.id)}>
                       {c.name} {c.class_name ? `· ${c.class_name}` : ""}
                     </SelectItem>
@@ -101,7 +95,7 @@ export default function TimetablePage() {
         }
       />
 
-      {role === "parent" && !children.isLoading && (children.data?.items.length ?? 0) === 0 && (
+      {role === "parent" && !childrenLoading && children.length === 0 && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Users className="h-4 w-4" /> No linked children</CardTitle>

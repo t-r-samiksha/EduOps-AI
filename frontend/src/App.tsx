@@ -27,6 +27,8 @@ import InvigilationDutiesPage from "@/components/exams/InvigilationDutiesPage";
 import StudentSeatLookup from "@/components/exams/StudentSeatLookup";
 import SchoolManagementPage from "@/components/admin/SchoolManagementPage";
 import StudentDoubtBot from "@/components/bots/StudentDoubtBot";
+import ChildSummary from "@/routes/parent/ChildSummary";
+import ParentBot from "@/routes/parent/ParentBot";
 
 interface RouteConfig {
   path: string;
@@ -78,6 +80,8 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/student/doubt-bot", role: "student", element: <StudentDoubtBot /> },
 
   { path: "/parent", role: "parent", element: <ParentDashboard /> },
+  { path: "/parent/child", role: "parent", element: <ChildSummary /> },
+  { path: "/parent/bot", role: "parent", element: <ParentBot /> },
   { path: "/parent/timetable", role: "parent", element: <TimetablePage /> },
   { path: "/parent/risk", role: "parent", element: <RiskDashboard /> },
   { path: "/parent/fees", role: "parent", element: <FeesPage /> },

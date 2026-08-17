@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AlertTriangle, MessageSquarePlus, ShieldAlert, UserCheck, UserPlus, Users } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -15,7 +15,7 @@ import EntityCard from "@/components/shared/EntityCard";
 import StatTile from "@/components/shared/StatTile";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useFlaggedStudents, useCreateRiskFlag, useAcknowledgeFlag, useResolveFlag, useLogIntervention } from "@/api/hooks/useRisk";
-import { useParentChildren } from "@/api/hooks/useParent";
+import { useSelectedChild } from "@/hooks/useSelectedChild";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { timeAgo } from "@/lib/format";
 import { ApiError } from "@/api/client";
@@ -223,18 +223,12 @@ function FlagFeed({ riskLevel, studentId }: { riskLevel?: string; studentId?: nu
 export default function RiskDashboard() {
   const { role } = useAuthStore();
   const schoolId = useCurrentUser().data?.school_id;
-  const children = useParentChildren();
-  const [selectedChildId, setSelectedChildId] = useState("");
+  const { children, selectedChildId, setSelectedChildId, showSelector, isLoading: childrenLoading } =
+    useSelectedChild();
   const canFlag = role === "teacher" || role === "admin" || role === "principal";
 
-  useEffect(() => {
-    if (role === "parent" && !selectedChildId && children.data?.items.length) {
-      setSelectedChildId(String(children.data.items[0].id));
-    }
-  }, [role, children.data, selectedChildId]);
-
-  const parentStudentId = role === "parent" && selectedChildId ? Number(selectedChildId) : undefined;
-  const showChildSelect = role === "parent" && (children.data?.items.length ?? 0) > 1;
+  const parentStudentId = role === "parent" ? selectedChildId : undefined;
+  const showChildSelect = role === "parent" && showSelector;
 
   const allFlagged = useFlaggedStudents(
     role === "parent" ? { studentId: parentStudentId, enabled: parentStudentId !== undefined } : {}
@@ -251,12 +245,12 @@ export default function RiskDashboard() {
           canFlag && schoolId != null ? (
             <FlagStudentDialog schoolId={schoolId} />
           ) : showChildSelect ? (
-            <Select value={selectedChildId} onValueChange={setSelectedChildId}>
+            <Select value={String(selectedChildId ?? "")} onValueChange={(v) => setSelectedChildId(Number(v))}>
               <SelectTrigger className="w-56">
                 <SelectValue placeholder="Select child" />
               </SelectTrigger>
               <SelectContent>
-                {children.data?.items.map((c) => (
+                {children.map((c) => (
                   <SelectItem key={c.id} value={String(c.id)}>
                     {c.name} {c.class_name ? `· ${c.class_name}` : ""}
                   </SelectItem>
@@ -267,9 +261,9 @@ export default function RiskDashboard() {
         }
       />
 
-      {role === "parent" && children.isLoading && <div className="h-16 animate-pulse rounded-2xl bg-elevated/60" />}
+      {role === "parent" && childrenLoading && <div className="h-16 animate-pulse rounded-2xl bg-elevated/60" />}
 
-      {role === "parent" && !children.isLoading && (children.data?.items.length ?? 0) === 0 && (
+      {role === "parent" && !childrenLoading && children.length === 0 && (
         <Card>
           <CardContent className="flex flex-col items-center gap-1 py-6 text-center">
             <Users className="h-6 w-6 text-ink-muted" />

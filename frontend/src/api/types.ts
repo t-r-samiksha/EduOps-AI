@@ -733,13 +733,31 @@ export interface NotificationStreamSnapshot {
 // --- RAG chatbots ----------------------------------------------------------
 // Mirrors app/routers/bots.py's StudentAskRequest / StudentAskResponse.
 
-export interface BotAskRequest {
+/**
+ * Bot request bodies, as a DISCRIMINATED UNION rather than one loose interface.
+ *
+ * The two bots scope on different things and neither field is optional for its own
+ * bot: the student bot must send `class_id` (validated against enrollment), the parent
+ * bot must send `student_id` (validated against parent_student). A single interface
+ * with both fields optional would compile happily for a request that carried neither -
+ * which is exactly the shape the `as never` cast in ChatShell used to hide.
+ */
+export interface StudentBotAskRequest {
   query: string;
   /** SECURITY BOUNDARY, not a filter - the backend validates this against the
    * caller's own enrollment before retrieving anything. See api-contract.md. */
   class_id: number;
   subject_id?: number;
 }
+
+export interface ParentBotAskRequest {
+  query: string;
+  /** SECURITY BOUNDARY - validated with assert_parent_linked on every request. The
+   * frontend child selector is never trusted. */
+  student_id: number;
+}
+
+export type BotAskRequest = StudentBotAskRequest | ParentBotAskRequest;
 
 export interface Citation {
   chunk_id: number;
@@ -777,4 +795,62 @@ export interface GradeSubjectDoubts {
 
 export interface MyTopDoubtsResponse {
   items: GradeSubjectDoubts[];
+}
+
+// --- Parent portal: GET /parent/child/{id}/summary -------------------------
+// One round trip for the whole portal page. Mirrors app/routers/parent.py's
+// ChildSummaryResponse.
+
+export interface ChildSummaryStudent {
+  id: number;
+  name: string;
+  class_id: number | null;
+  class_name: string | null;
+  grade_level: number | null;
+}
+
+export interface ChildSummaryAttendance {
+  present_pct: number;
+  present_count: number;
+  absent_count: number;
+  late_count: number;
+  /** Window in CALENDAR days, matching the risk scorer's lookback so the banner and
+   * this card can never quote different attendance figures. */
+  days: number;
+}
+
+export interface ChildSummaryRisk {
+  level: string;
+  score: number;
+  /** Already-human-readable strings from the nightly scorer - render them verbatim. */
+  reasons: string[];
+  flagged_at: string;
+}
+
+export interface ChildSummaryRemark {
+  id: number;
+  teacher_name: string | null;
+  remark_text: string;
+  /** `compound` is -1..+1. Drives visual weight, not just a label. */
+  sentiment: { label: string; compound: number };
+  created_at: string;
+}
+
+export interface ChildSummaryFee {
+  fee_record_id: number;
+  fee_type: string;
+  amount_due: number;
+  amount_paid: number;
+  status: string;
+  due_date: string;
+}
+
+export interface ChildSummary {
+  student: ChildSummaryStudent;
+  attendance: ChildSummaryAttendance;
+  /** null = healthy. Hide the banner entirely rather than rendering an empty one. */
+  risk: ChildSummaryRisk | null;
+  remarks: ChildSummaryRemark[];
+  fees: ChildSummaryFee[];
+  upcoming: { type: string; title: string; date: string }[];
 }

@@ -21,9 +21,11 @@ from app.models.knowledge import ChatbotLog
 from app.models.resource import Resource
 from app.models.school import School
 from app.services.auth import CurrentUser, require_role
+from app.routers.parent import child_summary
 from app.services.doubt_insights import grade_subject_pairs_for_teacher, top_doubts
 from app.services.ingestion import ingest_pending, ingest_resource
 from app.services.llm import embed_query, generate
+from app.services.scoping import assert_parent_linked
 from app.services.retrieval import (
     DEFAULT_TOP_K,
     assert_student_class_access,
@@ -162,6 +164,135 @@ def student_ask(
             for c in chunks
         ],
     )
+
+
+# --- Parent Assistant Bot -------------------------------------------------------------
+# STRUCTURED CONTEXT, NOT RAG. A child's attendance, remarks, risk and fees are never
+# embedded and never enter kb_chunks: that corpus is grade-scoped teaching material
+# shared across a whole grade, so putting one child's record in it would make another
+# family's questions able to retrieve it. Instead the aggregate endpoint's own response
+# is serialized straight into the prompt.
+
+PARENT_BOT_SYSTEM_PROMPT = """You are a school assistant talking to a parent about their own child.
+
+You will be given that child's real record: attendance, teacher remarks, any early-warning flag, and fee status.
+
+Rules you must follow:
+- Use ONLY the data provided. Never invent a number, a date, a subject or a teacher's opinion.
+- If the data does not answer the question, say so plainly and suggest they contact the school. Do not speculate.
+- Be warm but factual. You are speaking to a worried parent, not writing a report.
+- NEVER give medical, psychological or diagnostic opinions. Do not suggest a condition, a diagnosis, or a therapy. If asked, say that is a conversation for the school and a doctor.
+- Do not predict the future ("she will fail", "he'll be fine"). Describe what the record shows.
+- Plain language, short paragraphs. No jargon, no bullet-point dumps.
+- Refer to the child by name.
+"""
+"""The prohibitions are the load-bearing part. A parent asking "is something wrong with
+my daughter" is the likeliest real question, and a model left to its own devices will
+happily speculate about attention disorders from an attendance dip. The data is also
+genuinely thin (no grades exist in this schema), so "I don't have that" has to be an
+acceptable answer rather than something the model talks its way around."""
+
+
+class ParentAskRequest(BaseModel):
+    query: str
+    student_id: int
+    """SECURITY BOUNDARY - validated with assert_parent_linked on every request. The
+    frontend child selector is never trusted."""
+
+
+@router.post("/parent/ask", response_model=StudentAskResponse)
+def parent_ask(
+    body: ParentAskRequest,
+    user: CurrentUser = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    """Answer a parent's question about their own child, grounded in that child's record.
+
+    Reuses the exact aggregate GET /parent/child/{id}/summary returns - calling the same
+    function rather than re-querying, so the bot can never disagree with the portal page
+    the parent is looking at.
+    """
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "query must not be empty")
+
+    # Security boundary FIRST, before any spend.
+    assert_parent_linked(db, user.id, body.student_id)
+    summary = child_summary(student_id=body.student_id, user=user, db=db)
+
+    answer = generate(PARENT_BOT_SYSTEM_PROMPT, _parent_context(summary, query))
+
+    db.add(
+        ChatbotLog(
+            user_id=user.id,
+            bot_type="parent",
+            query=query,
+            response=answer,
+            kb_chunks_used=None,  # no retrieval happened - this is structured context
+            # DELIBERATELY NULL. Top Doubts clusters chatbot_logs by (school, grade,
+            # subject) to show teachers what STUDENTS are confused about. A parent
+            # asking "how is my child doing" is not a student doubt, and embedding it
+            # here would pull it into Meera's cluster feed as if it were one. The
+            # clustering skips null-embedding rows, so this is the isolation.
+            query_embedding=None,
+            class_id=summary.student.class_id,
+            subject_id=None,
+        )
+    )
+    db.commit()
+
+    # Same response shape as the student bot so ChatShell needs no branching. Citations
+    # are empty because nothing was retrieved - the "source" is the child's own record,
+    # which the parent is already looking at on the portal page.
+    return StudentAskResponse(answer=answer, citations=[])
+
+
+def _parent_context(summary, query: str) -> str:
+    """Serialize the child's record as readable lines rather than raw JSON - the model
+    follows plain labelled text more reliably than it does nested objects, and it keeps
+    the prompt auditable when a bad answer needs explaining."""
+    attendance = summary.attendance
+    lines = [
+        f"CHILD: {summary.student.name}, {summary.student.class_name or 'class unknown'}"
+        f" (grade {summary.student.grade_level if summary.student.grade_level is not None else 'unknown'})",
+        "",
+        f"ATTENDANCE (last {attendance.days} days): {attendance.present_pct}% present "
+        f"- {attendance.present_count} present, {attendance.absent_count} absent, {attendance.late_count} late",
+    ]
+
+    if summary.risk is not None:
+        lines += [
+            "",
+            f"EARLY-WARNING FLAG: {summary.risk.level} risk. Reasons the school recorded:",
+            *[f"  - {reason}" for reason in summary.risk.reasons],
+        ]
+    else:
+        lines += ["", "EARLY-WARNING FLAG: none. This child is not currently flagged."]
+
+    if summary.remarks:
+        lines += ["", "TEACHER REMARKS (newest first):"]
+        for remark in summary.remarks:
+            lines.append(
+                f"  - [{remark.sentiment.label}] {remark.teacher_name or 'Teacher'} "
+                f"on {remark.created_at.date()}: {remark.remark_text}"
+            )
+    else:
+        lines += ["", "TEACHER REMARKS: none recorded yet."]
+
+    if summary.fees:
+        lines += ["", "FEES:"]
+        for fee in summary.fees:
+            outstanding = round(fee.amount_due - fee.amount_paid, 2)
+            lines.append(
+                f"  - {fee.fee_type}: {fee.status}, due {fee.due_date}, "
+                f"{outstanding} outstanding of {fee.amount_due}"
+            )
+    else:
+        lines += ["", "FEES: nothing outstanding on record."]
+
+    lines += ["", "NOTE: there is no exam-grade data in this system, so you cannot answer questions about marks or grades."]
+    lines += ["", f"PARENT'S QUESTION: {query}"]
+    return "\n".join(lines)
 
 
 # --- Top Doubts insights ------------------------------------------------------------
