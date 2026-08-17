@@ -162,6 +162,173 @@ export interface AttendanceRecord {
   reviewed_at: string | null;
 }
 
+// --- Day register, manual marking, analytics, per-student history ------------
+
+export type AttendanceStatus = "present" | "absent" | "late";
+
+export interface RegisterPeriod {
+  timetable_slot_id: number;
+  period_number: number;
+  start_time: string;
+  end_time: string;
+  subject_id: number;
+  subject_name: string;
+  teacher_id: number;
+  teacher_name: string;
+  /** False when the period has no records at all - distinct from "everyone was absent". */
+  is_marked: boolean;
+  marked_count: number;
+}
+
+export interface RegisterCell {
+  timetable_slot_id: number;
+  record_id: number | null;
+  /** null = unmarked, no record exists for this student/period/date. */
+  status: AttendanceStatus | null;
+  source: string | null;
+  confidence_score: number | null;
+  needs_review: boolean;
+  reviewed_by_name: string | null;
+}
+
+export interface RegisterStudent {
+  student_id: number;
+  name: string;
+  cells: RegisterCell[];
+  present_count: number;
+  absent_count: number;
+  late_count: number;
+  unmarked_count: number;
+  /** Of periods actually marked - unmarked periods are out of the denominator. */
+  present_pct: number;
+}
+
+export interface RegisterTotals {
+  roster_size: number;
+  period_count: number;
+  marked_periods: number;
+  unmarked_periods: number;
+  present_cells: number;
+  absent_cells: number;
+  late_cells: number;
+  unmarked_cells: number;
+  present_pct: number;
+}
+
+export interface AttendanceRegisterResponse {
+  class_id: number;
+  class_name: string;
+  grade_level: number | null;
+  grade_label: string | null;
+  section: string | null;
+  date: string;
+  day_of_week: number;
+  academic_year: string;
+  periods: RegisterPeriod[];
+  students: RegisterStudent[];
+  totals: RegisterTotals;
+}
+
+export interface ManualMarkEntry {
+  student_id: number;
+  timetable_slot_id: number;
+  status: AttendanceStatus;
+}
+
+export interface ManualMarkResponse {
+  created: number;
+  updated: number;
+  unchanged: number;
+  records: AttendanceRecord[];
+}
+
+export interface AttendanceBucket {
+  present_count: number;
+  absent_count: number;
+  late_count: number;
+  total_records: number;
+  present_pct: number;
+}
+
+export interface PeriodBucket extends AttendanceBucket {
+  period_number: number;
+}
+
+export interface DayBucket extends AttendanceBucket {
+  date: string;
+  day_of_week: number;
+}
+
+export interface ClassBucket extends AttendanceBucket {
+  class_id: number;
+  class_name: string;
+  grade_level: number | null;
+  grade_label: string | null;
+  section: string | null;
+}
+
+export interface SubjectBucket extends AttendanceBucket {
+  subject_id: number;
+  subject_name: string;
+}
+
+export interface StudentBucket extends AttendanceBucket {
+  student_id: number;
+  name: string;
+  class_id: number;
+  class_name: string;
+  section: string | null;
+  /** Newer half of the window minus the older half, in percentage points. */
+  trend_delta: number;
+  trend: "rising" | "flat" | "falling";
+}
+
+export interface AttendanceAnalyticsResponse {
+  from_date: string;
+  to_date: string;
+  overall: AttendanceBucket;
+  by_period: PeriodBucket[];
+  by_day: DayBucket[];
+  by_class: ClassBucket[];
+  by_subject: SubjectBucket[];
+  students: StudentBucket[];
+  roster_size: number;
+  below_pct_count: number;
+}
+
+export interface MyRecordPeriod {
+  timetable_slot_id: number | null;
+  period_number: number | null;
+  start_time: string | null;
+  end_time: string | null;
+  subject_name: string | null;
+  teacher_name: string | null;
+  status: AttendanceStatus;
+  source: string;
+  marked_at: string;
+}
+
+export interface MyRecordDay {
+  date: string;
+  day_of_week: number;
+  periods: MyRecordPeriod[];
+  present_count: number;
+  total_count: number;
+  present_pct: number;
+}
+
+export interface MyAttendanceRecordsResponse {
+  student_id: number;
+  student_name: string;
+  class_id: number | null;
+  class_name: string | null;
+  from_date: string;
+  to_date: string;
+  summary: AttendanceBucket;
+  /** Newest day first. */
+  days: MyRecordDay[];
+}
+
 // --- Staffing & Substitutes -------------------------------------------------
 
 export interface LeaveRequest {

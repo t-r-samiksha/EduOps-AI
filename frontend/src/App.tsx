@@ -28,7 +28,9 @@ import StudentSeatLookup from "@/components/exams/StudentSeatLookup";
 import SchoolManagementPage from "@/components/admin/SchoolManagementPage";
 import StudentDoubtBot from "@/components/bots/StudentDoubtBot";
 import ChildSummary from "@/routes/parent/ChildSummary";
+import ChildAttendance from "@/routes/parent/ChildAttendance";
 import ParentBot from "@/routes/parent/ParentBot";
+import StudentAttendance from "@/routes/student/StudentAttendance";
 
 interface RouteConfig {
   path: string;
@@ -41,6 +43,7 @@ interface RouteConfig {
 const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal", role: "principal", element: <PrincipalDashboard /> },
   { path: "/principal/timetable", role: "principal", element: <TimetablePage /> },
+  { path: "/principal/attendance", role: "principal", element: <AttendanceCapture /> },
   { path: "/principal/staffing", role: "principal", element: <StaffingPage /> },
   { path: "/principal/risk", role: "principal", element: <RiskDashboard /> },
   { path: "/principal/syllabus", role: "principal", element: <SyllabusPage /> },
@@ -74,6 +77,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/exams", role: "teacher", element: <InvigilationDutiesPage /> },
 
   { path: "/student", role: "student", element: <StudentDashboard /> },
+  { path: "/student/attendance", role: "student", element: <StudentAttendance /> },
   { path: "/student/timetable", role: "student", element: <TimetablePage /> },
   { path: "/student/fees", role: "student", element: <FeesPage /> },
   { path: "/student/exams", role: "student", element: <StudentSeatLookup /> },
@@ -81,6 +85,7 @@ const ROUTE_TABLE: RouteConfig[] = [
 
   { path: "/parent", role: "parent", element: <ParentDashboard /> },
   { path: "/parent/child", role: "parent", element: <ChildSummary /> },
+  { path: "/parent/attendance", role: "parent", element: <ChildAttendance /> },
   { path: "/parent/bot", role: "parent", element: <ParentBot /> },
   { path: "/parent/timetable", role: "parent", element: <TimetablePage /> },
   { path: "/parent/risk", role: "parent", element: <RiskDashboard /> },

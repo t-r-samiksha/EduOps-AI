@@ -42,6 +42,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   principal: [
     { label: "Dashboard", path: "/principal", icon: LayoutGrid, end: true },
     { label: "Timetable", path: "/principal/timetable", icon: CalendarClock },
+    { label: "Attendance", path: "/principal/attendance", icon: ScanFace },
     { label: "Staffing", path: "/principal/staffing", icon: Users },
     { label: "Early-Warning", path: "/principal/risk", icon: AlertTriangle },
     { label: "Syllabus", path: "/principal/syllabus", icon: BookOpenCheck },
@@ -64,6 +65,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   ],
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
+    { label: "Attendance", path: "/student/attendance", icon: ScanFace },
     { label: "Doubt Bot", path: "/student/doubt-bot", icon: Bot },
     { label: "Timetable", path: "/student/timetable", icon: CalendarClock },
     { label: "Fees", path: "/student/fees", icon: Wallet },
@@ -72,6 +74,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   parent: [
     { label: "Dashboard", path: "/parent", icon: LayoutGrid, end: true },
     { label: "My Child", path: "/parent/child", icon: UserIcon },
+    { label: "Attendance", path: "/parent/attendance", icon: ScanFace },
     { label: "Ask", path: "/parent/bot", icon: Bot },
     { label: "Timetable", path: "/parent/timetable", icon: CalendarClock },
     { label: "Early-Warning", path: "/parent/risk", icon: AlertTriangle },

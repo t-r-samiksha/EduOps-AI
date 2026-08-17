@@ -768,7 +768,7 @@ for a linked child (`403` if not linked).
 #### `PUT /attendance/{record_id}/review`
 Manual correction of a record (low-confidence CV match, or a mismatch caught during
 reconciliation once that lands). Sets `reviewed_by`/`reviewed_at` to the caller.
-- **Roles:** admin, teacher (teacher only for records in a class they're `class_teacher` of - `403` otherwise)
+- **Roles:** admin, principal, teacher (teacher only for records in a class they're `class_teacher` of - `403` otherwise)
 - **Request:** `{ "status": "present" }` (`present` | `absent` | `late`)
 - **Response:** the updated record, same shape as a `matches[]` entry plus
   `reviewed_by`/`reviewed_at`:
@@ -776,6 +776,158 @@ reconciliation once that lands). Sets `reviewed_by`/`reviewed_at` to the caller.
 { "id": 501, "student_id": 15, "class_id": 2, "timetable_slot_id": 5, "date": "2026-08-09", "status": "present", "source": "cv", "marked_at": "2026-08-09T08:05:00Z", "confidence_score": 0.42, "reviewed_by": 7, "reviewed_at": "2026-08-09T09:00:00Z" }
 ```
 - **Errors:** `400` invalid `status`; `404` unknown `record_id`.
+
+### Attendance (day register, manual marking, analytics, per-student history)
+
+The human-facing half of the attendance router: `POST /attendance/mark` writes
+records from a photo, and these four are how a teacher/principal/admin reads a day
+back, corrects it by hand, analyses it over a range, and how a student/parent sees
+their own period-by-period history.
+
+**Two conventions differ from the four CV endpoints above, on purpose:**
+
+1. **Every class lookup is filtered by the caller's own `school_id`**, not only by
+   the id in the query string, and returns `404` (not `403`) for a class outside it -
+   so probing ids can't distinguish "exists, not yours" from "doesn't exist". The
+   older endpoints don't do this.
+2. **"A teacher's classes" is wider here.** `/summary` and `/{id}/review` mean
+   homeroom ownership (`SchoolClass.class_teacher_id`). These four also count any
+   class the teacher teaches ≥1 active `TimetableSlot` to, because the person who
+   marks P3's attendance is P3's subject teacher, who often isn't the class teacher.
+   Consequence worth knowing: a subject teacher can read and hand-mark a class's
+   register but will still get `403` from `/{id}/review` for the same class.
+   Widening those two tested endpoints is a separate change.
+
+#### `GET /attendance/register`
+One class's whole day as a period × student grid - the day view a teacher reads back
+after the camera has run, and edits via `POST /attendance/manual`.
+- **Roles:** admin, principal, teacher (scoped as above). Student/parent get `403` - they use `/attendance/my-records`.
+- **Query:** `?class_id=&date=` (both required)
+- **Response:**
+```json
+{
+  "class_id": 2, "class_name": "Grade 8 - A", "grade_level": 8, "grade_label": null,
+  "section": "A", "date": "2026-08-17", "day_of_week": 0, "academic_year": "2026-27",
+  "periods": [
+    { "timetable_slot_id": 5, "period_number": 1, "start_time": "08:00:00", "end_time": "08:45:00",
+      "subject_id": 3, "subject_name": "Math", "teacher_id": 7, "teacher_name": "R. Iyer",
+      "is_marked": true, "marked_count": 28 }
+  ],
+  "students": [
+    { "student_id": 15, "name": "Aarav Sharma",
+      "cells": [ { "timetable_slot_id": 5, "record_id": 501, "status": "present", "source": "cv",
+                   "confidence_score": 0.47, "needs_review": true, "reviewed_by_name": null } ],
+      "present_count": 1, "absent_count": 0, "late_count": 0, "unmarked_count": 0, "present_pct": 100.0 }
+  ],
+  "totals": { "roster_size": 30, "period_count": 8, "marked_periods": 7, "unmarked_periods": 1,
+              "present_cells": 210, "absent_cells": 8, "late_cells": 2, "unmarked_cells": 20,
+              "present_pct": 95.5 }
+}
+```
+- **`periods[].is_marked: false`** means the period has NO records at all. Without it,
+  "the teacher never marked P5" and "every student was absent in P5" are
+  indistinguishable, and the second is far rarer - the UI raises a warning on it.
+- **`cells[].status: null`** is unmarked (no record). Distinct from `"absent"`.
+- **`cells[].needs_review`** is recomputed from the stored `confidence_score` (the
+  0.45-0.6 distance band in `attendance_cv.py`, i.e. confidence 0.40-0.55) and is
+  `false` once `reviewed_at` is set - so it survives a page reload rather than living
+  only in the `POST /mark` response.
+- **`students[].present_pct`** is of periods actually **marked** for that student;
+  unmarked periods are excluded from the denominator, not counted as absent.
+- **Errors:** `400` caller has no `school_id`; `403` teacher and not their class; `404` class not in caller's school.
+
+#### `POST /attendance/manual`
+Mark/correct attendance by hand for any number of student-period cells. Bulk on
+purpose: "mark all 40 present" is one request, not 40.
+- **Roles:** admin, principal, teacher (scoped as above)
+- **Request:**
+```json
+{ "class_id": 2, "date": "2026-08-17",
+  "entries": [ { "student_id": 15, "timetable_slot_id": 5, "status": "absent" } ] }
+```
+- **Response:** `{ "created": 1, "updated": 0, "unchanged": 0, "records": [ ...AttendanceRecord ] }`
+- **UPSERTS, NEVER DOUBLE-INSERTS - the important part.** If a record already exists
+  for a `(student_id, timetable_slot_id, date)` in **any** source, it is updated in
+  place and stamped `reviewed_by`/`reviewed_at`. It deliberately does **not** insert a
+  second `source: "manual"` row beside a `source: "cv"` one: the table's unique
+  constraint is `(student_id, timetable_slot_id, date, source)`, so the DB *would*
+  allow both, and that would silently double-count the period in
+  `/attendance/summary`, `/attendance/analytics` and the nightly risk scorer.
+- **`source` is left unchanged on update**, so a corrected camera record still reads
+  as "the CV wrote this, then a human changed it"; `reviewed_by` is what proves the
+  human touch. Only a genuinely new cell is inserted as `source: "manual"`.
+- **No unmark.** There is no operation that deletes a record, only status changes, so
+  a cell that has been marked cannot return to `status: null`.
+- Duplicate entries for the same cell collapse, last one wins. `entries: []` is a
+  no-op `200`. An entry whose status already matches counts as `unchanged` and writes
+  **no** audit row, so bulk marking doesn't flood the audit log.
+- Each created/updated record writes an `audit_log_entries` row with
+  `action: "manual_mark"`, `entity_type: "attendance_records"` and a detail carrying
+  `previous_status` / `new_status`.
+- **Errors:** `400` invalid status, student not primary-enrolled in `class_id`, slot not an active period of `class_id`, or caller has no `school_id`; `403` teacher and not their class; `404` class not in caller's school.
+
+#### `GET /attendance/analytics`
+Attendance sliced by period, day, class/section, subject and student over a range -
+the sort-and-analyse view.
+- **Roles:** admin, principal, teacher (scoped as above). Student/parent `403`.
+- **Query:** `?from_date=&to_date=` (required) `&class_id=&grade_level=&section=&period_number=&subject_id=&below_pct=`
+- **Response:**
+```json
+{
+  "from_date": "2026-07-18", "to_date": "2026-08-17",
+  "overall": { "present_count": 210, "absent_count": 8, "late_count": 2, "total_records": 220, "present_pct": 95.5 },
+  "by_period":  [ { "period_number": 1, "present_count": 28, "absent_count": 2, "late_count": 0, "total_records": 30, "present_pct": 93.3 } ],
+  "by_day":     [ { "date": "2026-08-17", "day_of_week": 0, "present_count": 28, "absent_count": 2, "late_count": 0, "total_records": 30, "present_pct": 93.3 } ],
+  "by_class":   [ { "class_id": 2, "class_name": "Grade 8 - A", "grade_level": 8, "grade_label": null, "section": "A", "present_pct": 93.3, "present_count": 28, "absent_count": 2, "late_count": 0, "total_records": 30 } ],
+  "by_subject": [ { "subject_id": 3, "subject_name": "Math", "present_pct": 93.3, "present_count": 28, "absent_count": 2, "late_count": 0, "total_records": 30 } ],
+  "students":   [ { "student_id": 15, "name": "Aarav Sharma", "class_id": 2, "class_name": "Grade 8 - A", "section": "A",
+                    "present_count": 6, "absent_count": 1, "late_count": 0, "total_records": 7, "present_pct": 85.7,
+                    "trend_delta": -4.2, "trend": "falling" } ],
+  "roster_size": 30, "below_pct_count": 8
+}
+```
+- **`by_period` and `by_subject` only cover records attached to a timetable slot**;
+  `overall`, `by_day`, `by_class` and `students` count every record in range. Today
+  every record this router writes has a slot so the two agree - a future holiday/ad-hoc
+  record with a null slot would appear in the latter and not the former.
+- **`trend_delta`** is `present_pct` over the newer half of the range minus the older
+  half, in percentage points (`0.0` when either half has no records, so a single-day
+  range never invents a trend). `trend` buckets it at ±2 points.
+- **`students`** is sorted worst `present_pct` first. `below_pct` **filters** that
+  list to students under the threshold (the defaulter list); `below_pct_count` is that
+  count, or the count under 75% when `below_pct` is omitted.
+- `section` matches `SchoolClass.section` exactly; `grade_level` matches
+  `SchoolClass.grade_level` (see that model for the negative pre-Grade-1 convention).
+- **Errors:** `400` `from_date` after `to_date`, or caller has no `school_id`; `403` teacher naming a class that isn't theirs; `404` `class_id` not in caller's school.
+
+#### `GET /attendance/my-records`
+One student's period-by-period attendance over a range. **This is the student and
+parent portal attendance view.**
+- **Roles:** all five, with different scoping:
+  - **student** - always reads themselves; any `student_id` passed is **ignored**.
+  - **parent** - must pass `student_id` for a linked child (`400` if omitted, `403` if not linked).
+  - **admin/principal** - any student in their own school (`404` otherwise).
+  - **teacher** - only students primarily enrolled in a class they can access (`403` otherwise).
+- **Query:** `?from_date=&to_date=` (required) `&student_id=`
+- **Response:**
+```json
+{
+  "student_id": 15, "student_name": "Aarav Sharma", "class_id": 2, "class_name": "Grade 8 - A",
+  "from_date": "2026-07-18", "to_date": "2026-08-17",
+  "summary": { "present_count": 6, "absent_count": 1, "late_count": 0, "total_records": 7, "present_pct": 85.7 },
+  "days": [
+    { "date": "2026-08-17", "day_of_week": 0, "present_count": 2, "total_count": 2, "present_pct": 100.0,
+      "periods": [ { "timetable_slot_id": 5, "period_number": 1, "start_time": "08:00:00", "end_time": "08:45:00",
+                     "subject_name": "Math", "teacher_name": "R. Iyer", "status": "present", "source": "cv",
+                     "marked_at": "2026-08-17T08:05:00Z" } ] }
+  ]
+}
+```
+- **`days` is newest-first** - a student opening this wants today, not the start of the
+  range. `periods` within a day is period-number ascending.
+- A record with no `timetable_slot_id` returns nulls for the period/subject/teacher
+  fields rather than being dropped.
+- **Errors:** `400` `from_date` after `to_date`, parent omitted `student_id`, staff omitted `student_id`, or staff caller has no `school_id`; `403` parent not linked / teacher not their student; `404` unknown student, or student outside a staff caller's school.
 
 ### Predictive staffing / substitute suggestion
 
@@ -1332,6 +1484,7 @@ repo-wide gap, not a partial extension of something that already existed. Wired 
 | --- | --- | --- | --- |
 | timetable | `PUT /update` | `update` | `timetable_slots` |
 | attendance | `PUT /{id}/review` | `review` | `attendance_records` |
+| attendance | `POST /manual` | `manual_mark` | `attendance_records` |
 | staffing | `PUT /staff/approve_leave` | `approve`/`reject` | `leave_requests` |
 | staffing | `PUT /substitution/{id}/confirm` | `confirm` | `substitutions` |
 | risk | `PUT /{id}/acknowledge` | `acknowledge` | `risk_flags` |
@@ -2603,8 +2756,11 @@ Would have returned a `gradebook_summary`, which is unbuildable: there is no gra
 table in this schema. The attendance half is served by the summary endpoint above.
 
 #### ~~`GET /parent/children/{student_id}/attendance`~~ — superseded, never built
-Per-day attendance rows. The summary endpoint returns the aggregate the portal actually
-renders; nothing in the UI needs the day-by-day list yet.
+Per-day attendance rows. **Now genuinely served by `GET /attendance/my-records`**
+(see the attendance section) - period-by-period, day-by-day, with the parent-link
+check built in. `/parent/child/{id}/summary` still carries the 30-day aggregate the
+dashboard card renders; use `/attendance/my-records` for the drill-down. Don't build
+a parent-only copy of either.
 
 #### ~~`GET /parent/children/{student_id}/fees`~~ - superseded, never built
 This stub was never implemented as its own endpoint. A parent's fee view instead
