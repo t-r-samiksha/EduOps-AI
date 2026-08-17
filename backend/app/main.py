@@ -12,22 +12,28 @@ from app.scheduler import shutdown_scheduler, start_scheduler
 from app.routers import (
     admin_alerts,
     admissions,
+    analytics,
     approvals,
     assignments,
     attendance,
     audit,
     auth,
     bots,
+    calendar,
     classroom,
     documents,
     exams,
     fees,
+    gradebook,
+    library,
     master_data,
     notifications,
     parent,
     parents,
+    quizzes,
     reference,
     remarks,
+    report_cards,
     resources,
     risk,
     staffing,
@@ -60,8 +66,14 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(analytics.router)
 app.include_router(assignments.router)
+app.include_router(calendar.router)
 app.include_router(classroom.router)
+app.include_router(gradebook.router)
+app.include_router(library.router)
+app.include_router(quizzes.router)
+app.include_router(report_cards.router)
 app.include_router(timetable.router)
 app.include_router(attendance.router)
 app.include_router(staffing.router)
