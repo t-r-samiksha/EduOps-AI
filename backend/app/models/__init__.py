@@ -1,5 +1,6 @@
 from app.models.admissions import AdmissionApplication
 from app.models.alerts import AlertDismissal
+from app.models.assignment import Assignment, AssignmentSubmission
 from app.models.attendance import AttendanceReconciliation, AttendanceRecord, FaceEmbedding
 from app.models.audit import AuditLogEntry
 from app.models.class_ import SchoolClass
@@ -33,6 +34,8 @@ __all__ = [
     "AdmissionApplication",
     "AlertDismissal",
     "AnomalyFlag",
+    "Assignment",
+    "AssignmentSubmission",
     "AttendanceReconciliation",
     "AttendanceRecord",
     "AuditLogEntry",

@@ -1,4 +1,4 @@
-import { CalendarClock, ScanFace, BookOpen, FolderKanban } from "lucide-react";
+import { CalendarClock, ScanFace, BookOpen, FolderKanban, ClipboardList } from "lucide-react";
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
 import QuickLinkCard from "@/components/shared/QuickLinkCard";
@@ -103,6 +103,12 @@ export default function StudentDashboard() {
           icon={FolderKanban}
           label="Resources Library"
           stat="Browse worksheets, notes & textbooks"
+        />
+        <QuickLinkCard
+          to="/student/assignments"
+          icon={ClipboardList}
+          label="Assignments"
+          stat="Track coursework, submit homework & view grades"
         />
         <QuickLinkCard
           to="/student/timetable"

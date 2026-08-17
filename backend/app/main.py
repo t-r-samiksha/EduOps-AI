@@ -13,6 +13,7 @@ from app.routers import (
     admin_alerts,
     admissions,
     approvals,
+    assignments,
     attendance,
     audit,
     auth,
@@ -59,6 +60,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(assignments.router)
 app.include_router(classroom.router)
 app.include_router(timetable.router)
 app.include_router(attendance.router)

@@ -1,4 +1,4 @@
-import { CalendarClock, AlertTriangle, ScanFace, Users, BookOpenCheck, FolderKanban } from "lucide-react";
+import { CalendarClock, AlertTriangle, ScanFace, Users, BookOpenCheck, FolderKanban, ClipboardList } from "lucide-react";
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
 import QuickLinkCard from "@/components/shared/QuickLinkCard";
@@ -139,6 +139,12 @@ export default function TeacherDashboard() {
           icon={FolderKanban}
           label="Resources Library"
           stat="Upload & organize notes, slides and sheets"
+        />
+        <QuickLinkCard
+          to="/teacher/assignments"
+          icon={ClipboardList}
+          label="Assignments"
+          stat="Create coursework, grade & track submissions"
         />
         <QuickLinkCard
           to="/teacher/timetable"
