@@ -59,6 +59,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Admissions", path: "/admin/admissions", icon: ClipboardList },
     { label: "Exams", path: "/admin/exams", icon: Armchair },
     { label: "School Management", path: "/admin/school-management", icon: School },
+    { label: "Assistant Bot", path: "/admin/assistant", icon: Bot },
   ],
   principal: [
     { label: "Dashboard", path: "/principal", icon: LayoutGrid, end: true },
@@ -83,6 +84,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Admissions", path: "/principal/admissions", icon: ClipboardList },
     { label: "Exams", path: "/principal/exams", icon: Armchair },
     { label: "School Management", path: "/principal/school-management", icon: School },
+    { label: "Assistant Bot", path: "/principal/assistant", icon: Bot },
   ],
   teacher: [
     { label: "Dashboard", path: "/teacher", icon: LayoutGrid, end: true },
@@ -104,6 +106,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
     { label: "Syllabus", path: "/teacher/syllabus", icon: BookOpenCheck },
     { label: "Fees", path: "/teacher/fees", icon: Wallet },
     { label: "Exam Duties", path: "/teacher/exams", icon: Armchair },
+    { label: "Assistant Bot", path: "/teacher/assistant", icon: Bot },
   ],
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },

@@ -184,6 +184,7 @@ def test_quiz_single_attempt_enforcement(client, seed, db_session):
     quiz = Quiz(
         school_id=seed["school"].id,
         class_id=seed["class"].id,
+        subject_id=seed["math"].id,
         teacher_id=seed["teacher"].id,
         title="Single Attempt Test",
     )

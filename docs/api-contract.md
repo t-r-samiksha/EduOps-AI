@@ -2563,9 +2563,35 @@ Global search across announcements, resources, and people.
 - **Roles:** any authenticated
 - **Query:** `?q=&type=&page=`
 - **Response:**
+#### `POST /bots/teacher/ask`
+Teacher Assistant Bot endpoint for lesson planning, quiz/MCQ generation, curriculum Q&A, and student performance summaries grounded in school RAG resources.
+- **Roles:** `teacher`, `admin`, `principal`
+- **Request:**
 ```json
-{ "items": [ { "type": "announcement", "id": 5, "title": "Sports day", "snippet": "..." } ], "total": 1, "page": 1, "page_size": 20 }
+{
+  "query": "Create 5 MCQs from Physics Unit 1",
+  "grade_level": 9,
+  "subject_id": 2,
+  "class_id": 10,
+  "mode": "quiz"
+}
 ```
+- **Response:**
+```json
+{
+  "answer": "Here are 5 MCQs based on Physics Unit 1:\n\n**Question 1**\nWhat is Newton's First Law also known as?\nA. Law of Acceleration\nB. Law of Inertia\nC. Law of Action-Reaction\nD. Law of Gravitation\n\n*Correct Answer:* B\n*Explanation:* Newton's first law states that an object remains at rest or in uniform motion unless acted upon by an external force (Inertia).\n...",
+  "citations": [
+    {
+      "chunk_id": 101,
+      "source_id": 15,
+      "title": "Physics Unit 1 Notes",
+      "snippet": "Newton's first law of motion: A body continues in its state of rest or uniform motion..."
+    }
+  ],
+  "mode": "quiz"
+}
+```
+- **Errors:** `400` on empty query; `403` if teacher accesses unauthorized grades or classes.
 
 ## Open questions
 

@@ -221,19 +221,19 @@ def get_homework_calendar_events(
         })
 
     # Exams
-    exams = db.query(Exam).all()
+    exams = db.query(Exam).filter(Exam.class_id.in_(student_class_ids)).all() if student_class_ids else []
     for ex in exams:
-        ex_start = _to_utc(ex.start_time)
-        ex_end = _to_utc(ex.end_time)
+        ex_start = datetime.combine(ex.exam_date, ex.start_time).replace(tzinfo=timezone.utc)
+        ex_end = datetime.combine(ex.exam_date, ex.end_time).replace(tzinfo=timezone.utc)
         events.append({
             "id": f"exam_{ex.id}",
-            "title": ex.name,
+            "title": f"{ex.subject.name if ex.subject else 'Subject'} Exam ({ex.exam_type or 'Final'})",
             "type": "exam",
             "subject": ex.subject.name if ex.subject else "Exam",
             "start": ex_start.isoformat(),
             "end": ex_end.isoformat(),
             "status": "completed" if ex_end < now else "upcoming",
-            "details": f"Passing marks: {ex.passing_marks}",
+            "details": f"Total marks: {ex.total_marks or 'N/A'}",
         })
 
     return events

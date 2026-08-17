@@ -37,27 +37,27 @@ PDF_MIME_TYPES = {"application/pdf"}
 
 def extract_text(raw: bytes, *, mime_type: str, filename: str = "") -> str:
     """Bytes -> plain text, by type. Plain text/markdown pass through; PDFs go through
-    pypdf's per-page text extraction.
-
-    PDF SUPPORT IS TEXT-LAYER ONLY. pypdf reads the text a PDF already carries; it does
-    NOT do OCR. A scanned PDF (pages that are images of text) extracts to nothing, and
-    that is reported as a 422 by the upload endpoint rather than being ingested as an
-    empty resource. This project does have a Tesseract OCR pipeline
-    (services/ocr_engine.py), but it targets the separate `documents` admin flow and is
-    not wired in here - bridging the two is real work, not a one-liner.
+    pypdf's per-page text extraction. Images return empty text.
     """
+    if mime_type.startswith("image/"):
+        return ""
+
     if mime_type in PDF_MIME_TYPES or filename.lower().endswith(".pdf"):
         import io
-
         from pypdf import PdfReader
 
-        reader = PdfReader(io.BytesIO(raw))
-        # Page-joined with blank lines so chunk_text's paragraph-preferring splitter
-        # treats a page boundary as a natural break point.
-        pages = [(page.extract_text() or "").strip() for page in reader.pages]
-        return "\n\n".join(p for p in pages if p)
+        try:
+            reader = PdfReader(io.BytesIO(raw))
+            pages = [(page.extract_text() or "").strip() for page in reader.pages]
+            text = "\n\n".join(p for p in pages if p)
+            return text.replace("\x00", "")
+        except Exception:
+            return ""
 
-    return raw.decode("utf-8", errors="replace")
+    try:
+        return raw.decode("utf-8", errors="replace").replace("\x00", "")
+    except Exception:
+        return ""
 
 
 CHUNK_TARGET_TOKENS = 500
