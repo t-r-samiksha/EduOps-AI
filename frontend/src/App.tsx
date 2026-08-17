@@ -27,6 +27,7 @@ import InvigilationDutiesPage from "@/components/exams/InvigilationDutiesPage";
 import StudentSeatLookup from "@/components/exams/StudentSeatLookup";
 import SchoolManagementPage from "@/components/admin/SchoolManagementPage";
 import StudentDoubtBot from "@/components/bots/StudentDoubtBot";
+import ClassroomStreamPage from "@/components/classroom/ClassroomStreamPage";
 
 interface RouteConfig {
   path: string;
@@ -38,6 +39,8 @@ interface RouteConfig {
 // (Person B/C territory). Every other entry is a real, live-data screen.
 const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal", role: "principal", element: <PrincipalDashboard /> },
+  { path: "/principal/classroom", role: "principal", element: <ClassroomStreamPage /> },
+  { path: "/principal/classroom/:id", role: "principal", element: <ClassroomStreamPage /> },
   { path: "/principal/timetable", role: "principal", element: <TimetablePage /> },
   { path: "/principal/staffing", role: "principal", element: <StaffingPage /> },
   { path: "/principal/risk", role: "principal", element: <RiskDashboard /> },
@@ -50,6 +53,8 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/school-management", role: "principal", element: <SchoolManagementPage /> },
 
   { path: "/admin", role: "admin", element: <AdminDashboard /> },
+  { path: "/admin/classroom", role: "admin", element: <ClassroomStreamPage /> },
+  { path: "/admin/classroom/:id", role: "admin", element: <ClassroomStreamPage /> },
   { path: "/admin/timetable", role: "admin", element: <TimetablePage /> },
   { path: "/admin/attendance", role: "admin", element: <AttendanceCapture /> },
   { path: "/admin/staffing", role: "admin", element: <StaffingPage /> },
@@ -63,6 +68,8 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/school-management", role: "admin", element: <SchoolManagementPage /> },
 
   { path: "/teacher", role: "teacher", element: <TeacherDashboard /> },
+  { path: "/teacher/classroom", role: "teacher", element: <ClassroomStreamPage /> },
+  { path: "/teacher/classroom/:id", role: "teacher", element: <ClassroomStreamPage /> },
   { path: "/teacher/timetable", role: "teacher", element: <TimetablePage /> },
   { path: "/teacher/attendance", role: "teacher", element: <AttendanceCapture /> },
   { path: "/teacher/staffing", role: "teacher", element: <StaffingPage /> },
@@ -72,12 +79,16 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/exams", role: "teacher", element: <InvigilationDutiesPage /> },
 
   { path: "/student", role: "student", element: <StudentDashboard /> },
+  { path: "/student/classroom", role: "student", element: <ClassroomStreamPage /> },
+  { path: "/student/classroom/:id", role: "student", element: <ClassroomStreamPage /> },
+  { path: "/student/doubt-bot", role: "student", element: <StudentDoubtBot /> },
   { path: "/student/timetable", role: "student", element: <TimetablePage /> },
   { path: "/student/fees", role: "student", element: <FeesPage /> },
   { path: "/student/exams", role: "student", element: <StudentSeatLookup /> },
-  { path: "/student/doubt-bot", role: "student", element: <StudentDoubtBot /> },
 
   { path: "/parent", role: "parent", element: <ParentDashboard /> },
+  { path: "/parent/classroom", role: "parent", element: <ClassroomStreamPage /> },
+  { path: "/parent/classroom/:id", role: "parent", element: <ClassroomStreamPage /> },
   { path: "/parent/timetable", role: "parent", element: <TimetablePage /> },
   { path: "/parent/risk", role: "parent", element: <RiskDashboard /> },
   { path: "/parent/fees", role: "parent", element: <FeesPage /> },

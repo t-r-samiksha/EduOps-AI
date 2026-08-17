@@ -129,6 +129,12 @@ export default function TeacherDashboard() {
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <QuickLinkCard
+          to="/teacher/classroom"
+          icon={BookOpenCheck}
+          label="Classroom Stream"
+          stat="Post notes, alerts & learning materials"
+        />
+        <QuickLinkCard
           to="/teacher/timetable"
           icon={CalendarClock}
           label="Timetable"

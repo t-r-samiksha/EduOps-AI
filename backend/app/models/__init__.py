@@ -3,6 +3,7 @@ from app.models.alerts import AlertDismissal
 from app.models.attendance import AttendanceReconciliation, AttendanceRecord, FaceEmbedding
 from app.models.audit import AuditLogEntry
 from app.models.class_ import SchoolClass
+from app.models.classroom import Classroom, PostAttachment, StreamPost
 from app.models.document import Document, ExtractedEntity, OcrResult
 from app.models.enrollment import Enrollment
 from app.models.exams import Exam, ExamRoomAssignment, InvigilationAssignment, SeatingAssignment
@@ -37,6 +38,7 @@ __all__ = [
     "AuditLogEntry",
     "ChatbotLog",
     "ClassSubjectRequirement",
+    "Classroom",
     "Document",
     "Enrollment",
     "Exam",
@@ -53,6 +55,7 @@ __all__ = [
     "Notification",
     "OcrResult",
     "ParentStudent",
+    "PostAttachment",
     "RemarkStub",
     "Resource",
     "RiskFlag",
@@ -62,6 +65,7 @@ __all__ = [
     "SchoolClass",
     "SeatingAssignment",
     "StaffingForecast",
+    "StreamPost",
     "Subject",
     "SubjectRoomRequirement",
     "Substitution",

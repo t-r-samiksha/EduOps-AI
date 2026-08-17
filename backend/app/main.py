@@ -17,6 +17,7 @@ from app.routers import (
     audit,
     auth,
     bots,
+    classroom,
     documents,
     exams,
     fees,
@@ -58,6 +59,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(classroom.router)
 app.include_router(timetable.router)
 app.include_router(attendance.router)
 app.include_router(staffing.router)

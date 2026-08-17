@@ -778,3 +778,76 @@ export interface GradeSubjectDoubts {
 export interface MyTopDoubtsResponse {
   items: GradeSubjectDoubts[];
 }
+
+// --- Classroom Stream (Person B) --------------------------------------------
+
+export type PostType = "note" | "announcement" | "material";
+
+export interface PostAttachment {
+  id: number;
+  post_id: number;
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  file_size: number;
+  created_at: string;
+}
+
+export interface PostAuthor {
+  id: number;
+  full_name: string | null;
+  email: string | null;
+  role?: string | null;
+}
+
+export interface StreamPost {
+  id: number;
+  classroom_id: number;
+  author_id: number;
+  author: PostAuthor | null;
+  post_type: PostType;
+  title: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+  attachments: PostAttachment[];
+}
+
+export interface Classroom {
+  id: number;
+  school_id: number;
+  class_id: number;
+  class_name: string;
+  subject_id: number;
+  subject_name: string | null;
+  teacher_id: number;
+  teacher_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StreamResponse {
+  classroom: Classroom;
+  items: StreamPost[];
+}
+
+export interface CreateAttachmentInput {
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  file_size: number;
+}
+
+export interface CreatePostRequest {
+  post_type: PostType;
+  title: string;
+  content: string;
+  attachments?: CreateAttachmentInput[];
+}
+
+export interface UploadAttachmentResponse {
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  file_size: number;
+}

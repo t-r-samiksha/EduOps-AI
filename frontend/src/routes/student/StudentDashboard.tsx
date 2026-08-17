@@ -1,6 +1,7 @@
-import { CalendarClock, ScanFace } from "lucide-react";
+import { CalendarClock, ScanFace, BookOpen } from "lucide-react";
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
+import QuickLinkCard from "@/components/shared/QuickLinkCard";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useAttendanceSummary } from "@/api/hooks/useAttendance";
@@ -89,6 +90,21 @@ export default function StudentDashboard() {
           ))}
         </CardContent>
       </Card>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <QuickLinkCard
+          to="/student/classroom"
+          icon={BookOpen}
+          label="Classroom Stream"
+          stat="View notes, materials & announcements"
+        />
+        <QuickLinkCard
+          to="/student/timetable"
+          icon={CalendarClock}
+          label="Timetable"
+          stat="Full weekly timetable & room locations"
+        />
+      </div>
     </div>
   );
 }
