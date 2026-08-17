@@ -104,3 +104,33 @@ export function useDeleteAssignment() {
     },
   });
 }
+
+export function useNudgeStudent(assignmentId?: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (studentId: number) =>
+      apiPost<{ status: string; student_id: number; assignment_id: number }>(
+        `/assignments/${assignmentId}/nudge/${studentId}`,
+        {}
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["assignment-submissions", assignmentId] });
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    },
+  });
+}
+
+export function useNudgeAllMissing(assignmentId?: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiPost<{ status: string; nudged_count: number }>(
+        `/assignments/${assignmentId}/nudge-missing`,
+        {}
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["assignment-submissions", assignmentId] });
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    },
+  });
+}

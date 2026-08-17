@@ -30,6 +30,7 @@ import StudentDoubtBot from "@/components/bots/StudentDoubtBot";
 import ClassroomStreamPage from "@/components/classroom/ClassroomStreamPage";
 import ResourcesPage from "@/components/resources/ResourcesPage";
 import AssignmentsPage from "@/components/assignments/AssignmentsPage";
+import SubmissionTrackerPage from "@/components/assignments/SubmissionTrackerPage";
 
 interface RouteConfig {
   path: string;
@@ -47,6 +48,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/resources/:classId", role: "principal", element: <ResourcesPage /> },
   { path: "/principal/assignments", role: "principal", element: <AssignmentsPage /> },
   { path: "/principal/assignments/:classId", role: "principal", element: <AssignmentsPage /> },
+  { path: "/principal/assignments/:id/submissions", role: "principal", element: <SubmissionTrackerPage /> },
   { path: "/principal/timetable", role: "principal", element: <TimetablePage /> },
   { path: "/principal/staffing", role: "principal", element: <StaffingPage /> },
   { path: "/principal/risk", role: "principal", element: <RiskDashboard /> },
@@ -65,6 +67,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/resources/:classId", role: "admin", element: <ResourcesPage /> },
   { path: "/admin/assignments", role: "admin", element: <AssignmentsPage /> },
   { path: "/admin/assignments/:classId", role: "admin", element: <AssignmentsPage /> },
+  { path: "/admin/assignments/:id/submissions", role: "admin", element: <SubmissionTrackerPage /> },
   { path: "/admin/timetable", role: "admin", element: <TimetablePage /> },
   { path: "/admin/attendance", role: "admin", element: <AttendanceCapture /> },
   { path: "/admin/staffing", role: "admin", element: <StaffingPage /> },
@@ -84,6 +87,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/resources/:classId", role: "teacher", element: <ResourcesPage /> },
   { path: "/teacher/assignments", role: "teacher", element: <AssignmentsPage /> },
   { path: "/teacher/assignments/:classId", role: "teacher", element: <AssignmentsPage /> },
+  { path: "/teacher/assignments/:id/submissions", role: "teacher", element: <SubmissionTrackerPage /> },
   { path: "/teacher/timetable", role: "teacher", element: <TimetablePage /> },
   { path: "/teacher/attendance", role: "teacher", element: <AttendanceCapture /> },
   { path: "/teacher/staffing", role: "teacher", element: <StaffingPage /> },

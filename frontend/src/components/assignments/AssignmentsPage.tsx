@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, Link } from "react-router-dom";
 import {
   FileCheck,
   Search,
@@ -584,17 +584,26 @@ export default function AssignmentsPage() {
                       </a>
                     )}
 
-                    {/* Teacher: View Submissions Queue */}
+                    {/* Teacher: View Submissions Tracker */}
                     {isTeacherOrAdmin && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setActiveQueueAssignment(a)}
-                        className="flex-1 text-xs gap-1.5"
-                      >
-                        <UserCheck className="h-3.5 w-3.5" />
-                        Submissions & Grading
-                      </Button>
+                      <div className="flex items-center gap-1.5 flex-1">
+                        <Link
+                          to={`/${role}/assignments/${a.id}/submissions`}
+                          className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-border bg-surface px-2.5 py-1.5 text-xs font-medium text-ink hover:bg-elevated/60 hover:border-border-strong transition-colors"
+                        >
+                          <UserCheck className="h-3.5 w-3.5 text-accent" />
+                          <span>Track ({a.stats?.submitted_count ?? 0}/{a.stats?.enrolled_count ?? 0})</span>
+                        </Link>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setActiveQueueAssignment(a)}
+                          className="text-xs h-8 px-2 text-ink-muted hover:text-ink"
+                          title="Quick Grading Drawer"
+                        >
+                          <Award className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
                     )}
 
                     {/* Student: Submit Button */}

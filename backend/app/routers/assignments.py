@@ -42,6 +42,7 @@ MAX_ASSIGNMENT_FILE_BYTES = 25 * 1024 * 1024  # 25 MB
 
 class SubmissionOut(BaseModel):
     id: int
+    submission_id: int | None = None
     assignment_id: int
     student_id: int
     student_name: str | None = None
@@ -167,6 +168,7 @@ def _format_submission(sub: AssignmentSubmission, db: Session) -> SubmissionOut:
     student = db.query(User).filter(User.id == sub.student_id).one_or_none()
     return SubmissionOut(
         id=sub.id,
+        submission_id=sub.id,
         assignment_id=sub.assignment_id,
         student_id=sub.student_id,
         student_name=student.full_name if student else None,
@@ -627,3 +629,116 @@ def delete_assignment(
 
     db.delete(assignment)
     db.commit()
+
+
+@router.post("/assignments/{assignment_id}/nudge/{student_id}")
+def nudge_student(
+    assignment_id: int,
+    student_id: int,
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """Teacher sends a submission reminder nudge to a student."""
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).one_or_none()
+    if not assignment:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Assignment not found")
+
+    if user.role == "teacher":
+        allowed = _classes_taught_by(db, user.id)
+        if assignment.class_id not in allowed and assignment.teacher_id != user.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You are not authorized to nudge students for this class")
+
+    # Verify student is enrolled
+    is_enrolled = (
+        db.query(Enrollment)
+        .filter(Enrollment.student_id == student_id, Enrollment.class_id == assignment.class_id)
+        .first()
+    )
+    if not is_enrolled:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Student is not enrolled in this class section")
+
+    sender_name = user.email.split("@")[0]
+    teacher_record = db.query(User).filter(User.id == user.id).one_or_none()
+    if teacher_record and teacher_record.full_name:
+        sender_name = teacher_record.full_name
+
+    # Dispatch notification to student
+    dispatch_notification(
+        db,
+        user_id=student_id,
+        source_type="assignment_nudge",
+        title=f"Submission Reminder: {assignment.title}",
+        body=f"Teacher {sender_name} has requested your submission for '{assignment.title}'. Due: {assignment.deadline.strftime('%b %d, %H:%M UTC')}.",
+        priority="important",
+        source_id=assignment.id,
+    )
+
+    # Also nudge parents if linked
+    parent_ids = [
+        row.parent_id
+        for row in db.query(ParentStudent.parent_id).filter(ParentStudent.student_id == student_id).all()
+    ]
+    if parent_ids:
+        dispatch_bulk(
+            db,
+            user_ids=parent_ids,
+            source_type="assignment_nudge",
+            title=f"Homework Reminder: {assignment.title}",
+            body=f"Teacher {sender_name} reminded {student_id} to submit '{assignment.title}'.",
+            priority="important",
+            source_id=assignment.id,
+        )
+
+    db.commit()
+    return {"status": "nudged", "student_id": student_id, "assignment_id": assignment_id}
+
+
+@router.post("/assignments/{assignment_id}/nudge-missing")
+def nudge_all_missing(
+    assignment_id: int,
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """Teacher sends bulk submission reminder to all students who have not submitted."""
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).one_or_none()
+    if not assignment:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Assignment not found")
+
+    if user.role == "teacher":
+        allowed = _classes_taught_by(db, user.id)
+        if assignment.class_id not in allowed and assignment.teacher_id != user.id:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You are not authorized to nudge students for this class")
+
+    enrolled_ids = get_enrolled_student_ids(db, assignment.class_id)
+    submitted_ids = {
+        s.student_id
+        for s in db.query(AssignmentSubmission.student_id)
+        .filter(
+            AssignmentSubmission.assignment_id == assignment_id,
+            AssignmentSubmission.status.in_(("submitted", "late", "graded")),
+        )
+        .all()
+    }
+
+    missing_ids = [sid for sid in enrolled_ids if sid not in submitted_ids]
+    if not missing_ids:
+        return {"status": "no_missing_students", "nudged_count": 0}
+
+    sender_name = user.email.split("@")[0]
+    teacher_record = db.query(User).filter(User.id == user.id).one_or_none()
+    if teacher_record and teacher_record.full_name:
+        sender_name = teacher_record.full_name
+
+    dispatch_bulk(
+        db,
+        user_ids=missing_ids,
+        source_type="assignment_nudge",
+        title=f"Submission Reminder: {assignment.title}",
+        body=f"Teacher {sender_name} sent a reminder to submit '{assignment.title}'.",
+        priority="important",
+        source_id=assignment.id,
+    )
+
+    db.commit()
+    return {"status": "bulk_nudged", "nudged_count": len(missing_ids)}
+
