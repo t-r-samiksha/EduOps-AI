@@ -55,20 +55,28 @@ export default function GradebookPage() {
   const [entryScore, setEntryScore] = useState<string>("");
   const [entryMaxScore, setEntryMaxScore] = useState<string>("100");
 
+  const [entryError, setEntryError] = useState<string | null>(null);
+
   const handleSaveEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!entrySubjectId || !entryClassId) return;
-    await upsertMutation.mutateAsync({
-      student_id: Number(entryStudentId) || 0,
-      subject_id: Number(entrySubjectId),
-      class_id: Number(entryClassId),
-      term: selectedTerm,
-      assessment_type: entryAssessmentType,
-      score: parseFloat(entryScore) || 0,
-      max_score: parseFloat(entryMaxScore) || 100,
-    });
-    setIsEntryOpen(false);
-    setEntryScore("");
+    setEntryError(null);
+    try {
+      await upsertMutation.mutateAsync({
+        student_id: Number(entryStudentId) || 0,
+        subject_id: Number(entrySubjectId),
+        class_id: Number(entryClassId),
+        term: selectedTerm,
+        assessment_type: entryAssessmentType,
+        score: parseFloat(entryScore) || 0,
+        max_score: parseFloat(entryMaxScore) || 100,
+      });
+      setIsEntryOpen(false);
+      setEntryScore("");
+    } catch (err: any) {
+      console.error("Failed to save grade:", err);
+      setEntryError(err?.message || "Failed to save grade. Please check your inputs.");
+    }
   };
 
   return (
@@ -426,6 +434,12 @@ export default function GradebookPage() {
                 />
               </div>
             </div>
+
+            {entryError && (
+              <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-400">
+                {entryError}
+              </div>
+            )}
 
             <div className="flex justify-end gap-2 pt-3 border-t">
               <Button type="button" variant="ghost" onClick={() => setIsEntryOpen(false)}>

@@ -17,33 +17,46 @@ import {
   ReportCard as ReportCardType,
 } from "@/api/hooks/useReportCards";
 import { useAuthStore } from "@/store/authStore";
+import { useReferenceLookup } from "@/api/hooks/useTimetable";
+import { useCurrentUser } from "@/api/hooks/useAuth";
 
 export default function ReportCardsPage() {
   const { user, role } = useAuthStore();
   const isTeacherOrAdmin = role === "teacher" || role === "admin" || role === "principal";
 
-  const targetStudentId = isTeacherOrAdmin ? 2 : (user?.id ? Number(user.id) || 2 : 2);
-  const { data: reportCards = [], isLoading } = useStudentReportCards(targetStudentId);
+  const currentUser = useCurrentUser().data;
+  const lookup = useReferenceLookup(currentUser?.school_id);
+  const classes = lookup.data?.classes ?? [];
+
+  const [selectedClassId, setSelectedClassId] = useState<number | "">("");
+  
+  // Note: the individual report card view still needs a student ID. If the user is a teacher,
+  // we could let them select a student, but since we are focusing on bulk generation for teachers,
+  // we default to targeting the logged-in student if they are not a teacher.
+  const targetStudentId = isTeacherOrAdmin ? undefined : (user?.id ? Number(user.id) : undefined);
+  const { data: reportCards = [], isLoading } = useStudentReportCards(targetStudentId || 0);
 
   const generateMutation = useGenerateReportCard();
   const bulkGenerateMutation = useBulkGenerateReports();
 
   const [previewCard, setPreviewCard] = useState<ReportCardType | null>(null);
-
-  const handleGenerate = async () => {
-    if (!targetStudentId) return;
-    const res = await generateMutation.mutateAsync({
-      studentId: targetStudentId,
-      term: "Term 1",
-    });
-    setPreviewCard(res);
-  };
+  const [generateError, setGenerateError] = useState<string | null>(null);
 
   const handleBulkGenerate = async () => {
-    await bulkGenerateMutation.mutateAsync({
-      classId: 1,
-      term: "Term 1",
-    });
+    if (!selectedClassId) {
+      setGenerateError("Please select a class section first.");
+      return;
+    }
+    setGenerateError(null);
+    try {
+      await bulkGenerateMutation.mutateAsync({
+        classId: Number(selectedClassId),
+        term: "Term 1",
+      });
+    } catch (err: any) {
+      console.error("Failed to generate report cards:", err);
+      setGenerateError(err?.message || "Failed to generate report cards.");
+    }
   };
 
   return (
@@ -64,26 +77,37 @@ export default function ReportCardsPage() {
 
         {isTeacherOrAdmin && (
           <div className="flex items-center gap-2">
+            <select
+              value={selectedClassId}
+              onChange={(e) => {
+                setSelectedClassId(e.target.value ? Number(e.target.value) : "");
+                setGenerateError(null);
+              }}
+              className="rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-primary"
+            >
+              <option value="">Select class…</option>
+              {classes.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
             <Button
               variant="outline"
               onClick={handleBulkGenerate}
-              disabled={bulkGenerateMutation.isPending}
+              disabled={bulkGenerateMutation.isPending || !selectedClassId}
               className="flex items-center gap-1.5 text-xs font-medium"
             >
               <Layers className="h-4 w-4" />
-              {bulkGenerateMutation.isPending ? "Generating Class..." : "Bulk Generate (Class)"}
-            </Button>
-            <Button
-              onClick={handleGenerate}
-              disabled={generateMutation.isPending}
-              className="flex items-center gap-1.5 shadow-sm text-xs font-medium"
-            >
-              <Sparkles className="h-4 w-4" />
-              {generateMutation.isPending ? "Building Report..." : "Generate Report Card"}
+              {bulkGenerateMutation.isPending ? "Generating..." : "Bulk Generate"}
             </Button>
           </div>
         )}
       </div>
+
+      {generateError && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-400">
+          {generateError}
+        </div>
+      )}
 
       {/* Cards List */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
