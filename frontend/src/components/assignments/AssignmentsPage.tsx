@@ -164,38 +164,50 @@ export default function AssignmentsPage() {
 
   const isTeacherOrAdmin = role === "teacher" || role === "admin" || role === "principal";
 
+  const [createError, setCreateError] = useState<string | null>(null);
+
   const handleCreateAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !classId || !deadline) return;
 
-    let uploadedUrl: string | undefined = undefined;
-    let uploadedName: string | undefined = undefined;
+    setCreateError(null);
+    try {
+      let uploadedUrl: string | undefined = undefined;
+      let uploadedName: string | undefined = undefined;
 
-    if (attachmentFile) {
-      const up = await uploadMutation.mutateAsync(attachmentFile);
-      uploadedUrl = up.file_url;
-      uploadedName = up.file_name;
+      if (attachmentFile) {
+        const up = await uploadMutation.mutateAsync(attachmentFile);
+        uploadedUrl = up.file_url;
+        uploadedName = up.file_name;
+      }
+
+      // If the user picked only a date (no time component), append end-of-day
+      const deadlineStr = deadline.includes("T") ? deadline : `${deadline}T23:59:00`;
+
+      await createMutation.mutateAsync({
+        title: title.trim(),
+        description: desc.trim() || undefined,
+        class_id: Number(classId),
+        subject_id: subjectId ? Number(subjectId) : undefined,
+        deadline: new Date(deadlineStr).toISOString(),
+        max_marks: Number(maxMarks) || 100,
+        attachment_url: uploadedUrl,
+        attachment_name: uploadedName,
+      });
+
+      setTitle("");
+      setDesc("");
+      setClassId("");
+      setSubjectId("");
+      setDeadline("");
+      setMaxMarks("100");
+      setAttachmentFile(null);
+      setCreateError(null);
+      setCreateOpen(false);
+    } catch (err: any) {
+      console.error("Failed to create assignment:", err);
+      setCreateError(err?.message || "Failed to create assignment. Please try again.");
     }
-
-    await createMutation.mutateAsync({
-      title: title.trim(),
-      description: desc.trim() || undefined,
-      class_id: Number(classId),
-      subject_id: subjectId ? Number(subjectId) : undefined,
-      deadline: new Date(deadline).toISOString(),
-      max_marks: Number(maxMarks) || 100,
-      attachment_url: uploadedUrl,
-      attachment_name: uploadedName,
-    });
-
-    setTitle("");
-    setDesc("");
-    setClassId("");
-    setSubjectId("");
-    setDeadline("");
-    setMaxMarks("100");
-    setAttachmentFile(null);
-    setCreateOpen(false);
   };
 
   const handleStudentSubmit = async (e: React.FormEvent) => {
@@ -316,7 +328,7 @@ export default function AssignmentsPage() {
                       Submission Deadline *
                     </label>
                     <Input
-                      type="datetime-local"
+                      type="date"
                       value={deadline}
                       onChange={(e) => setDeadline(e.target.value)}
                       required
@@ -361,12 +373,21 @@ export default function AssignmentsPage() {
                   />
                 </div>
 
+                {createError && (
+                  <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-400">
+                    {createError}
+                  </div>
+                )}
+
                 <div className="flex justify-end gap-2 pt-2 border-t border-border">
-                  <Button type="button" variant="ghost" onClick={() => setCreateOpen(false)}>
+                  <Button type="button" variant="ghost" onClick={() => { setCreateOpen(false); setCreateError(null); }}>
                     Cancel
                   </Button>
-                  <Button type="submit" disabled={createMutation.isPending || !title.trim() || !classId || !deadline}>
-                    {createMutation.isPending ? "Creating..." : "Publish Assignment"}
+                  <Button
+                    type="submit"
+                    disabled={createMutation.isPending || uploadMutation.isPending || !title.trim() || !classId || !deadline}
+                  >
+                    {createMutation.isPending || uploadMutation.isPending ? "Creating..." : "Publish Assignment"}
                   </Button>
                 </div>
               </form>

@@ -212,9 +212,13 @@ def create_quiz(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "User account not linked to school")
 
     if user.role == "teacher":
-        allowed = _classes_taught_by(db, user.id)
-        if body.class_id not in allowed:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized to create quiz for this class")
+        school_class = (
+            db.query(SchoolClass)
+            .filter(SchoolClass.id == body.class_id, SchoolClass.school_id == user.school_id)
+            .first()
+        )
+        if not school_class:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Class section not found in this school")
 
     quiz = Quiz(
         school_id=user.school_id,

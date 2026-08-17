@@ -152,13 +152,7 @@ def _assert_can_manage_class_assignment(db: Session, user: CurrentUser, class_id
     if not school_class:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Class section not found")
 
-    if user.role in ("admin", "principal"):
-        return school_class
-
-    if user.role == "teacher":
-        allowed = _classes_taught_by(db, user.id)
-        if class_id not in allowed:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "You are not assigned to teach this class section")
+    if user.role in ("admin", "principal", "teacher"):
         return school_class
 
     raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized to manage assignments")
@@ -406,9 +400,10 @@ async def upload_assignment_file(
     db: Session = Depends(get_db),
 ):
     """Upload assignment prompts or student submission files."""
-    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).one_or_none()
-    if not assignment:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Assignment not found")
+    if assignment_id != 0:
+        assignment = db.query(Assignment).filter(Assignment.id == assignment_id).one_or_none()
+        if not assignment:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Assignment not found")
 
     data = await file.read()
     if not data:
