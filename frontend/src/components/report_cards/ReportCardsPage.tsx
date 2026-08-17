@@ -2,7 +2,6 @@ import { useState } from "react";
 import {
   FileText,
   Printer,
-  Sparkles,
   Layers,
   GraduationCap,
 } from "lucide-react";
@@ -12,7 +11,6 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   useStudentReportCards,
-  useGenerateReportCard,
   useBulkGenerateReports,
   ReportCard as ReportCardType,
 } from "@/api/hooks/useReportCards";
@@ -36,7 +34,6 @@ export default function ReportCardsPage() {
   const targetStudentId = isTeacherOrAdmin ? undefined : (user?.id ? Number(user.id) : undefined);
   const { data: reportCards = [], isLoading } = useStudentReportCards(targetStudentId || 0);
 
-  const generateMutation = useGenerateReportCard();
   const bulkGenerateMutation = useBulkGenerateReports();
 
   const [previewCard, setPreviewCard] = useState<ReportCardType | null>(null);
