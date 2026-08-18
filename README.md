@@ -2,6 +2,8 @@
 
 **An AI-first, unified school operations _and_ learning platform.**
 
+Video link: https://drive.google.com/file/d/1ILSkCM_AZziuY_I4qJKxsKnmOZflj101/view?usp=drivesdk
+
 EduOps AI collapses the fragmented mix of manual data entry, physical document storage,
 siloed scheduling and disconnected communication tools that schools rely on today into a
 single, role-aware platform — where documents digitize themselves, timetables resolve
