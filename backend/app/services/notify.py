@@ -41,7 +41,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from app.models.notification import Notification
+from app.models.notification import PRIORITIES, SOURCE_TYPES, Notification
 
 
 def dispatch_notification(
@@ -56,14 +56,33 @@ def dispatch_notification(
 ) -> Notification:
     """Queue one notification for one user, inside the caller's transaction.
 
-    `source_type` should be one of models/notification.py's SOURCE_TYPES and
-    `priority` one of its PRIORITIES; neither is validated here for the same
-    reason neither is a DB enum - new features keep adding kinds, and a
-    dispatcher that raised on an unknown string would turn a cosmetic mistake
-    into a failed state change at the call site.
+    VALIDATES `source_type` AND `priority`, and raises ValueError on an unknown value.
+
+    This used to be deliberately lenient, on the reasoning that a dispatcher which
+    raised would turn a cosmetic mistake into a failed state change. That reasoning did
+    not survive contact with the codebase: NINE of twenty source types had been
+    dispatched without ever being declared, across BOTH developers' features
+    (`assignment_*` x5, `quiz_published`, `doubt_reply`, `doubt_answer_verified`,
+    `top_doubts`). Every one landed in the bell with no icon and no click target,
+    because the frontend maps on exactly this vocabulary.
+
+    A typo'd or undeclared source is not cosmetic - it is a notification the user
+    receives and cannot act on. Failing loudly at the call site, in development, is
+    cheaper than an unstyled dead end in production that nobody notices for months.
+    Every existing call site was audited against this tuple before the check was turned
+    on, so enabling it broke nothing.
 
     Returns the pending Notification (no id until the caller flushes/commits).
     """
+    if source_type not in SOURCE_TYPES:
+        raise ValueError(
+            f"unknown notification source_type {source_type!r}. Add it to "
+            f"models/notification.py's SOURCE_TYPES, and give it an icon and a route in "
+            f"frontend/src/components/notifications/NotificationBell.tsx - otherwise it "
+            f"arrives in the bell unstyled and unclickable. Known: {', '.join(SOURCE_TYPES)}"
+        )
+    if priority not in PRIORITIES:
+        raise ValueError(f"unknown notification priority {priority!r}. Known: {', '.join(PRIORITIES)}")
     notification = Notification(
         user_id=user_id,
         source_type=source_type,

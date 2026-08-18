@@ -68,6 +68,11 @@ def get_quiz_results_breakdown(db: Session, quiz: Quiz) -> dict[str, Any]:
         .count()
     )
 
+    # M-4: an attempt submitted past the duration is accepted and graded, but recorded
+    # as "time_expired". Surface it here or the flag exists only in the database and the
+    # teacher never learns the quiz ran over for anyone.
+    over_time = [a for a in attempts if a.status == "time_expired"]
+
     scores = [a.score for a in attempts]
     avg_score = round(sum(scores) / len(scores), 1) if scores else None
     highest_score = max(scores) if scores else None
@@ -112,6 +117,7 @@ def get_quiz_results_breakdown(db: Session, quiz: Quiz) -> dict[str, Any]:
         "title": quiz.title,
         "enrolled_count": enrolled_count,
         "attempts_count": len(attempts),
+        "time_expired_count": len(over_time),
         "average_score": avg_score,
         "highest_score": highest_score,
         "lowest_score": lowest_score,

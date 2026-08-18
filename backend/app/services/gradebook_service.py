@@ -195,3 +195,79 @@ def get_student_gradebook_summary(
         "subjects": subjects_summary,
         "total_assessments": len(entries),
     }
+
+
+DEFAULT_TERM = "Term 1"
+"""M-6: quiz and assignment auto-grading filed every entry under a hardcoded "Term 1".
+
+Still a default, but now ONE default with a name, because there is nothing to derive a
+term from: no table maps dates to terms, and inventing term boundaries was explicitly
+rejected (the same decision that put report-card attendance on the academic year rather
+than a fabricated term range). Callers that know their term should pass it; when a term
+calendar exists, this constant is the single place that changes."""
+
+
+def upsert_assessment_grade(
+    db: Session,
+    *,
+    school_id: int,
+    student_id: int,
+    subject_id: int | None,
+    class_id: int,
+    assessment_type: str,
+    assessment_id: int,
+    score: float,
+    max_score: float,
+    term: str = DEFAULT_TERM,
+    weight: float = 1.0,
+) -> GradebookEntry | None:
+    """Record an auto-graded assessment in the gradebook, idempotently.
+
+    ONE upsert shared by quizzes and assignments. Quiz attempts wrote gradebook entries
+    from the start; grading an assignment did not, so a teacher had to enter the same
+    score twice and assignment grades never reached analytics or report cards (seam S-F).
+    The asymmetry was the bug, so both now call this.
+
+    Natural key is (student_id, subject_id, term, assessment_type, assessment_id) - the
+    same unique constraint the model declares - so re-grading updates in place instead
+    of stacking duplicate entries that would each be averaged.
+
+    Returns None, and writes NOTHING, when `subject_id` is None. GradebookEntry.subject_id
+    is NOT NULL, and the previous code passed `subject_id or 1` - filing the grade against
+    subject id 1, which belongs to whichever school happens to own that row. Skipping is
+    the honest outcome: a subjectless assessment has no place in a per-subject gradebook,
+    and a missing row is visibly missing where a misfiled one is not.
+    """
+    if subject_id is None:
+        return None
+
+    entry = (
+        db.query(GradebookEntry)
+        .filter(
+            GradebookEntry.student_id == student_id,
+            GradebookEntry.subject_id == subject_id,
+            GradebookEntry.term == term,
+            GradebookEntry.assessment_type == assessment_type,
+            GradebookEntry.assessment_id == assessment_id,
+        )
+        .one_or_none()
+    )
+    if entry is not None:
+        entry.score = score
+        entry.max_score = max_score
+        return entry
+
+    entry = GradebookEntry(
+        school_id=school_id,
+        student_id=student_id,
+        subject_id=subject_id,
+        class_id=class_id,
+        term=term,
+        assessment_type=assessment_type,
+        assessment_id=assessment_id,
+        score=score,
+        max_score=max_score,
+        weight=weight,
+    )
+    db.add(entry)
+    return entry

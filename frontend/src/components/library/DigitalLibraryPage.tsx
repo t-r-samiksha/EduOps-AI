@@ -33,7 +33,7 @@ export default function DigitalLibraryPage() {
   const selectedCategory = "all";
   const [selectedType, setSelectedType] = useState<string>("all");
 
-  const { data: catalog = [], isLoading } = useLibraryCatalog(
+  const { data: catalog = [], isLoading, isError } = useLibraryCatalog(
     selectedCategory,
     selectedType,
     searchQuery
@@ -192,7 +192,14 @@ export default function DigitalLibraryPage() {
 
       {/* Catalog Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5">
-        {isLoading ? (
+        {isError ? (
+          <div className="col-span-full py-16 text-center border rounded-xl bg-card" role="alert">
+            <p className="text-sm font-medium text-[hsl(var(--urgent))]">Could not load the library catalogue.</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Reload the page, or try again in a moment.
+            </p>
+          </div>
+        ) : isLoading ? (
           <div className="col-span-full py-16 text-center text-muted-foreground">
             Loading library catalog...
           </div>
@@ -281,12 +288,12 @@ export default function DigitalLibraryPage() {
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b bg-muted/40 font-semibold text-muted-foreground">
-                    <th className="p-3">Book Title</th>
-                    <th className="p-3">Borrowed By</th>
-                    <th className="p-3">Issued Date</th>
-                    <th className="p-3">Due Date</th>
-                    <th className="p-3">Status</th>
-                    <th className="p-3 text-right">Action</th>
+                    <th scope="col" className="p-3">Book Title</th>
+                    <th scope="col" className="p-3">Borrowed By</th>
+                    <th scope="col" className="p-3">Issued Date</th>
+                    <th scope="col" className="p-3">Due Date</th>
+                    <th scope="col" className="p-3">Status</th>
+                    <th scope="col" className="p-3 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">

@@ -154,9 +154,17 @@ export default function ReportCardsPage() {
                     </p>
                   </div>
                   <div className="p-2 rounded-lg bg-muted/30">
-                    <span className="text-muted-foreground">Attendance</span>
+                    {/* "Attendance - 2026-27": the academic-year figure, labelled so it
+                        reads as a different measure from the portal's 30-day one rather
+                        than a contradiction. Never falls back to "100%" - no attendance
+                        data is not perfect attendance. */}
+                    <span className="text-muted-foreground">
+                      {card.source_data_snapshot?.attendance?.label ?? "Attendance"}
+                    </span>
                     <p className="font-bold text-emerald-600 mt-0.5">
-                      {card.attendance_percentage ? `${card.attendance_percentage}%` : "100%"}
+                      {card.attendance_percentage == null
+                        ? "No data"
+                        : `${card.attendance_percentage}%`}
                     </p>
                   </div>
                 </div>
@@ -237,9 +245,13 @@ export default function ReportCardsPage() {
                   </p>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">Attendance</span>
+                  <span className="text-muted-foreground">
+                    {previewCard.source_data_snapshot?.attendance?.label ?? "Attendance"}
+                  </span>
                   <p className="font-bold text-emerald-600 mt-0.5">
-                    {previewCard.attendance_percentage}% Present
+                    {previewCard.attendance_percentage == null
+                      ? "No data"
+                      : `${previewCard.attendance_percentage}% Present`}
                   </p>
                 </div>
               </div>
@@ -249,13 +261,16 @@ export default function ReportCardsPage() {
                 <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">
                   Subject Performance
                 </h4>
-                <table className="w-full text-left text-xs border-collapse">
+                {/* overflow-x-auto: this was the only wide table in the app without a scroll
+                    container, so at 390px it pushed the dialog sideways. */}
+                <div className="overflow-x-auto">
+                <table className="w-full min-w-[420px] text-left text-xs border-collapse">
                   <thead>
                     <tr className="border-b bg-muted/40 font-semibold text-muted-foreground">
-                      <th className="p-3">Subject</th>
-                      <th className="p-3 text-right">Weighted Marks</th>
-                      <th className="p-3 text-right">Grade Point (GPA)</th>
-                      <th className="p-3 text-right">Letter Grade</th>
+                      <th scope="col" className="p-3">Subject</th>
+                      <th scope="col" className="p-3 text-right">Weighted Marks</th>
+                      <th scope="col" className="p-3 text-right">Grade Point (GPA)</th>
+                      <th scope="col" className="p-3 text-right">Letter Grade</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
@@ -273,6 +288,7 @@ export default function ReportCardsPage() {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
 
               {/* Summary KPIs */}

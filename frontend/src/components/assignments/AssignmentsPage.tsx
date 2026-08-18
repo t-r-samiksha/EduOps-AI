@@ -526,8 +526,8 @@ export default function AssignmentsPage() {
                     {canDelete && (
                       <ConfirmDialog
                         trigger={
-                          <button className="text-ink-faint hover:text-urgent p-1 rounded transition-colors opacity-80 group-hover:opacity-100">
-                            <Trash2 className="h-4 w-4" />
+                          <button type="button" aria-label={`Delete assignment: ${a.title}`} className="text-ink-faint hover:text-urgent p-1 rounded transition-colors opacity-80 group-hover:opacity-100">
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
                           </button>
                         }
                         title="Delete Assignment"

@@ -20,6 +20,7 @@ import {
   useQuizDetail,
   useCreateQuiz,
   useSubmitQuizAttempt,
+  useStartQuizAttempt,
   useQuizResults,
   Question,
 } from "@/api/hooks/useQuizzes";
@@ -39,6 +40,7 @@ export default function QuizzesPage() {
   const { data: quizzes = [], isLoading } = useQuizzes();
   const createQuizMutation = useCreateQuiz();
   const submitAttemptMutation = useSubmitQuizAttempt();
+  const startAttemptMutation = useStartQuizAttempt();
 
   // Create Quiz Modal State
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -72,16 +74,37 @@ export default function QuizzesPage() {
   const [resultsQuizId, setResultsQuizId] = useState<number | null>(null);
   const { data: quizResults } = useQuizResults(resultsQuizId ?? undefined);
 
-  // Timer logic for quiz taking
+  // Timer logic for quiz taking.
+  //
+  // Anchored to the SERVER's started_at (recorded by POST /quizzes/{id}/start), not to
+  // a fresh duration_minutes on every mount. Reloading used to hand the student a whole
+  // new allowance while the server now enforces the real elapsed time, so the two would
+  // have disagreed about how long was left.
   useEffect(() => {
     if (!activeQuizId || !activeQuiz || quizFinished) return;
-    if (activeQuiz.my_attempt) {
+
+    // An attempt that is still in_progress is a RESUME, not a finished quiz.
+    const attempt = activeQuiz.my_attempt;
+    if (attempt && attempt.status !== "in_progress") {
       setQuizFinished(true);
-      setLatestAttemptResult(activeQuiz.my_attempt);
+      setLatestAttemptResult(attempt);
       return;
     }
 
-    setTimeLeft(activeQuiz.duration_minutes * 60);
+    if (!attempt) {
+      startAttemptMutation.mutate(activeQuizId);
+      return; // the refetched quiz comes back with my_attempt set; this effect re-runs
+    }
+
+    const startedAt = new Date(attempt.started_at).getTime();
+    const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+    const remaining = Math.max(0, activeQuiz.duration_minutes * 60 - elapsedSec);
+    setTimeLeft(remaining);
+    if (remaining === 0) {
+      handleAutoSubmit();
+      return;
+    }
+
     const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -94,7 +117,7 @@ export default function QuizzesPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [activeQuizId, activeQuiz]);
+  }, [activeQuizId, activeQuiz, quizFinished]);
 
   const handleAddQuestion = () => {
     setNewQuestions((prev) => [
@@ -316,6 +339,11 @@ export default function QuizzesPage() {
                     <p className="text-2xl font-bold text-emerald-600 mt-1">
                       {latestAttemptResult?.percentage}%
                     </p>
+                    {latestAttemptResult?.status === "time_expired" && (
+                      <p className="mt-1 text-xs font-medium text-amber-600">
+                        Submitted after the time limit — your answers were still graded.
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -611,6 +639,13 @@ export default function QuizzesPage() {
                   <p className="text-lg font-bold text-foreground">
                     {quizResults.attempts_count} / {quizResults.enrolled_count}
                   </p>
+                  {/* An over-time attempt is graded, not rejected - but the teacher has
+                      to be able to see that it ran over. */}
+                  {quizResults.time_expired_count > 0 && (
+                    <p className="mt-0.5 text-[11px] font-medium text-amber-600">
+                      {quizResults.time_expired_count} ran over time
+                    </p>
+                  )}
                 </div>
                 <div className="text-center">
                   <span className="text-xs text-muted-foreground">Average Score</span>

@@ -6,22 +6,52 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 SOURCE_TYPES = (
+    # Early warning
     "early_warning",
+    # Fees
     "fee_reminder",
     "fee_payment_request",
     "fee_payment_confirmed",
     "fee_payment_rejected",
-    "report_card",
+    # Staffing
     "substitute_assigned",
-    "announcement",
-    "remark_posted",
     "leave_decision",
+    # Admissions
     "admission_decision",
+    # Announcements
+    "announcement",
+    # Academics
+    "remark_posted",
+    "report_card",
+    "assignment_created",
+    "assignment_graded",
+    "assignment_missing",
+    "assignment_nudge",
+    "assignment_reminder",
+    "quiz_published",
+    # Doubt threads and insights
+    "doubt_reply",
+    "doubt_answer_verified",
+    "top_doubts",
 )
 """Known notification sources. Kept as a plain tuple, not a DB enum or a Python
 Enum class: new features keep adding kinds, and a Postgres enum would need a
 migration for each one. Same free-text-with-a-documented-vocabulary approach as
-AuditLogEntry.action and Intervention.action_taken."""
+AuditLogEntry.action and Intervention.action_taken.
+
+THIS TUPLE IS NOW VALIDATED - services/notify.py raises on anything not listed here.
+It did not used to be, and NINE of these twenty values were being dispatched without
+ever being declared: the five `assignment_*` kinds, `quiz_published`, and - not a
+Person B problem - `doubt_reply`, `doubt_answer_verified` and `top_doubts`. Each one
+landed in the bell with no icon and no route, an unstyled dead end.
+
+Adding a value here is not optional bookkeeping. A source type that is not in this
+tuple has no icon and no click target in frontend/src/components/notifications/
+NotificationBell.tsx, so the notification arrives looking broken. Add it in three
+places together: here, ICONS, and SOURCE_ROUTE.
+
+DISTINCT from CalendarEvent.source_type ("assignment"/"quiz"/"exam"), which is a
+different vocabulary on a different table. Do not merge them."""
 
 PRIORITIES = ("normal", "important", "urgent")
 

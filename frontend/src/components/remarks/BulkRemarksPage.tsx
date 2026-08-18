@@ -112,9 +112,9 @@ export default function BulkRemarksPage() {
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b bg-muted/40 font-semibold text-muted-foreground uppercase tracking-wider">
-                    <th className="p-4 w-1/4">Student</th>
-                    <th className="p-4 w-1/2">Teacher Remark</th>
-                    <th className="p-4 w-1/4">Sentiment Tag</th>
+                    <th scope="col" className="p-4 w-1/4">Student</th>
+                    <th scope="col" className="p-4 w-1/2">Teacher Remark</th>
+                    <th scope="col" className="p-4 w-1/4">Sentiment Tag</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">

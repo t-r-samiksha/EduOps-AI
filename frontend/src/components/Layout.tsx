@@ -1,13 +1,20 @@
-import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { GraduationCap, LogOut, Menu, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { ChevronDown, GraduationCap, LogOut, Menu, X } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { signOut } from "@/api/auth";
 import { queryClient } from "@/api/queryClient";
 import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
-import { NAV_ITEMS, ROLE_LABEL, type NavBadge } from "@/lib/navConfig";
+import {
+  NAV_ITEMS,
+  ROLE_LABEL,
+  isNavGroup,
+  type NavBadge,
+  type NavGroup as NavGroupType,
+  type NavItem,
+} from "@/lib/navConfig";
 import { useFeePaymentRequests } from "@/api/hooks/useFeePaymentRequests";
 import { cn } from "@/lib/utils";
 
@@ -20,7 +27,7 @@ function Logo({ expanded = true }: { expanded?: boolean }) {
       <div
         className={cn(
           "overflow-hidden whitespace-nowrap transition-opacity duration-300",
-          expanded ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+          expanded ? "opacity-100" : "opacity-0"
         )}
       >
         <span className="font-display text-lg font-bold tracking-tight text-ink">EduOps</span>
@@ -46,7 +53,7 @@ function NavBadgeCount({ badge, expanded }: { badge: NavBadge; expanded: boolean
     <span
       className={cn(
         "ml-auto shrink-0 rounded-full bg-urgent px-1.5 py-0.5 text-[0.625rem] font-bold tabular-nums text-urgent-foreground transition-opacity duration-300",
-        expanded ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+        expanded ? "opacity-100" : "opacity-0"
       )}
       title={`${count} fee payment claim${count === 1 ? "" : "s"} awaiting confirmation`}
     >
@@ -55,37 +62,114 @@ function NavBadgeCount({ badge, expanded }: { badge: NavBadge; expanded: boolean
   );
 }
 
-function SidebarNav({ onNavigate, expanded = true }: { onNavigate?: () => void; expanded?: boolean }) {
-  const { role } = useAuthStore();
-  const items = role ? NAV_ITEMS[role] : [];
+function NavRow({
+  item, expanded, onNavigate, nested = false,
+}: { item: NavItem; expanded: boolean; onNavigate?: () => void; nested?: boolean }) {
+  return (
+    <NavLink
+      to={item.path}
+      end={item.end}
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        cn(
+          "flex items-center gap-3.5 whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-medium transition-colors",
+          nested && expanded && "pl-6",
+          isActive ? "bg-accent/10 font-semibold text-accent" : "text-ink-muted hover:bg-elevated hover:text-accent"
+        )
+      }
+    >
+      <item.icon className="h-5 w-5 shrink-0" />
+      <span
+        className={cn(
+          "overflow-hidden transition-opacity duration-300",
+          expanded ? "opacity-100" : "opacity-0"
+        )}
+      >
+        {item.label}
+      </span>
+      {item.badge && <NavBadgeCount badge={item.badge} expanded={expanded} />}
+    </NavLink>
+  );
+}
+
+/** A collapsible section. Only rendered when the sidebar is EXPANDED - see SidebarNav. */
+function NavGroupSection({
+  group, expanded, onNavigate,
+}: { group: NavGroupType; expanded: boolean; onNavigate?: () => void }) {
+  const { pathname } = useLocation();
+  const holdsActive = group.children.some((c) => pathname.startsWith(c.path));
+  // Open if you are inside it, so the active page is never hidden behind a closed
+  // section - otherwise navigating by URL leaves the menu pointing somewhere else.
+  const [open, setOpen] = useState(holdsActive);
+  useEffect(() => {
+    if (holdsActive) setOpen(true);
+  }, [holdsActive]);
 
   return (
-    <nav className="flex flex-1 flex-col gap-1 overflow-hidden">
-      {items.map((item) => (
-        <NavLink
-          key={item.path}
-          to={item.path}
-          end={item.end}
-          onClick={onNavigate}
-          className={({ isActive }) =>
-            cn(
-              "flex items-center gap-3.5 whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-medium transition-colors",
-              isActive ? "bg-accent/10 font-semibold text-accent" : "text-ink-muted hover:bg-elevated hover:text-accent"
-            )
-          }
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-label={`${group.label} section, ${open ? "expanded" : "collapsed"}`}
+        className={cn(
+          "flex w-full items-center gap-3.5 whitespace-nowrap rounded-xl px-3 py-2.5 text-sm font-medium transition-colors",
+          holdsActive ? "text-accent" : "text-ink-muted hover:bg-elevated hover:text-accent"
+        )}
+      >
+        <group.icon className="h-5 w-5 shrink-0" />
+        <span
+          className={cn(
+            "flex-1 overflow-hidden text-left transition-opacity duration-300",
+            expanded ? "opacity-100" : "opacity-0"
+          )}
         >
-          <item.icon className="h-5 w-5 shrink-0" />
-          <span
-            className={cn(
-              "overflow-hidden transition-opacity duration-300",
-              expanded ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-            )}
-          >
-            {item.label}
-          </span>
-          {item.badge && <NavBadgeCount badge={item.badge} expanded={expanded} />}
-        </NavLink>
-      ))}
+          {group.label}
+        </span>
+        <ChevronDown
+          className={cn(
+            "h-4 w-4 shrink-0 transition-transform",
+            open ? "rotate-180" : "",
+            expanded ? "opacity-100" : "opacity-0"
+          )}
+          aria-hidden="true"
+        />
+      </button>
+      {open && expanded && (
+        <div className="mt-0.5 flex flex-col gap-0.5">
+          {group.children.map((child) => (
+            <NavRow key={child.path} item={child} expanded={expanded} onNavigate={onNavigate} nested />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SidebarNav({ onNavigate, expanded = true }: { onNavigate?: () => void; expanded?: boolean }) {
+  const { role } = useAuthStore();
+  const entries = role ? NAV_ITEMS[role] : [];
+
+  // COLLAPSED RAIL SHOWS TOP-LEVEL ONLY - flat items plus one icon per group.
+  //
+  // Flattening instead put 24 unlabelled icons in a w-20 column, which overflows an
+  // 800px viewport (16 fit) and a 900px one (18 fit) and turns the rail into a
+  // scrolling strip of anonymous glyphs. Top-level is 8-9 icons for every role, which
+  // fits at both heights with room to spare. Nothing becomes unreachable: the rail
+  // expands on hover or keyboard focus, and the groups open there.
+  const rows = entries;
+
+  return (
+    // overflow-y-auto, not overflow-hidden: at 24 entries the rail CLIPPED everything
+    // below the fold, so those items were unreachable rather than merely low.
+    <nav className="flex flex-1 flex-col gap-1 overflow-y-auto overflow-x-hidden">
+      {rows.map((entry) =>
+        isNavGroup(entry) ? (
+          <NavGroupSection key={entry.label} group={entry} expanded={expanded} onNavigate={onNavigate} />
+        ) : (
+          <NavRow key={entry.path} item={entry} expanded={expanded} onNavigate={onNavigate} />
+        )
+      )}
     </nav>
   );
 }
@@ -94,6 +178,7 @@ export default function Layout() {
   const { user, role } = useAuthStore();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
 
   async function handleLogout() {
     await signOut();
@@ -115,9 +200,39 @@ export default function Layout() {
         on two separately-animated properties (sidebar width + content
         margin) staying in sync.
       */}
-      <aside className="group sticky top-0 hidden h-screen w-20 shrink-0 flex-col overflow-hidden border-r border-border bg-panel px-3 py-6 shadow-elevated transition-[width] duration-300 ease-in-out hover:w-64 md:flex">
-        <Logo expanded={false} />
-        <SidebarNav expanded={false} />
+      {/* The width change is CSS (hover:w-64), but REACT has to know too: the menu
+          renders collapsible groups only when `expanded`, and with a CSS-only hover the
+          component stayed in its collapsed branch forever - so a desktop user saw a flat
+          list on hover and the groups never appeared at all. onFocus/onBlur are included
+          so keyboard tabbing into the rail opens it the same way. */}
+      <aside
+        className={cn(
+          "group sticky top-0 hidden h-screen shrink-0 flex-col overflow-hidden border-r border-border bg-panel px-3 py-6 shadow-elevated transition-[width] duration-300 ease-in-out md:flex",
+          // ONE source of truth. This used to be CSS `hover:w-64` while the menu shape
+          // came from React state - two mechanisms tracking one thing, which desync when
+          // a pointer leaves fast or re-enters via a child: you get a wide rail rendering
+          // collapsed content, or a narrow rail with labels clipped out of view.
+          railOpen ? "w-64" : "w-20"
+        )}
+        onMouseEnter={() => setRailOpen(true)}
+        onMouseLeave={() => setRailOpen(false)}
+        onFocusCapture={() => setRailOpen(true)}
+        onBlurCapture={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setRailOpen(false);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            setRailOpen(false);
+            (e.target as HTMLElement).blur();
+          }
+        }}
+      >
+        <Logo expanded={railOpen} />
+        {/* NOT a constant. This was hardcoded `expanded={false}` while the rail widened
+            via CSS hover, so React never left its collapsed branch and the collapsible
+            groups were invisible on desktop entirely - they rendered only in the mobile
+            drawer, which is the one place nobody demos. */}
+        <SidebarNav expanded={railOpen} />
       </aside>
 
       {/* Mobile drawer — a real overlay is the correct pattern here (tap to open/close, not hover) */}

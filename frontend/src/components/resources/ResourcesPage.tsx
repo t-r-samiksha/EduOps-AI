@@ -434,7 +434,14 @@ export default function ResourcesPage() {
       </div>
 
       {/* Resources Cards Grid */}
-      {resourcesQuery.isLoading ? (
+      {resourcesQuery.isError ? (
+        <div className="py-16 text-center border rounded-2xl bg-card" role="alert">
+          <p className="text-sm font-medium text-[hsl(var(--urgent))]">Could not load resources.</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Reload the page, or try again in a moment.
+          </p>
+        </div>
+      ) : resourcesQuery.isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {[1, 2, 3, 4, 5, 6].map((i) => (
             <div key={i} className="h-44 rounded-2xl bg-elevated/40 animate-pulse" />
@@ -493,8 +500,8 @@ export default function ResourcesPage() {
                     {canDelete && (
                       <ConfirmDialog
                         trigger={
-                          <button className="text-ink-faint hover:text-urgent p-1 rounded transition-colors opacity-80 group-hover:opacity-100">
-                            <Trash2 className="h-4 w-4" />
+                          <button type="button" aria-label={`Delete resource: ${r.title}`} className="text-ink-faint hover:text-urgent p-1 rounded transition-colors opacity-80 group-hover:opacity-100">
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
                           </button>
                         }
                         title="Delete Resource"

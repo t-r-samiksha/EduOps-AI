@@ -208,7 +208,9 @@ export default function ChildSummary() {
                       </span>
                       <span className="text-sm text-ink-muted">present</span>
                     </div>
-                    <p className="mt-0.5 text-xs text-ink-faint">last {data.attendance.days} days</p>
+                    <p className="mt-0.5 text-xs text-ink-faint">
+                      {data.attendance.window_label ?? `last ${data.attendance.days} days`}
+                    </p>
 
                     <div className="mt-3 grid grid-cols-3 gap-2">
                       {[

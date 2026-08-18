@@ -29,6 +29,7 @@ from app.services.assignment_service import (
     get_enrolled_student_ids,
 )
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.gradebook_service import upsert_assessment_grade
 from app.services.notify import dispatch_bulk, dispatch_notification
 from app.services.scoping import teacher_class_ids
 
@@ -152,7 +153,18 @@ def _assert_can_manage_class_assignment(db: Session, user: CurrentUser, class_id
     if not school_class:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Class section not found")
 
-    if user.role in ("admin", "principal", "teacher"):
+    if user.role in ("admin", "principal"):
+        return school_class
+
+    if user.role == "teacher":
+        # BLOCKER B-2: this previously returned for any teacher in the school, so a
+        # teacher could create/manage assignments for a class they do not teach.
+        # `_classes_taught_by` (homeroom UNION timetable) is defined 12 lines above and
+        # was already used correctly by grade_submission - it just was not called here.
+        if class_id not in _classes_taught_by(db, user.id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "You can only manage assignments for classes you teach"
+            )
         return school_class
 
     raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized to manage assignments")
@@ -538,6 +550,24 @@ def grade_submission(
     submission.feedback = body.feedback.strip() if body.feedback else None
     submission.status = "graded"
     submission.graded_at = now
+
+    # SEAM S-F: record the grade in the gradebook, the same way a quiz attempt does.
+    # Previously grading a submission wrote only to assignment_submissions, so a teacher
+    # had to enter the same score a second time by hand and assignment grades never
+    # reached analytics, report cards or (now) risk scoring. Quizzes did this from the
+    # start; the asymmetry was the bug. Manual gradebook entry still works alongside it.
+    upsert_assessment_grade(
+        db,
+        school_id=assignment.school_id,
+        student_id=submission.student_id,
+        subject_id=assignment.subject_id,
+        class_id=assignment.class_id,
+        assessment_type="assignment",
+        assessment_id=assignment.id,
+        score=body.grade,
+        max_score=float(assignment.max_marks),
+        weight=0.30,
+    )
 
     # Person C Notification: Notify student of grade release
     dispatch_notification(

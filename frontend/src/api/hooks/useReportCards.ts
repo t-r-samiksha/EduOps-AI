@@ -33,6 +33,10 @@ export interface ReportCard {
     letter_grade?: string;
     attendance: {
       total_days: number;
+      absent_days?: number;
+      late_days?: number;
+      /** "Attendance — 2026-27". Rendered beside the number on screen and in the PDF. */
+      label?: string;
       present_days: number;
       percentage: number;
     };

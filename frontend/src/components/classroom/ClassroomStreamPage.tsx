@@ -554,8 +554,8 @@ export default function ClassroomStreamPage() {
                             {canDelete && (
                               <ConfirmDialog
                                 trigger={
-                                  <button className="text-ink-faint hover:text-urgent p-1 rounded-md transition-colors">
-                                    <Trash2 className="h-4 w-4" />
+                                  <button type="button" aria-label={`Delete post: ${post.title}`} className="text-ink-faint hover:text-urgent p-1 rounded-md transition-colors">
+                                    <Trash2 className="h-4 w-4" aria-hidden="true" />
                                   </button>
                                 }
                                 title="Delete Stream Post"

@@ -19,6 +19,7 @@ from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.fee_payments import outstanding_balance
 from app.services.notify import dispatch_bulk
 from app.services.remark_sentiment import analyze_sentiment
+from app.services.attendance_stats import lookback_snapshot
 from app.services.scoping import assert_parent_linked
 from app.services.supabase_admin import PAYMENT_PROOFS_BUCKET, upload_file
 from scripts.run_nightly_risk_scoring import ATTENDANCE_LOOKBACK_DAYS
@@ -106,6 +107,11 @@ class SummaryStudent(BaseModel):
 
 class SummaryAttendance(BaseModel):
     present_pct: float
+    window_label: str = "Last 30 days"
+    """M-2: the window travels with the number so the portal, student analytics and the
+    report card each say WHICH attendance they are showing. The report card's
+    academic-year figure is legitimately different; unlabelled, the pair reads as a
+    discrepancy one click apart."""
     present_count: int
     absent_count: int
     late_count: int
@@ -206,16 +212,13 @@ def child_summary(
     )
 
     # --- attendance, over the SAME window the risk scorer uses ---
-    since = date.today() - timedelta(days=ATTENDANCE_LOOKBACK_DAYS)
-    records = (
-        db.query(AttendanceRecord)
-        .filter(AttendanceRecord.student_id == student_id, AttendanceRecord.date >= since)
-        .all()
+    # M-2: counted here by services/attendance_stats.py, the single implementation every
+    # surface shares. Three surfaces used to compute this independently and produced
+    # three different numbers for one child.
+    att = lookback_snapshot(db, student_id, ATTENDANCE_LOOKBACK_DAYS)
+    present, absent, late, total = (
+        att.present_count, att.absent_count, att.late_count, att.total_records
     )
-    present = sum(1 for r in records if r.status == "present")
-    absent = sum(1 for r in records if r.status == "absent")
-    late = sum(1 for r in records if r.status == "late")
-    total = len(records)
 
     # --- most recent OPEN risk flag ---
     flag = (
@@ -253,9 +256,10 @@ def child_summary(
             grade_level=school_class.grade_level if school_class else None,
         ),
         attendance=SummaryAttendance(
-            present_pct=round(100 * present / total, 1) if total else 0.0,
+            present_pct=att.present_pct if att.present_pct is not None else 0.0,
             present_count=present, absent_count=absent, late_count=late,
             days=ATTENDANCE_LOOKBACK_DAYS,
+            window_label=att.label,
         ),
         risk=(
             SummaryRisk(

@@ -103,6 +103,38 @@ def _running_mean(centroid: list[float], vector: list[float], count: int) -> lis
     return [(c * count + v) / (count + 1) for c, v in zip(centroid, vector)]
 
 
+# Queries that are not academic doubts. Kept as a token set rather than an LLM call
+# because this runs over every log on every widget load, and a greeting filter that
+# needs a model round-trip is worse than no filter.
+_NON_DOUBT_TOKENS = {
+    "hi", "hii", "hiii", "hey", "hello", "helo", "hlo", "yo", "sup", "hola",
+    "good", "morning", "afternoon", "evening", "night", "gm", "gn",
+    "thanks", "thank", "thanku", "thx", "ty", "ok", "okay", "k", "kk",
+    "bye", "goodbye", "cool", "nice", "great", "lol", "haha", "hmm", "oh",
+    "test", "testing", "hi!", "sir", "maam", "ma'am", "miss", "teacher",
+    "please", "pls", "u", "r",
+}
+
+
+def _is_academic_doubt(query: str) -> bool:
+    """False for greetings, thanks and other small talk.
+
+    The teacher-facing widget was leading with a cluster labelled "Casual Greetings -
+    students are opening the chat with casual greetings without asking academic
+    questions". That is technically a true summary of the data and useless as an
+    insight: the feature exists to show what students are STUCK on.
+
+    A query is kept if anything survives after removing pure small-talk tokens, so
+    "hi miss why do we carry the one" is kept (it contains a real question) while
+    "hi", "thanks sir" and "ok" are dropped.
+    """
+    if not query or not query.strip():
+        return False
+    words = [w.strip(".,!?;:'\"()") .lower() for w in query.split()]
+    meaningful = [w for w in words if w and w not in _NON_DOUBT_TOKENS]
+    return len(meaningful) > 0
+
+
 def _fetch_logs(
     db: Session, *, school_id: int, grade_level: int, subject_id: int | None, days: int
 ) -> list[tuple[ChatbotLog, str]]:
@@ -124,7 +156,24 @@ def _fetch_logs(
     )
     if subject_id is not None:
         query = query.filter(ChatbotLog.subject_id == subject_id)
-    return query.order_by(ChatbotLog.created_at, ChatbotLog.id).all()
+
+    rows = query.order_by(ChatbotLog.created_at, ChatbotLog.id).all()
+
+    # STUDENT DOUBTS ONLY. chatbot_logs is shared by all three bots, and this never
+    # filtered - so a teacher's "Top Doubts" was clustering PARENT questions
+    # ("how is my child doing?", "does Diya have ADHD or a learning disability?")
+    # alongside student doubts. Eight of Riverside's 32 logs were parent queries. Those
+    # are a different audience asking a different kind of question, and one of them is
+    # exactly the sort of thing that must not surface on a staff dashboard as a
+    # "common student doubt".
+    #
+    # Small talk is dropped for the same reason: the widget led with a cluster labelled
+    # "Casual Greetings", which is a true statement about the data and no use to anyone.
+    return [
+        (log, section)
+        for log, section in rows
+        if log.bot_type == "student" and _is_academic_doubt(log.query)
+    ]
 
 
 def _label_clusters(clusters: list[DoubtCluster]) -> None:

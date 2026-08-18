@@ -43,6 +43,7 @@ from app.models.quiz import Quiz, QuizAttempt, QuizQuestion
 from app.models.remark import Remark
 from app.models.report_card import ReportCard
 from app.models.subject import Subject
+from app.services.attendance_stats import academic_year_snapshot
 from app.models.user import User
 from scripts.seed_riverside_fixtures import SEED_ANCHOR_DATE
 
@@ -502,6 +503,11 @@ def seed_report_cards(db: Session, ctx: dict, counts: dict) -> None:
             if existing is not None:
                 continue
             summary = get_student_gradebook_summary(db, student.id, TERM)
+            # N-1: this used to pass attendance_percentage=None, so every seeded report
+            # card read "No data" for attendance until someone regenerated it. Computed
+            # here from the same shared helper the live path uses, over the academic year
+            # (see services/attendance_stats.py for why the report card uses that window).
+            att = academic_year_snapshot(db, student.id, ACADEMIC_YEAR)
             if not summary.get("subjects"):
                 continue
             db.add(ReportCard(
@@ -512,7 +518,7 @@ def seed_report_cards(db: Session, ctx: dict, counts: dict) -> None:
                 academic_year=ACADEMIC_YEAR,
                 gpa=summary.get("gpa"),
                 term_average=summary.get("term_average"),
-                attendance_percentage=None,
+                attendance_percentage=att.present_pct,
                 source_data_snapshot=summary,
                 generated_at=_dt(-1, 11),
             ))
@@ -660,6 +666,95 @@ def seed_remarks(db: Session, ctx: dict, counts: dict) -> None:
     db.flush()
 
 
+# --- Syllabus plans (Person A's pace tracker) -----------------------------------------
+# Seeded so seam S-N is PROVABLE rather than assumed: school 5707 had zero syllabus
+# plans, so GET /syllabus/summary returned items: [] and no "behind plan" warning could
+# render on the teacher pace tracker no matter how the feature behaved.
+#
+# Term dates are anchored to SEED_ANCHOR_DATE and set PER PLAN, because term_start_date
+# and term_end_date are per-plan columns - nothing in the schema owns "when is Term 1".
+# All three start in the PAST on purpose: a plan whose term_start_date is today or later
+# yields elapsed_days <= 0, which _clamp floors to 0, and "Expected 0%" then makes every
+# logged checkpoint look ahead of schedule. That is exactly the confusing state observed
+# in school 6318, and seeding into it would hide the pace feature rather than show it.
+SYLLABUS_PLANS = [
+    # (class_name, subject, days_since_term_start, term_length_days, total_units, checkpoints_logged)
+    (CLASS_A_NAME, "Math", 40, 120, 10, 5),      # 33% elapsed, 50% done -> AHEAD
+    (CLASS_A_NAME, "Science", 40, 120, 10, 3),   # 33% elapsed, 30% done -> on pace
+    (CLASS_B_NAME, "Math", 60, 120, 12, 2),      # 50% elapsed, 17% done -> BEHIND
+]
+
+CHECKPOINT_TOPICS = [
+    "Place value and regrouping", "Multiplication tables 2-5", "Multiplication tables 6-12",
+    "Word problems with money", "Perimeter of simple shapes", "Introduction to fractions",
+]
+
+
+def _get_or_create_syllabus_plans(db: Session, ctx: dict, counts: dict) -> int:
+    """One plan per class+subject, with some checkpoints logged. Idempotent by
+    (class_id, subject_id, academic_year)."""
+    from app.models.syllabus import SyllabusCheckpoint, SyllabusPlan
+
+    created = 0
+    for class_name, subject_name, since_start, term_len, total_units, logged in SYLLABUS_PLANS:
+        school_class = ctx["classes"].get(class_name)
+        subject = ctx["subjects"].get(subject_name)
+        if school_class is None or subject is None:
+            continue
+        teacher = _teacher_for(db, school_class.id, subject.id, None)
+        if teacher is None:
+            continue
+
+        plan = (
+            db.query(SyllabusPlan)
+            .filter(
+                SyllabusPlan.class_id == school_class.id,
+                SyllabusPlan.subject_id == subject.id,
+                SyllabusPlan.academic_year == ACADEMIC_YEAR,
+            )
+            .one_or_none()
+        )
+        if plan is None:
+            start = ANCHOR - timedelta(days=since_start)
+            plan = SyllabusPlan(
+                class_id=school_class.id,
+                subject_id=subject.id,
+                academic_year=ACADEMIC_YEAR,
+                total_units=total_units,
+                term_start_date=start,
+                term_end_date=start + timedelta(days=term_len),
+                created_by=teacher.id,
+            )
+            db.add(plan)
+            db.flush()
+            created += 1
+
+        for i in range(logged):
+            topic = CHECKPOINT_TOPICS[i % len(CHECKPOINT_TOPICS)]
+            exists = (
+                db.query(SyllabusCheckpoint)
+                .filter(
+                    SyllabusCheckpoint.plan_id == plan.id,
+                    SyllabusCheckpoint.sequence_number == i + 1,
+                )
+                .one_or_none()
+            )
+            if exists is not None:
+                continue
+            db.add(SyllabusCheckpoint(
+                plan_id=plan.id,
+                topic_label=topic,
+                sequence_number=i + 1,
+                logged_by=teacher.id,
+                logged_at=_dt(-since_start + (i * 5), 11),
+            ))
+            _counted(counts, "syllabus_checkpoints")
+    if created:
+        counts["syllabus_plans"] = counts.get("syllabus_plans", 0) + created
+    db.flush()
+    return created
+
+
 # --- entrypoint ---------------------------------------------------------------------
 
 
@@ -684,6 +779,7 @@ def main() -> None:
         seed_report_cards(db, ctx, counts)
         seed_library(db, ctx, counts)
         seed_remarks(db, ctx, counts)
+        _get_or_create_syllabus_plans(db, ctx, counts)
         db.commit()
     except Exception:
         db.rollback()

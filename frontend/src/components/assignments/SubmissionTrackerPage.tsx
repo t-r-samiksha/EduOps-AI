@@ -331,7 +331,14 @@ export default function SubmissionTrackerPage() {
 
       {/* Submissions Tracker Table */}
       <Card className="border-border bg-surface shadow-sm overflow-hidden">
-        {submissionsQuery.isLoading ? (
+        {submissionsQuery.isError ? (
+          <div className="p-6 text-center" role="alert">
+            <p className="text-sm font-medium text-[hsl(var(--urgent))]">Could not load submissions for this assignment.</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Reload the page, or try again in a moment.
+            </p>
+          </div>
+        ) : submissionsQuery.isLoading ? (
           <div className="p-6 flex flex-col gap-3">
             {[1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="h-12 bg-elevated/40 rounded-xl animate-pulse" />
@@ -348,7 +355,7 @@ export default function SubmissionTrackerPage() {
             <table className="w-full text-left text-sm">
               <thead className="bg-elevated/40 text-xs font-semibold text-ink-muted border-b border-border">
                 <tr>
-                  <th
+                  <th scope="col"
                     className="p-3.5 cursor-pointer hover:text-ink transition-colors"
                     onClick={() => toggleSort("name")}
                   >
@@ -357,7 +364,7 @@ export default function SubmissionTrackerPage() {
                       <ArrowUpDown className="h-3 w-3" />
                     </div>
                   </th>
-                  <th
+                  <th scope="col"
                     className="p-3.5 cursor-pointer hover:text-ink transition-colors"
                     onClick={() => toggleSort("status")}
                   >
@@ -366,7 +373,7 @@ export default function SubmissionTrackerPage() {
                       <ArrowUpDown className="h-3 w-3" />
                     </div>
                   </th>
-                  <th
+                  <th scope="col"
                     className="p-3.5 cursor-pointer hover:text-ink transition-colors"
                     onClick={() => toggleSort("submitted_at")}
                   >
@@ -375,7 +382,7 @@ export default function SubmissionTrackerPage() {
                       <ArrowUpDown className="h-3 w-3" />
                     </div>
                   </th>
-                  <th
+                  <th scope="col"
                     className="p-3.5 cursor-pointer hover:text-ink transition-colors"
                     onClick={() => toggleSort("grade")}
                   >
@@ -384,7 +391,7 @@ export default function SubmissionTrackerPage() {
                       <ArrowUpDown className="h-3 w-3" />
                     </div>
                   </th>
-                  <th className="p-3.5 text-right">Actions</th>
+                  <th scope="col" className="p-3.5 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">

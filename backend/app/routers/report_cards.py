@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.class_ import SchoolClass
 from app.models.report_card import ReportCard
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
@@ -40,6 +41,13 @@ class ReportCardOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def _assert_student_in_caller_school(db: Session, user: CurrentUser, student_id: int) -> None:
+    """404 unless the student belongs to the caller's school."""
+    student = db.query(User).filter(User.id == student_id).one_or_none()
+    if student is None or student.school_id != user.school_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Student not found in your school")
+
+
 @router.post("/report_cards/generate/{student_id}", response_model=ReportCardOut)
 def generate_student_report_card(
     student_id: int,
@@ -49,6 +57,11 @@ def generate_student_report_card(
     db: Session = Depends(get_db),
 ):
     """Generate or update an official academic report card transcript for a student."""
+    # BLOCKER B-3: neither this router nor the service compared the student's school to
+    # the caller's, so a teacher could generate a report card for another tenant's
+    # student AND dispatch notifications to that school's parents. 404 not 403 so
+    # student ids in other schools cannot be probed by status code.
+    _assert_student_in_caller_school(db, user, student_id)
     try:
         report_card = generate_single_report_card(db, student_id, term, academic_year)
         return report_card
@@ -65,6 +78,15 @@ def bulk_generate_reports(
     db: Session = Depends(get_db),
 ):
     """High-performance batch report card generation for an entire class section."""
+    # BLOCKER B-3, same gap on the bulk path: class_id was unscoped.
+    school_class = (
+        db.query(SchoolClass)
+        .filter(SchoolClass.id == class_id, SchoolClass.school_id == user.school_id)
+        .one_or_none()
+    )
+    if school_class is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Class section not found in your school")
+
     cards = bulk_generate_class_report_cards(db, class_id, term, academic_year)
     return {
         "status": "generated",

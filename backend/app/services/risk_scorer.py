@@ -6,14 +6,13 @@ it's a documented, tunable weighted combination of three signals, each contribut
 
     1. Attendance (REAL): present/absent/late counts from AttendanceRecord, the only
        signal this codebase genuinely owns and has real data for.
-    2. Grades (PLACEHOLDER, weight-only if provided): Person B's actual gradebook
-       doesn't exist in this repo yet (checked before writing this - only
-       users/roles/school/class/subject/enrollment/parent_student/timetable/
-       attendance/staffing models exist). GradeSignal is a pure dataclass input with
-       no backing table - callers who don't have real grade data simply pass `None`,
-       and this module excludes the component entirely rather than assuming a
-       fabricated "average" that would silently bias the score. Wire a real
-       GradeSignal in here once Person B's gradebook lands; nothing else changes.
+    2. Grades (REAL): built from Person B's `gradebook_entries` by
+       scripts/run_nightly_risk_scoring.py, via
+       services/gradebook_service.get_student_gradebook_summary(). A caller with no
+       grade data still passes `None`, and this module then excludes the component
+       entirely and renormalises the remaining weights rather than assuming a
+       fabricated "average" that would silently bias the score - so a school with an
+       empty gradebook scores exactly as it did before grades were wired in.
     3. Remark sentiment (PLACEHOLDER text source, REAL analysis): sentiment analysis
        itself (services/remark_sentiment.py) is real and fully functional; the *text*
        it analyzes currently comes from RemarkStub, a clearly-marked placeholder
@@ -48,8 +47,16 @@ from app.services.remark_sentiment import analyze_sentiment
 
 ATTENDANCE_RATE_THRESHOLD = 0.90
 """Attendance below this starts contributing risk; 0% attendance = max risk."""
-GRADE_PASS_THRESHOLD_PCT = 60.0
-"""Average grade below this starts contributing risk; 0% = max risk."""
+GRADE_PASS_THRESHOLD_PCT = 75.0
+"""Average grade below this starts contributing risk; 0% = max risk.
+
+75, not a 60% pass mark, and the difference is the point. This is an EARLY-WARNING line,
+not a pass/fail line: a student who has already fallen to 60% is not an early warning,
+they are a late one. It is set to sit alongside ATTENDANCE_RATE_THRESHOLD (90%) so the
+two signals are comparable in severity. At 60 a struggling student's grade risk came out
+LOWER than their attendance risk, so adding the grade signal could push a flagged student
+below the flag line even though both signals were bad - the composite got better as the
+student got worse."""
 DECLINING_TREND_PENALTY = 0.15
 IMPROVING_TREND_RELIEF = 0.10
 NEGATIVE_SENTIMENT_REASON_THRESHOLD = 0.15
@@ -77,8 +84,9 @@ class AttendanceSignal:
 
 @dataclass(frozen=True)
 class GradeSignal:
-    """PLACEHOLDER interface - see module docstring. No backing table; construct this
-    from real data once Person B's gradebook exists."""
+    """Built from `gradebook_entries` — see scripts/run_nightly_risk_scoring.py's
+    _build_grade_signal(), which sources it from
+    services/gradebook_service.get_student_gradebook_summary()."""
 
     student_id: int
     average_score_pct: float

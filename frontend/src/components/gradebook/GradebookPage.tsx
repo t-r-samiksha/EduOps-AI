@@ -143,12 +143,12 @@ export default function GradebookPage() {
               <table className="w-full text-left border-collapse text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                    <th className="p-4">Student</th>
-                    <th className="p-4">Term Average</th>
-                    <th className="p-4">GPA (4.0 Scale)</th>
-                    <th className="p-4">Letter Grade</th>
-                    <th className="p-4">Subjects Evaluated</th>
-                    <th className="p-4 text-right">Actions</th>
+                    <th scope="col" className="p-4">Student</th>
+                    <th scope="col" className="p-4">Term Average</th>
+                    <th scope="col" className="p-4">GPA (4.0 Scale)</th>
+                    <th scope="col" className="p-4">Letter Grade</th>
+                    <th scope="col" className="p-4">Subjects Evaluated</th>
+                    <th scope="col" className="p-4 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -288,11 +288,11 @@ export default function GradebookPage() {
                 <table className="w-full text-left border-collapse text-sm">
                   <thead>
                     <tr className="border-b bg-muted/40 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                      <th className="p-4">Subject</th>
-                      <th className="p-4">Assessments Count</th>
-                      <th className="p-4">Weighted Score</th>
-                      <th className="p-4">Subject GPA</th>
-                      <th className="p-4">Grade</th>
+                      <th scope="col" className="p-4">Subject</th>
+                      <th scope="col" className="p-4">Assessments Count</th>
+                      <th scope="col" className="p-4">Weighted Score</th>
+                      <th scope="col" className="p-4">Subject GPA</th>
+                      <th scope="col" className="p-4">Grade</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">

@@ -6,10 +6,16 @@ export interface StudentAnalytics {
   student_name: string;
   term: string;
   attendance: {
-    percentage: number;
+    /** null when the student has no attendance records - NOT 0 and NOT 100. */
+    percentage: number | null;
     total_days: number;
     present_days: number;
     absent_days: number;
+    late_days: number;
+    /** Which window the percentage covers ("Last 30 days"), so the UI labels it
+     *  instead of showing a bare number that looks like it disagrees with the
+     *  report card's academic-year figure. */
+    window_label: string;
   };
   gradebook: {
     student_id: number;

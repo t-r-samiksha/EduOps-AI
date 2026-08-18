@@ -18,7 +18,7 @@ export default function StudentAnalyticsPage() {
   const studentId = user?.id ? Number(user.id) || 2 : 2;
 
   const [selectedTerm, setSelectedTerm] = useState("Term 1");
-  const { data: analytics, isLoading } = useStudentAnalytics(studentId, selectedTerm);
+  const { data: analytics, isLoading, isError } = useStudentAnalytics(studentId, selectedTerm);
 
   return (
     <div className="space-y-6">
@@ -53,7 +53,14 @@ export default function StudentAnalyticsPage() {
         </div>
       </div>
 
-      {isLoading ? (
+      {isError ? (
+        <div className="py-16 text-center border rounded-xl bg-card" role="alert">
+          <p className="text-sm font-medium text-[hsl(var(--urgent))]">Could not load analytics for this student.</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Reload the page, or try again in a moment.
+          </p>
+        </div>
+      ) : isLoading ? (
         <div className="py-16 text-center text-muted-foreground">Loading analytics...</div>
       ) : !analytics ? (
         <div className="py-16 text-center text-muted-foreground">No analytics data available.</div>
@@ -106,9 +113,16 @@ export default function StudentAnalyticsPage() {
                   <Calendar className="h-6 w-6" />
                 </div>
                 <div>
-                  <span className="text-xs text-muted-foreground">Attendance Rate</span>
+                  {/* Labelled with its window: this is the rolling 30-day figure, the
+                      same one the parent portal shows. The report card deliberately
+                      shows the academic year instead, so both carry their label. */}
+                  <span className="text-xs text-muted-foreground">
+                    {analytics.attendance?.window_label ?? "Attendance Rate"}
+                  </span>
                   <p className="text-2xl font-bold text-emerald-600">
-                    {analytics.attendance?.percentage}%
+                    {analytics.attendance?.percentage == null
+                      ? "—"
+                      : `${analytics.attendance.percentage}%`}
                   </p>
                 </div>
               </CardContent>

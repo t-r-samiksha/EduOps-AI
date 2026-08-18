@@ -83,6 +83,23 @@ export function useCreateQuiz() {
   });
 }
 
+/** Begin an attempt, so the server records a REAL started_at.
+ *
+ * The countdown below is anchored to that timestamp rather than to a fresh
+ * duration_minutes on every mount - otherwise reloading the page silently granted a
+ * full extra allowance, and the server (which now enforces the duration) and the UI
+ * would disagree about how long the student had left. Idempotent: calling it again
+ * returns the existing in-progress attempt without resetting the clock. */
+export function useStartQuizAttempt() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (quizId: number) => apiPost<QuizAttempt>(`/quizzes/${quizId}/start`, {}),
+    onSuccess: (_, quizId) => {
+      queryClient.invalidateQueries({ queryKey: ["quiz", quizId] });
+    },
+  });
+}
+
 export function useSubmitQuizAttempt() {
   const queryClient = useQueryClient();
   return useMutation({

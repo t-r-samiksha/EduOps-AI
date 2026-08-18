@@ -3,12 +3,18 @@ import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
   Bell,
+  BookOpen,
   CalendarClock,
+  CheckCircle2,
   ClipboardList,
   FileCheck2,
+  GraduationCap,
+  HelpCircle,
   Megaphone,
   MessageSquare,
+  MessagesSquare,
   ScrollText,
+  Sparkles,
   Wallet,
   type LucideIcon,
 } from "lucide-react";
@@ -22,6 +28,7 @@ import {
   useUnreadCount,
 } from "@/api/hooks/useNotifications";
 import type { Notification } from "@/api/types";
+import { NAV_ITEMS, flattenNav } from "@/lib/navConfig";
 import { useAuthStore, type Role } from "@/store/authStore";
 import { cn } from "@/lib/utils";
 
@@ -39,11 +46,26 @@ const SOURCE_ICON: Record<string, LucideIcon> = {
   remark_posted: MessageSquare,
   leave_decision: FileCheck2,
   admission_decision: ClipboardList,
+  // Academics. These nine were dispatched for months with no entry here, so they
+  // rendered with the fallback bell and no click target - see SOURCE_ROUTE below and
+  // models/notification.py's SOURCE_TYPES, which is now validated.
+  assignment_created: BookOpen,
+  assignment_graded: GraduationCap,
+  assignment_missing: AlertTriangle,
+  assignment_nudge: AlertTriangle,
+  assignment_reminder: CalendarClock,
+  quiz_published: HelpCircle,
+  // Doubt threads and insights.
+  doubt_reply: MessagesSquare,
+  doubt_answer_verified: CheckCircle2,
+  top_doubts: Sparkles,
 };
 
-/** Where clicking a notification takes you, per role. Only routes that actually
- * exist in navConfig.ts are used; anything unmapped falls back to the role's
- * dashboard rather than navigating to a 404. */
+/** Where clicking a notification takes you: source_type -> path segment.
+ *
+ * The segment is validated against the caller's OWN nav in routeFor() below, so a
+ * mapping that is right for a teacher but meaningless for a parent degrades to the
+ * dashboard instead of a 404. Anything unmapped does the same. */
 const SOURCE_ROUTE: Record<string, string> = {
   early_warning: "risk",
   fee_reminder: "fees",
@@ -53,12 +75,38 @@ const SOURCE_ROUTE: Record<string, string> = {
   substitute_assigned: "staffing",
   leave_decision: "staffing",
   admission_decision: "admissions",
+  // M-8: `announcement` was missing, so clicking ANY announcement - including the ones
+  // the announcement engine dispatches - dead-ended on the dashboard.
+  announcement: "announcements",
+  // The academics family, none of which had a route.
+  report_card: "report-cards",
+  remark_posted: "remarks",
+  assignment_created: "assignments",
+  assignment_graded: "assignments",
+  assignment_missing: "assignments",
+  assignment_nudge: "assignments",
+  assignment_reminder: "assignments",
+  quiz_published: "quizzes",
+  doubt_reply: "doubts",
+  doubt_answer_verified: "doubts",
+  top_doubts: "assistant",
 };
 
 function routeFor(notification: Notification, role: Role | null): string {
   if (!role) return "/";
   const segment = SOURCE_ROUTE[notification.source_type];
-  return segment ? `/${role}/${segment}` : `/${role}`;
+  if (!segment) return `/${role}`;
+
+  // A segment that is right for one role can be absent for another - a parent has no
+  // /parent/quizzes, and the Assistant Bot is teacher-only. Navigating there would 404,
+  // which is worse than landing on the dashboard. Checked against the role's OWN nav so
+  // this stays correct as menus change, rather than duplicating the route table here.
+  const path = `/${role}/${segment}`;
+  // flattenNav, NOT a top-level scan: most destinations now live inside collapsible
+  // groups, and a top-level-only check would silently send every one of them to the
+  // dashboard. The fallback is not an error, so nothing would have surfaced it.
+  const exists = flattenNav(NAV_ITEMS[role] ?? []).some((item) => item.path === path);
+  return exists ? path : `/${role}`;
 }
 
 /** Minimal relative-time formatter. This project has no date library and adding

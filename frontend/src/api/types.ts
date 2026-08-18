@@ -1148,6 +1148,9 @@ export interface ChildSummaryStudent {
 
 export interface ChildSummaryAttendance {
   present_pct: number;
+  /** "Last 30 days" — shown beside the figure so the portal and the report card read
+   *  as two measures rather than a discrepancy. See services/attendance_stats.py. */
+  window_label?: string;
   present_count: number;
   absent_count: number;
   late_count: number;

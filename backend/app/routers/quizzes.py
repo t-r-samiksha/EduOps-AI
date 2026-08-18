@@ -20,6 +20,7 @@ from app.models.subject import Subject
 from app.models.timetable import TimetableSlot
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.gradebook_service import upsert_assessment_grade
 from app.services.notify import dispatch_bulk
 from app.services.quiz_service import (
     _to_utc,
@@ -201,6 +202,49 @@ def _format_quiz(quiz: Quiz, user: CurrentUser, db: Session, include_questions: 
 # --- Endpoints ----------------------------------------------------------------------
 
 
+def _attempt_out(attempt: QuizAttempt) -> QuizAttemptOut:
+    pct = round((attempt.score / attempt.total_marks) * 100.0, 1) if attempt.total_marks > 0 else 0.0
+    return QuizAttemptOut(
+        id=attempt.id,
+        quiz_id=attempt.quiz_id,
+        student_id=attempt.student_id,
+        score=attempt.score,
+        total_marks=attempt.total_marks,
+        percentage=pct,
+        status=attempt.status,
+        answers=attempt.answers,
+        started_at=attempt.started_at,
+        submitted_at=attempt.submitted_at,
+    )
+
+
+def _assert_quiz_window_open(quiz: Quiz, now: datetime) -> None:
+    """M-3: the availability window was never enforced. A quiz whose available_until had
+    passed 16 days earlier still accepted and graded a submission."""
+    if quiz.available_from is not None and now < _to_utc(quiz.available_from):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"This quiz opens at {_to_utc(quiz.available_from).isoformat()}",
+        )
+    if quiz.available_until is not None and now > _to_utc(quiz.available_until):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            f"This quiz closed at {_to_utc(quiz.available_until).isoformat()}",
+        )
+
+
+def _assert_enrolled(db: Session, student_id: int, class_id: int) -> None:
+    enrolled = (
+        db.query(Enrollment)
+        .filter(Enrollment.student_id == student_id, Enrollment.class_id == class_id)
+        .first()
+    )
+    if not enrolled:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Not enrolled in this quiz's class section"
+        )
+
+
 @router.post("/quizzes", response_model=QuizOut, status_code=status.HTTP_201_CREATED)
 def create_quiz(
     body: QuizCreateRequest,
@@ -219,6 +263,12 @@ def create_quiz(
         )
         if not school_class:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Class section not found in this school")
+        # BLOCKER B-2 (sibling of the assignments gap): being in the same school is not
+        # the same as teaching the class. _classes_taught_by is homeroom UNION timetable.
+        if body.class_id not in _classes_taught_by(db, user.id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "You can only create quizzes for classes you teach"
+            )
 
     quiz = Quiz(
         school_id=user.school_id,
@@ -322,6 +372,60 @@ def get_quiz_detail(
     return _format_quiz(quiz, user, db, include_questions=True)
 
 
+@router.post("/quizzes/{quiz_id}/start", response_model=QuizAttemptOut)
+def start_quiz_attempt(
+    quiz_id: int,
+    user: CurrentUser = Depends(require_role("student")),
+    db: Session = Depends(get_db),
+):
+    """Begin an attempt, recording a REAL started_at.
+
+    M-4: the submit endpoint used to invent `started_at = now - duration_minutes`, so
+    every stored attempt looked like it took exactly the allowed time and the duration
+    was decorative. A fabricated timestamp is dishonest stored data - worse than none,
+    because it looks authoritative.
+
+    Idempotent: calling again returns the in-progress attempt unchanged rather than
+    erroring or resetting the clock, so a refreshed browser or a double-tap does not
+    cost the student time or their attempt.
+    """
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).one_or_none()
+    if not quiz:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Quiz not found")
+
+    now = datetime.now(timezone.utc)
+    _assert_enrolled(db, user.id, quiz.class_id)
+    _assert_quiz_window_open(quiz, now)
+
+    existing = (
+        db.query(QuizAttempt)
+        .filter(QuizAttempt.quiz_id == quiz_id, QuizAttempt.student_id == user.id)
+        .first()
+    )
+    if existing is not None:
+        if existing.status == "in_progress":
+            return _attempt_out(existing)
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "You have already attempted this quiz. Multiple attempts are not permitted.",
+        )
+
+    attempt = QuizAttempt(
+        quiz_id=quiz_id,
+        student_id=user.id,
+        answers={},
+        score=0.0,
+        total_marks=sum(q.marks for q in quiz.questions),
+        started_at=now,
+        submitted_at=None,
+        status="in_progress",
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+    return _attempt_out(attempt)
+
+
 @router.post("/quizzes/{quiz_id}/attempt", response_model=QuizAttemptOut)
 def submit_quiz_attempt(
     quiz_id: int,
@@ -329,92 +433,71 @@ def submit_quiz_attempt(
     user: CurrentUser = Depends(require_role("student")),
     db: Session = Depends(get_db),
 ):
-    """Student submits quiz answers and gets auto-graded immediately."""
+    """Submit answers for an attempt started by POST /quizzes/{id}/start.
+
+    M-3 + M-4: enforces the availability window and the duration, both server-side.
+
+    RUNNING OVER TIME DOES NOT LOSE THE WORK. An over-duration submission is accepted,
+    graded, and recorded with status "time_expired" rather than rejected - losing a
+    student's answers to a clock is worse than recording that it ran over, and a silent
+    rejection is worse than either. The teacher sees the flag on the attempt.
+    """
     quiz = db.query(Quiz).filter(Quiz.id == quiz_id).one_or_none()
     if not quiz:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Quiz not found")
 
-    is_enrolled = (
-        db.query(Enrollment)
-        .filter(Enrollment.student_id == user.id, Enrollment.class_id == quiz.class_id)
-        .first()
-    )
-    if not is_enrolled:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not enrolled in this quiz's class section")
+    now = datetime.now(timezone.utc)
+    _assert_enrolled(db, user.id, quiz.class_id)
+    _assert_quiz_window_open(quiz, now)
 
-    existing_attempt = (
+    attempt = (
         db.query(QuizAttempt)
         .filter(QuizAttempt.quiz_id == quiz_id, QuizAttempt.student_id == user.id)
         .first()
     )
-    if existing_attempt:
+    if attempt is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Start the quiz first (POST /quizzes/{quiz_id}/start) - a submission with no "
+            "recorded start time cannot be timed.",
+        )
+    if attempt.status != "in_progress":
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "You have already attempted this quiz. Multiple attempts are not permitted.",
         )
 
-    # Auto-grade immediately
     score, total_marks, breakdown = grade_quiz_attempt(quiz, body.answers)
 
-    now = datetime.now(timezone.utc)
-    attempt = QuizAttempt(
-        quiz_id=quiz_id,
-        student_id=user.id,
-        answers=breakdown,
-        score=score,
-        total_marks=total_marks,
-        started_at=now - timedelta(minutes=quiz.duration_minutes),
-        submitted_at=now,
-        status="completed",
-    )
-    db.add(attempt)
+    elapsed = (now - _to_utc(attempt.started_at)).total_seconds() / 60.0
+    over_time = elapsed > quiz.duration_minutes
 
-    # Auto-record into GradebookEntry for seamless integration!
-    from app.models.gradebook import GradebookEntry
-    gb_entry = (
-        db.query(GradebookEntry)
-        .filter(
-            GradebookEntry.student_id == user.id,
-            GradebookEntry.assessment_type == "quiz",
-            GradebookEntry.assessment_id == quiz_id,
-        )
-        .first()
+    attempt.answers = breakdown
+    attempt.score = score
+    attempt.total_marks = total_marks
+    attempt.submitted_at = now
+    attempt.status = "time_expired" if over_time else "completed"
+
+    # Auto-record into the gradebook (seam S-G). Shared upsert with assignment grading
+    # so both paths behave identically - see gradebook_service.upsert_assessment_grade.
+    # M-5: subject_id was `quiz.subject_id or 1`, filing subjectless quizzes against
+    # whichever school owns subject 1. The helper now skips instead of misfiling.
+    upsert_assessment_grade(
+        db,
+        school_id=quiz.school_id,
+        student_id=user.id,
+        subject_id=quiz.subject_id,
+        class_id=quiz.class_id,
+        assessment_type="quiz",
+        assessment_id=quiz_id,
+        score=score,
+        max_score=total_marks,
+        weight=0.20,
     )
-    if gb_entry:
-        gb_entry.score = score
-        gb_entry.max_score = total_marks
-    else:
-        db.add(
-            GradebookEntry(
-                school_id=quiz.school_id,
-                student_id=user.id,
-                subject_id=quiz.subject_id or 1,
-                class_id=quiz.class_id,
-                term="Term 1",
-                assessment_type="quiz",
-                assessment_id=quiz_id,
-                score=score,
-                max_score=total_marks,
-                weight=0.20,
-            )
-        )
 
     db.commit()
     db.refresh(attempt)
-
-    pct = round((score / total_marks) * 100.0, 1) if total_marks > 0 else 0.0
-    return QuizAttemptOut(
-        id=attempt.id,
-        quiz_id=attempt.quiz_id,
-        student_id=attempt.student_id,
-        score=attempt.score,
-        total_marks=attempt.total_marks,
-        percentage=pct,
-        status=attempt.status,
-        answers=attempt.answers,
-        started_at=attempt.started_at,
-        submitted_at=attempt.submitted_at,
-    )
+    return _attempt_out(attempt)
 
 
 @router.get("/quizzes/{quiz_id}/results")

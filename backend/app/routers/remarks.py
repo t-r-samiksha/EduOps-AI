@@ -19,7 +19,7 @@ from app.database import get_db
 from app.models.risk import RemarkStub
 from app.models.subject import Subject
 from app.models.user import User
-from app.services.auth import CurrentUser, get_current_user
+from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.scoping import assert_can_view_student_record
 from app.services.remark_sentiment import analyze_sentiment
 from app.services.scoping import assert_parent_linked, students_in_classes, teacher_class_ids
@@ -143,7 +143,10 @@ class RemarkRecordOut(BaseModel):
 @router.post("/remarks", response_model=RemarkRecordOut, status_code=status.HTTP_201_CREATED)
 def create_remark(
     body: SingleRemarkIn,
-    user: CurrentUser = Depends(get_current_user),
+    # BLOCKER B-1: this was Depends(get_current_user) with no role gate, so any
+    # authenticated account - student or parent - could file a teacher remark about
+    # any student, attributed to itself.
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
     db: Session = Depends(get_db),
 ):
     """Teacher adds a single remark for a student."""
@@ -183,7 +186,8 @@ def create_remark(
 @router.post("/remarks/bulk")
 def create_bulk_remarks_endpoint(
     body: BulkRemarkRequest,
-    user: CurrentUser = Depends(get_current_user),
+    # BLOCKER B-1, same gap as create_remark above.
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
     db: Session = Depends(get_db),
 ):
     """Teacher creates remarks for multiple students in one batch request."""

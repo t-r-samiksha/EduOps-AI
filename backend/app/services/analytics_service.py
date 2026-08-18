@@ -20,7 +20,9 @@ from app.models.quiz import QuizAttempt
 from app.models.risk import RiskFlag
 from app.models.subject import Subject
 from app.models.user import User
+from app.services.attendance_stats import lookback_snapshot
 from app.services.gradebook_service import get_student_gradebook_summary
+from scripts.run_nightly_risk_scoring import ATTENDANCE_LOOKBACK_DAYS
 
 
 def get_student_personal_analytics(
@@ -34,15 +36,14 @@ def get_student_personal_analytics(
         raise ValueError("Student not found")
 
     # 1. Attendance Metrics (Person A)
-    attendance_records = (
-        db.query(AttendanceRecord)
-        .filter(AttendanceRecord.student_id == student_id)
-        .all()
-    )
-    total_days = len(attendance_records)
-    present_days = sum(1 for r in attendance_records if r.status in ("present", "late"))
-    absent_days = sum(1 for r in attendance_records if r.status == "absent")
-    attendance_pct = round((present_days / total_days) * 100.0, 1) if total_days > 0 else 100.0
+    # M-2: was ALL-time with `late` counted as present and 100.0 for a student with no
+    # records - three ways to disagree with the parent portal about the same child. Now
+    # the shared helper on the same 30-day window the portal and risk scorer use.
+    att = lookback_snapshot(db, student_id, ATTENDANCE_LOOKBACK_DAYS)
+    total_days = att.total_records
+    present_days = att.present_count
+    absent_days = att.absent_count
+    attendance_pct = att.present_pct  # None when there are no records - not 100.0
 
     # 2. Gradebook & Subject-wise Performance
     gradebook_summary = get_student_gradebook_summary(db, student_id, term)
@@ -87,7 +88,7 @@ def get_student_personal_analytics(
         {"month": "Oct", "score": 78, "attendance": 92},
         {"month": "Nov", "score": 82, "attendance": 96},
         {"month": "Dec", "score": 85, "attendance": 90},
-        {"month": "Jan", "score": round(gradebook_summary["term_average"] or 84, 1), "attendance": attendance_pct},
+        {"month": "Jan", "score": round(gradebook_summary["term_average"] or 84, 1), "attendance": attendance_pct or 0},
     ]
 
     return {
@@ -99,6 +100,10 @@ def get_student_personal_analytics(
             "total_days": total_days,
             "present_days": present_days,
             "absent_days": absent_days,
+            "late_days": att.late_count,
+            # The window this figure covers, so the UI can label it rather than showing
+            # a bare percentage that looks like it disagrees with the report card.
+            "window_label": att.label,
         },
         "gradebook": gradebook_summary,
         "assignments": {

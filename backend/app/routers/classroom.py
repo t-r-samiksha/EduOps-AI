@@ -125,8 +125,15 @@ def _get_enrolled_student_ids(db: Session, class_id: int, subject_id: int | None
     """Return all student IDs enrolled in the given class section."""
     query = db.query(Enrollment.student_id).filter(Enrollment.class_id == class_id)
     if subject_id is not None:
-        # Include homeroom students or students enrolled in this specific elective
-        query = query.filter((Enrollment.subject_id == subject_id) | (Enrollment.is_primary.is_(True)))
+        # N-2: the OR previously read `is_primary.is_(True)` with no subject constraint,
+        # so ANY primary enrollment in the class matched - an elective classroom notified
+        # the entire homeroom rather than the students taking that elective. Primary
+        # enrollments legitimately count (a homeroom student takes the core subject), but
+        # only when their enrollment carries no subject of its own.
+        query = query.filter(
+            (Enrollment.subject_id == subject_id)
+            | ((Enrollment.subject_id.is_(None)) & (Enrollment.is_primary.is_(True)))
+        )
     return [row.student_id for row in query.distinct().all()]
 
 
@@ -381,9 +388,19 @@ def create_stream_post(
         if enrolled_student_ids:
             subject = db.query(Subject).filter(Subject.id == classroom.subject_id).one_or_none()
             subj_title = subject.name if subject else "Class"
+            # N-3: students only, previously. A class announcement that parents never see
+            # is the announcement most worth sending - "bring a leaf on Thursday" is
+            # addressed to whoever packs the bag. Linked guardians are included, and
+            # dispatch_bulk de-duplicates a parent with two children in the class.
+            parent_ids = [
+                row.parent_id
+                for row in db.query(ParentStudent.parent_id)
+                .filter(ParentStudent.student_id.in_(enrolled_student_ids))
+                .distinct()
+            ]
             dispatch_bulk(
                 db,
-                user_ids=enrolled_student_ids,
+                user_ids=[*enrolled_student_ids, *parent_ids],
                 source_type="announcement",
                 title=f"[{subj_title}] {body.title}",
                 body=body.content[:250],

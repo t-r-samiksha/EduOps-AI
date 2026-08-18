@@ -163,6 +163,8 @@ def test_quiz_creation_and_auto_grading(client, seed, db_session):
             q2_id: "C",
         }
     }
+    # M-4: an attempt must be STARTED first, so started_at is real rather than invented.
+    client.post(f"/quizzes/{quiz_id}/start")
     att_res = client.post(f"/quizzes/{quiz_id}/attempt", json=attempt_payload)
     assert att_res.status_code == 200
     att_data = att_res.json()
@@ -205,6 +207,7 @@ def test_quiz_single_attempt_enforcement(client, seed, db_session):
     db_session.flush()
 
     _override_user("student", user_id=seed["student1"].id, school_id=seed["school"].id)
+    client.post(f"/quizzes/{quiz.id}/start")
     res1 = client.post(f"/quizzes/{quiz.id}/attempt", json={"answers": {str(q.id): "B"}})
     assert res1.status_code == 200
 

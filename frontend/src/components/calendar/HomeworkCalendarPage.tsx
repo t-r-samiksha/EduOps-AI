@@ -22,7 +22,7 @@ export default function HomeworkCalendarPage() {
   const { user } = useAuthStore();
   const studentId = user?.id ? Number(user.id) || 2 : 2;
 
-  const { data: events = [], isLoading } = useHomeworkCalendar(studentId);
+  const { data: events = [], isLoading, isError } = useHomeworkCalendar(studentId);
   const syncMutation = useTriggerCalendarSync();
 
   const [selectedType, setSelectedType] = useState<string>("all");
@@ -97,7 +97,14 @@ export default function HomeworkCalendarPage() {
 
       {/* Events Timeline / Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {isLoading ? (
+        {isError ? (
+          <div className="col-span-full py-16 text-center border rounded-xl bg-card" role="alert">
+            <p className="text-sm font-medium text-[hsl(var(--urgent))]">Could not load the academic calendar.</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Reload the page, or try again in a moment.
+            </p>
+          </div>
+        ) : isLoading ? (
           <div className="col-span-full py-16 text-center text-muted-foreground">
             Loading academic calendar...
           </div>

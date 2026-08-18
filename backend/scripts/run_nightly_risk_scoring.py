@@ -21,7 +21,7 @@ WHAT IT DOES
 For every student enrolled (primary enrollment) in the given school/academic_year,
 builds a real AttendanceSignal from AttendanceRecord and a RemarkSignal from
 RemarkStub (see that model's docstring - a seeded placeholder), scores them via
-services/risk_scorer.py (grades intentionally omitted - no real signal exists yet),
+services/risk_scorer.py (including a real GradeSignal from Person B gradebook_entries),
 and:
   - low risk: no flag created; an existing OPEN flag for that student is left alone
     (auto-resolving it is a judgment call for a human via PUT /risk/{id}/resolve, not
@@ -51,22 +51,44 @@ from app.models.attendance import AttendanceRecord
 from app.models.class_ import SchoolClass
 from app.models.enrollment import Enrollment
 from app.models.risk import RemarkStub, RiskFlag
-from app.services.risk_scorer import AttendanceSignal, RemarkSignal, score_student
+from app.services.attendance_stats import attendance_snapshot
+from app.services.gradebook_service import get_student_gradebook_summary
+from app.services.risk_scorer import AttendanceSignal, GradeSignal, RemarkSignal, score_student
 
 ATTENDANCE_LOOKBACK_DAYS = 30
 REMARK_LOOKBACK_COUNT = 5
 
 
 def _build_attendance_signal(session: Session, student_id: int, since: date) -> AttendanceSignal:
-    rows = (
-        session.query(AttendanceRecord)
-        .filter(AttendanceRecord.student_id == student_id, AttendanceRecord.date >= since)
-        .all()
+    """M-2: counts come from services/attendance_stats.py so this job, the parent portal
+    and student analytics cannot drift apart."""
+    snap = attendance_snapshot(session, student_id, start=since)
+    return AttendanceSignal(
+        student_id=student_id,
+        present_count=snap.present_count,
+        absent_count=snap.absent_count,
+        late_count=snap.late_count,
+        total_records=snap.total_records,
     )
-    present = sum(1 for r in rows if r.status == "present")
-    absent = sum(1 for r in rows if r.status == "absent")
-    late = sum(1 for r in rows if r.status == "late")
-    return AttendanceSignal(student_id=student_id, present_count=present, absent_count=absent, late_count=late, total_records=len(rows))
+
+
+def _build_grade_signal(session: Session, student_id: int, term: str = "Term 1") -> GradeSignal | None:
+    """The student's weighted term average from `gradebook_entries`, or None.
+
+    Returns None when the student has no graded assessments, which is not the same as a
+    zero: score_student() then EXCLUDES the grade component and renormalises the
+    remaining weights, so a school that doesn't use the gradebook scores exactly as it
+    did before grades were wired in. Passing 0.0 here would flag every such student.
+
+    `trend` is left None deliberately - gradebook_entries carries no ordering that
+    distinguishes "improving" from "declining" without assuming assessment_type maps to
+    time, which it does not.
+    """
+    summary = get_student_gradebook_summary(session, student_id, term)
+    average = summary.get("term_average")
+    if average is None:
+        return None
+    return GradeSignal(student_id=student_id, average_score_pct=float(average))
 
 
 def _build_remark_signal(session: Session, student_id: int) -> RemarkSignal | None:
@@ -99,8 +121,9 @@ def run_nightly_scoring(session: Session, school_id: int, academic_year: str) ->
 
     for student_id in student_ids:
         attendance = _build_attendance_signal(session, student_id, since)
+        grades = _build_grade_signal(session, student_id)
         remarks = _build_remark_signal(session, student_id)
-        result = score_student(attendance, grades=None, remarks=remarks)
+        result = score_student(attendance, grades=grades, remarks=remarks)
 
         if result.risk_level == "low":
             low_risk_skipped += 1
