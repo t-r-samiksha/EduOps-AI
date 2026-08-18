@@ -20,6 +20,7 @@ from app.models.risk import RemarkStub
 from app.models.subject import Subject
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user
+from app.services.scoping import assert_can_view_student_record
 from app.services.remark_sentiment import analyze_sentiment
 from app.services.scoping import assert_parent_linked, students_in_classes, teacher_class_ids
 
@@ -213,8 +214,7 @@ def get_student_remark_history(
     """View chronological remark history for a student with optional sentiment filter."""
     from app.models.remark import Remark
 
-    if user.role == "student" and user.id != student_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's remarks")
+    assert_can_view_student_record(db, user, student_id, what="remarks")
 
     query = db.query(Remark).filter(Remark.student_id == student_id)
     if sentiment_tag:

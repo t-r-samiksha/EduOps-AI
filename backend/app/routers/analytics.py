@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.services.analytics_service import get_student_personal_analytics
+from app.services.scoping import assert_can_view_student_record
 from app.services.auth import CurrentUser, get_current_user
 
 router = APIRouter(tags=["analytics"])
@@ -24,8 +25,7 @@ def get_student_analytics(
     db: Session = Depends(get_db),
 ):
     """Retrieve comprehensive personal academic analytics for a student."""
-    if user.role == "student" and user.id != student_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's analytics")
+    assert_can_view_student_record(db, user, student_id, what="analytics")
 
     try:
         return get_student_personal_analytics(db, student_id, term)

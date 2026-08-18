@@ -24,6 +24,7 @@ from app.models.subject import Subject
 from app.models.timetable import TimetableSlot
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.scoping import deny_parent
 from app.services.notify import dispatch_bulk
 
 router = APIRouter(tags=["classroom-stream"])
@@ -233,6 +234,7 @@ def get_my_classrooms(
     db: Session = Depends(get_db),
 ):
     """List classrooms accessible to the current user based on their role."""
+    deny_parent(user, feature="the classroom stream")
     query = db.query(Classroom)
     if user.school_id:
         query = query.filter(Classroom.school_id == user.school_id)
@@ -325,6 +327,7 @@ def get_classroom(
     db: Session = Depends(get_db),
 ):
     """Get single classroom info."""
+    deny_parent(user, feature="the classroom stream")
     classroom = db.query(Classroom).filter(Classroom.id == classroom_id).one_or_none()
     if not classroom:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Classroom not found")
@@ -425,6 +428,7 @@ def get_classroom_stream(
     db: Session = Depends(get_db),
 ):
     """Retrieve chronological classroom stream posts, newest first."""
+    deny_parent(user, feature="the classroom stream")
     classroom = db.query(Classroom).filter(Classroom.id == classroom_id).one_or_none()
     if not classroom:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Classroom not found")

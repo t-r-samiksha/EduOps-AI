@@ -19,6 +19,7 @@ from app.models.subject import Subject
 from app.models.timetable import TimetableSlot
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.scoping import assert_can_view_student_record
 from app.services.gradebook_service import (
     get_student_gradebook_summary,
     get_term_weights,
@@ -205,8 +206,7 @@ def get_student_gradebook(
     db: Session = Depends(get_db),
 ):
     """View individual student's gradebook, term average, and 4.0 scale GPA."""
-    if user.role == "student" and user.id != student_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's gradebook")
+    assert_can_view_student_record(db, user, student_id, what="gradebook")
 
     return get_student_gradebook_summary(db, student_id, term)
 

@@ -77,7 +77,9 @@ def get_student_personal_analytics(
         .all()
     )
     is_at_risk = len(risk_flags) > 0
-    risk_reasons = [f.reason for f in risk_flags] if is_at_risk else []
+    # RiskFlag.reasons is a JSONB list[str] (one flag can carry several reasons),
+    # not a scalar - flatten so this stays list[str] for the client.
+    risk_reasons = [r for f in risk_flags for r in (f.reasons or [])] if is_at_risk else []
 
     # 6. Trend data (simulated month-by-month progress curve)
     trend_data = [

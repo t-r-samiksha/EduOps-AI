@@ -91,7 +91,6 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/admissions", role: "principal", element: <AdmissionsPage /> },
   { path: "/principal/exams", role: "principal", element: <ExamsPage /> },
   { path: "/principal/school-management", role: "principal", element: <SchoolManagementPage /> },
-  { path: "/principal/assistant", role: "principal", element: <TeacherAssistantBot /> },
 
   { path: "/admin", role: "admin", element: <AdminDashboard /> },
   { path: "/admin/classroom", role: "admin", element: <ClassroomStreamPage /> },
@@ -121,7 +120,6 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/admissions", role: "admin", element: <AdmissionsPage /> },
   { path: "/admin/exams", role: "admin", element: <ExamsPage /> },
   { path: "/admin/school-management", role: "admin", element: <SchoolManagementPage /> },
-  { path: "/admin/assistant", role: "admin", element: <TeacherAssistantBot /> },
 
   { path: "/teacher", role: "teacher", element: <TeacherDashboard /> },
   { path: "/teacher/classroom", role: "teacher", element: <ClassroomStreamPage /> },

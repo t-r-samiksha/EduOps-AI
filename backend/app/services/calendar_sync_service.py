@@ -136,8 +136,11 @@ def sync_user_calendar(
     # 3. Sync Exams
     exams = db.query(Exam).filter(Exam.school_id == user.school_id).all()
     for ex in exams:
-        ex_start = _to_utc(ex.start_time)
-        ex_end = _to_utc(ex.end_time)
+        # Exam.start_time/end_time are TIME-of-day columns and exam_date holds the
+        # day; calendar_events.start_time is timestamptz. Combine them, or the INSERT
+        # fails with a DatatypeMismatch (time vs timestamp with time zone).
+        ex_start = _to_utc(datetime.combine(ex.exam_date, ex.start_time))
+        ex_end = _to_utc(datetime.combine(ex.exam_date, ex.end_time))
         existing = (
             db.query(CalendarEvent)
             .filter(
@@ -152,7 +155,12 @@ def sync_user_calendar(
                 school_id=user.school_id,
                 user_id=user.id,
                 event_type="exam",
-                title=f"Exam: {ex.name}",
+                # Exam has no `name` column - the readable identity is its
+                # subject plus exam_type ("mid_term"/"unit_test"/...).
+                title=(
+                    f"Exam: {ex.subject.name if ex.subject else 'Unknown subject'}"
+                    + (f" ({ex.exam_type.replace('_', ' ')})" if ex.exam_type else "")
+                ),
                 subject_id=ex.subject_id,
                 start_time=ex_start,
                 end_time=ex_end,
@@ -175,7 +183,7 @@ def get_homework_calendar_events(
     if not user:
         return []
 
-    from app.models.school import SchoolClass
+    from app.models.class_ import SchoolClass
     from app.models.parent_student import ParentStudent
     from app.routers.assignments import _classes_taught_by
     from sqlalchemy import or_

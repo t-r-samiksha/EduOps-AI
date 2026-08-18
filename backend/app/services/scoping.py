@@ -50,6 +50,93 @@ def assert_parent_linked(db: Session, parent_id: int, student_id: int | None) ->
     return student_id
 
 
+def assert_can_view_student_record(
+    db: Session, user, student_id: int, *, what: str = "record"
+) -> None:
+    """Ownership gate for any per-student record - gradebook, report card, analytics,
+    remarks, library loans, homework calendar.
+
+    - student: may only read their own.
+    - parent: must be LINKED to that child (assert_parent_linked).
+    - teacher: scoped to the students they teach (see below).
+    - admin / principal: allowed through.
+
+    WHY THIS EXISTS. Every one of those endpoints originally guarded with:
+
+        if user.role == "student" and user.id != student_id: 403
+
+    which constrains STUDENTS ONLY. Nothing constrained parents, and no parent-link
+    check existed anywhere in that code - so any authenticated parent could read any
+    student's grades, report cards, analytics and remarks by changing the id in the
+    URL. Verified against live data before this was written: `guardian.kumar`, a
+    parent of two children, got 200 on a third child's gradebook.
+
+    - teacher: may only read a student enrolled in a class they are responsible for
+      (homeroom UNION timetable-taught - see classes_taught_by).
+    - admin / principal: unrestricted within their school.
+    """
+    if user.role == "student":
+        if user.id != student_id:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, f"Cannot view another student's {what}"
+            )
+        return
+    if user.role == "parent":
+        assert_parent_linked(db, user.id, student_id)
+        return
+    if user.role == "teacher":
+        if student_id not in students_taught_by(db, user.id):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, f"Not authorized to view this student's {what}"
+            )
+
+
+
+def classes_taught_by(db: Session, teacher_id: int) -> list[int]:
+    """Classes a teacher is responsible for: homeroom UNION anything they teach on the
+    timetable.
+
+    teacher_class_ids() alone is HOMEROOM ONLY and is not a substitute here - on the
+    Riverside data, scoping Meera Iyer by homeroom would have cut her from 12 students
+    to 2 and removed Grade 3 - B entirely, taking the cross-section Top Doubts cluster
+    with it. Kavya Reddy has no homeroom at all and would have gone to zero.
+    """
+    from app.models.timetable import TimetableSlot
+
+    homeroom = set(teacher_class_ids(db, teacher_id))
+    taught = {
+        row.class_id
+        for row in db.query(TimetableSlot.class_id)
+        .filter(TimetableSlot.teacher_id == teacher_id)
+        .distinct()
+    }
+    return sorted(homeroom | taught)
+
+
+def students_taught_by(db: Session, teacher_id: int) -> set[int]:
+    """Students enrolled in any class this teacher is responsible for."""
+    return students_in_classes(db, classes_taught_by(db, teacher_id))
+
+
+def deny_parent(user, *, feature: str) -> None:
+    """403 for the parent role.
+
+    The RBAC matrix gives parents NO ACCESS to the classroom stream and the digital
+    library: those are a class-wide teaching surface and a school-wide catalogue, not
+    per-child information. Both were reachable by any authenticated parent because the
+    handlers only ever gated `require_role` on their WRITE paths.
+
+    Amendment on record: Resources is deliberately NOT covered here. The matrix
+    originally listed it as parent-No-Access, but a parent seeing their child's course
+    material is reasonable and it was already built, so the matrix was amended to allow
+    it rather than the code restricted. See docs/audit/route-health-sweep.md.
+    """
+    if user.role == "parent":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Parents do not have access to {feature}"
+        )
+
+
 def teacher_class_ids(db: Session, teacher_id: int) -> list[int]:
     """Classes where this teacher is the homeroom/class teacher.
 

@@ -370,7 +370,10 @@ class TeacherAskResponse(BaseModel):
 @router.post("/teacher/ask", response_model=TeacherAskResponse)
 def teacher_ask(
     body: TeacherAskRequest,
-    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
+    # TEACHER ONLY. This is a lesson-planning / quiz-authoring assistant scoped to the
+    # grades the caller teaches; admin and principal have no teaching scope for it to
+    # resolve, and it was appearing on their dashboards as a result.
+    user: CurrentUser = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
     query = body.query.strip()

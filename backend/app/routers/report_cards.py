@@ -14,6 +14,7 @@ from app.database import get_db
 from app.models.report_card import ReportCard
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.scoping import assert_can_view_student_record
 from app.services.report_card_service import (
     bulk_generate_class_report_cards,
     generate_single_report_card,
@@ -80,8 +81,7 @@ def list_student_report_cards(
     db: Session = Depends(get_db),
 ):
     """List published report cards for a student."""
-    if user.role == "student" and user.id != student_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's report cards")
+    assert_can_view_student_record(db, user, student_id, what="report cards")
 
     cards = (
         db.query(ReportCard)
@@ -103,7 +103,6 @@ def get_report_card_detail(
     if not card:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Report card not found")
 
-    if user.role == "student" and user.id != card.student_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's report card")
+    assert_can_view_student_record(db, user, card.student_id, what="report card")
 
     return card

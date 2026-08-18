@@ -17,6 +17,8 @@ from app.database import get_db
 from app.models.library import LibraryItem, LibraryLoan
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
+from app.services.scoping import deny_parent
+from app.services.scoping import assert_can_view_student_record
 from app.services.library_service import (
     issue_library_item,
     return_library_item,
@@ -87,6 +89,7 @@ def get_library_catalog(
     db: Session = Depends(get_db),
 ):
     """Browse library catalog with category, format, and title search filters."""
+    deny_parent(user, feature="the digital library")
     query = db.query(LibraryItem).filter(LibraryItem.school_id == user.school_id)
 
     if category:
@@ -195,8 +198,12 @@ def get_student_loans(
     db: Session = Depends(get_db),
 ):
     """View active and past library loans for a student."""
-    if user.role == "student" and user.id != student_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's loans")
+    # NOT deny_parent(). A parent seeing their OWN child's loans and overdue books is
+    # parent-portal territory - matrix amended 2026-08-18, same as Resources. The
+    # school-wide GET /library/catalog stays parent-denied; this per-child view does
+    # not. assert_can_view_student_record enforces the link, so a parent still cannot
+    # read a child who is not theirs.
+    assert_can_view_student_record(db, user, student_id, what="loans")
 
     update_overdue_loans(db)
 

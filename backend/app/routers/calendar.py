@@ -16,6 +16,7 @@ from app.database import get_db
 from app.models.calendar import CalendarEvent
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user
+from app.services.scoping import assert_can_view_student_record
 from app.services.calendar_sync_service import (
     get_homework_calendar_events,
     sync_user_calendar,
@@ -57,8 +58,7 @@ def get_student_homework_calendar(
     db: Session = Depends(get_db),
 ):
     """Retrieve normalized academic deadlines (assignments, quizzes, exams) for a student."""
-    if user.role == "student" and user.id != student_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's calendar")
+    assert_can_view_student_record(db, user, student_id, what="calendar")
 
     return get_homework_calendar_events(db, student_id)
 
@@ -72,8 +72,7 @@ def get_user_calendar_events(
     db: Session = Depends(get_db),
 ):
     """Retrieve synchronized academic schedule and deadlines for a user."""
-    if user.role == "student" and user.id != user_id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another user's calendar")
+    assert_can_view_student_record(db, user, user_id, what="calendar")
 
     # Run idempotent sync
     sync_user_calendar(db, user_id, start, end)
