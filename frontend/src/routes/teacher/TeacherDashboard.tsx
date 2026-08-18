@@ -1,4 +1,4 @@
-import { CalendarClock, AlertTriangle, ScanFace, Users, BookOpenCheck } from "lucide-react";
+import { CalendarClock, AlertTriangle, ScanFace, Users, BookOpenCheck, FolderKanban, ClipboardList } from "lucide-react";
 import PageHeader from "@/components/shared/PageHeader";
 import StatTile from "@/components/shared/StatTile";
 import QuickLinkCard from "@/components/shared/QuickLinkCard";
@@ -128,6 +128,24 @@ export default function TeacherDashboard() {
       )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <QuickLinkCard
+          to="/teacher/classroom"
+          icon={BookOpenCheck}
+          label="Classroom Stream"
+          stat="Post notes, alerts & learning materials"
+        />
+        <QuickLinkCard
+          to="/teacher/resources"
+          icon={FolderKanban}
+          label="Resources Library"
+          stat="Upload & organize notes, slides and sheets"
+        />
+        <QuickLinkCard
+          to="/teacher/assignments"
+          icon={ClipboardList}
+          label="Assignments"
+          stat="Create coursework, grade & track submissions"
+        />
         <QuickLinkCard
           to="/teacher/timetable"
           icon={CalendarClock}

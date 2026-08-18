@@ -100,12 +100,39 @@ DEMO_LOGINS = [
 #          = 0.30, negative remarks (avg compound ~-0.3) -> score ~0.32 -> MEDIUM -> FLAGGED.
 # That asymmetry is the point: the at-risk banner appears and disappears as you switch
 # child, which reads far better on stage than two identically-flagged children.
-ATTENDANCE_SCHOOL_DAYS = 30
+SEED_ANCHOR_DATE = date(2026, 8, 18)
+"""FIXED anchor for every date this script generates. Deliberately NOT date.today().
+
+Two bugs came from anchoring on today, and pinning fixes both at once:
+
+1. DRIFT. Rows are never deleted, so each run on a new weekday appended one more row at
+   pattern[-1] - "absent" for Diya, "present" for Aarav. The demo figures moved every
+   day, and the printed numbers stopped matching any checklist written the day before.
+
+2. WINDOW MISMATCH. ATTENDANCE_SCHOOL_DAYS was 30 SCHOOL days, which spans ~42 CALENDAR
+   days. But the risk scorer and the parent portal both look back
+   ATTENDANCE_LOOKBACK_DAYS = 30 CALENDAR days (routers/parent.py imports the very same
+   constant). The oldest third of the seeded window was therefore outside the window
+   that scores it, and this script's printed percentage could never agree with the one
+   the portal showed. ATTENDANCE_SCHOOL_DAYS is now sized to fit INSIDE the lookback.
+
+KEEP THIS WITHIN A FEW DAYS OF THE DEMO. A fixed anchor stops the drift but does not
+stop the calendar: once the whole window ages past ATTENDANCE_LOOKBACK_DAYS, the scorer
+sees zero attendance rows, scores attendance risk as 0.0 with no reason string, and
+Diya's flag quietly disappears. _warn_if_anchor_is_stale() prints a loud warning before
+that happens - re-pin this to today's date and re-run when it fires."""
+
+ATTENDANCE_SCHOOL_DAYS = 21
+"""21 weekdays back from the anchor spans ~27 calendar days, so the generated window
+sits inside ATTENDANCE_LOOKBACK_DAYS (30) with a few days of slack for the anchor to
+age before anything falls out. Was 30, which spanned ~42 days and overflowed it. Do not
+raise this above ~21 without also raising the scorer's lookback, or you reintroduce the
+mismatch described in SEED_ANCHOR_DATE."""
 
 # (present_count, absent_count, late_count) is NOT how these are built - the ORDER
 # matters. Diya's absences are deliberately clustered into the most recent run so the
 # feed shows a visible decline rather than a low average scattered through the term.
-AARAV_ATTENDANCE_PATTERN = ["present"] * 21 + ["late"] + ["present"] * 8
+AARAV_ATTENDANCE_PATTERN = ["present"] * 15 + ["late"] + ["present"] * 5
 """One late, no absences. Deliberately cleaner than it looks like it needs to be,
 because Aarav ALSO carries 5 real `source="cv"` rows from an actual CV-attendance run
 on 2026-08-15 - 5 period-level records for a single day, 4 of them absent. Those are
@@ -117,7 +144,10 @@ DAY-level, `cv` rows are PERIOD-level - so one heavily-absent CV day counts as m
 four absent days. That is a pre-existing modelling wrinkle, not something introduced
 here, but it is why Aarav's headline percentage is lower than a 30-day all-present
 pattern would suggest."""
-DIYA_ATTENDANCE_PATTERN = ["present"] * 18 + ["absent"] + ["present"] + ["absent"] * 10
+DIYA_ATTENDANCE_PATTERN = ["present"] * 11 + ["absent"] + ["present"] + ["absent"] * 8
+"""12 present / 21 = 57%, comfortably under the 90% threshold, with the 8 absences
+clustered at the recent end so the feed shows a visible decline. Resized from 30 to 21
+entries alongside ATTENDANCE_SCHOOL_DAYS - the ratio is what matters, not the length."""
 
 # 6 remarks each, from the teachers who genuinely teach Grade 3 - A (resolved from
 # timetable_slots at runtime, not hardcoded ids). Aarav skews positive, Diya negative.
@@ -242,7 +272,7 @@ def _get_or_create_fee_schedule(session: Session, school_id: int, counts: dict) 
 
     schedule = FeeSchedule(
         school_id=school_id, class_id=None, academic_year=ACADEMIC_YEAR,
-        fee_type=FEE_TYPE, amount=FEE_AMOUNT, due_date=date.today() - timedelta(days=DAYS_OVERDUE),
+        fee_type=FEE_TYPE, amount=FEE_AMOUNT, due_date=SEED_ANCHOR_DATE - timedelta(days=DAYS_OVERDUE),
     )
     session.add(schedule)
     session.flush()
@@ -761,14 +791,51 @@ def _get_or_create_doubt_logs(
 
 def _school_days_back(count: int, *, end: date | None = None) -> list[date]:
     """The last `count` weekdays, oldest first. Weekends skipped - attendance on a
-    Saturday would be obviously wrong to anyone reading the feed on stage."""
-    day = end or date.today()
+    Saturday would be obviously wrong to anyone reading the feed on stage.
+
+    Defaults to SEED_ANCHOR_DATE, not date.today() - see that constant for why."""
+    day = end or SEED_ANCHOR_DATE
     days: list[date] = []
     while len(days) < count:
         if day.weekday() < 5:
             days.append(day)
         day -= timedelta(days=1)
     return list(reversed(days))
+
+
+def _warn_if_anchor_is_stale() -> None:
+    """Fail LOUDLY when the anchor has drifted out of the scorer's lookback window.
+
+    The failure this guards against is silent: once every seeded row is older than
+    ATTENDANCE_LOOKBACK_DAYS, _attendance_component() sees total_records == 0, returns
+    (0.0, None), and Diya's risk flag is downgraded or resolved by the nightly scorer.
+    Nothing errors - the demo just quietly loses its best contrast, and the first time
+    anyone notices is on stage.
+    """
+    from scripts.run_nightly_risk_scoring import ATTENDANCE_LOOKBACK_DAYS
+
+    oldest = _school_days_back(ATTENDANCE_SCHOOL_DAYS)[0]
+    age = (date.today() - oldest).days
+    anchor_age = (date.today() - SEED_ANCHOR_DATE).days
+
+    if age > ATTENDANCE_LOOKBACK_DAYS:
+        lost = age - ATTENDANCE_LOOKBACK_DAYS
+        print(
+            f"\n!!! SEED_ANCHOR_DATE IS STALE ({SEED_ANCHOR_DATE}, {anchor_age} days ago) !!!\n"
+            f"    The oldest seeded school day is {age} calendar days old, but the risk\n"
+            f"    scorer and parent portal only look back {ATTENDANCE_LOOKBACK_DAYS} days.\n"
+            f"    Roughly {lost} day(s) of the window has fallen outside it, so the\n"
+            f"    attendance figures - and Diya's risk flag - are already degraded.\n"
+            f"    FIX: set SEED_ANCHOR_DATE to today's date and re-run.\n"
+        )
+    elif anchor_age > 2:
+        slack = ATTENDANCE_LOOKBACK_DAYS - age
+        print(
+            f"\n!   SEED_ANCHOR_DATE ({SEED_ANCHOR_DATE}) was pinned {anchor_age} days ago.\n"
+            f"    {slack} day(s) of slack left before the oldest seeded day falls outside\n"
+            f"    the {ATTENDANCE_LOOKBACK_DAYS}-day scoring window. Re-pin it to today\n"
+            f"    before the demo.\n"
+        )
 
 
 def _get_or_create_attendance(session: Session, student: User, class_id: int, pattern: list[str], counts: dict) -> int:
@@ -778,9 +845,19 @@ def _get_or_create_attendance(session: Session, student: User, class_id: int, pa
     day-level records, not tied to a generated period, so they stay valid regardless of
     whether POST /timetable/generate has been run. source="manual" matches the rows that
     already existed, so nothing here reads as fabricated CV output.
+
+    RECONCILES rather than skips. An earlier version returned early on any existing row,
+    which meant a changed pattern could never take effect: the days already had rows, so
+    the new statuses were silently ignored and the fixtures kept whatever a previous run
+    had written. Now an existing row's status is UPDATED to match the pattern.
+
+    Only ever inserts or updates - never deletes. Rows outside the anchored window
+    (including the genuine source="cv" rows from a real CV-attendance run) are left
+    completely alone.
     """
     days = _school_days_back(len(pattern))
     created = 0
+    updated = 0
     for day, status in zip(days, pattern):
         existing = (
             session.query(AttendanceRecord)
@@ -792,6 +869,9 @@ def _get_or_create_attendance(session: Session, student: User, class_id: int, pa
             .one_or_none()
         )
         if existing is not None:
+            if existing.status != status:
+                existing.status = status
+                updated += 1
             continue
         session.add(
             AttendanceRecord(
@@ -800,9 +880,12 @@ def _get_or_create_attendance(session: Session, student: User, class_id: int, pa
             )
         )
         created += 1
-    if created:
+    if created or updated:
         session.flush()
+    if created:
         counts["attendance_records"] = counts.get("attendance_records", 0) + created
+    if updated:
+        counts["attendance_records_realigned"] = counts.get("attendance_records_realigned", 0) + updated
     return created
 
 
@@ -1025,6 +1108,7 @@ def seed(session: Session, counts: dict) -> dict:
 
 
 def main() -> None:
+    _warn_if_anchor_is_stale()
     session = SessionLocal()
     counts: dict[str, int] = {}
     try:
@@ -1056,8 +1140,22 @@ def main() -> None:
         print(f"\nSeeded doubt logs created this run: {data['doubt_logs']}")
         print(f"Risk re-scoring (real nightly scorer): {data['scoring']}")
         print("\nParent-portal profiles:")
+        # SAME WINDOW THE PORTAL AND THE SCORER USE. This used to query every
+        # attendance row the student had ever accumulated, with no date filter at all,
+        # while GET /parent/child/{id}/summary and the nightly scorer both look back
+        # ATTENDANCE_LOOKBACK_DAYS. The numbers printed here under the heading
+        # "Parent-portal profiles" therefore could not agree with the parent portal -
+        # they counted rows the portal had already aged out. Anything printed here has
+        # to be computed the way the screen computes it, or it is worse than no output.
+        from scripts.run_nightly_risk_scoring import ATTENDANCE_LOOKBACK_DAYS as _LOOKBACK
+
+        _since = date.today() - timedelta(days=_LOOKBACK)
         for child in children:
-            att = session.query(AttendanceRecord).filter(AttendanceRecord.student_id == child.id).all()
+            att = (
+                session.query(AttendanceRecord)
+                .filter(AttendanceRecord.student_id == child.id, AttendanceRecord.date >= _since)
+                .all()
+            )
             present = sum(1 for a in att if a.status == "present")
             flag = (
                 session.query(RiskFlag)

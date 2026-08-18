@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.risk import RemarkStub
+from app.models.subject import Subject
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user
 from app.services.remark_sentiment import analyze_sentiment
@@ -99,3 +100,147 @@ def student_remarks(
             )
         )
     return RemarksResponse(items=items)
+
+
+# --- Person B Official Remarks Endpoints --------------------------------------------
+
+
+class SingleRemarkIn(BaseModel):
+    student_id: int
+    class_id: int
+    subject_id: int | None = None
+    content: str
+    sentiment_tag: str = "academic"  # academic, behavioral, appreciation
+
+
+class BulkRemarkItem(BaseModel):
+    student_id: int
+    content: str
+    sentiment_tag: str = "academic"
+
+
+class BulkRemarkRequest(BaseModel):
+    class_id: int
+    subject_id: int | None = None
+    remarks: list[BulkRemarkItem]
+
+
+class RemarkRecordOut(BaseModel):
+    id: int
+    student_id: int
+    student_name: str | None = None
+    author_id: int
+    author_name: str | None = None
+    class_id: int
+    subject_id: int | None = None
+    subject_name: str | None = None
+    content: str
+    sentiment_tag: str
+    created_at: datetime
+
+
+@router.post("/remarks", response_model=RemarkRecordOut, status_code=status.HTTP_201_CREATED)
+def create_remark(
+    body: SingleRemarkIn,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Teacher adds a single remark for a student."""
+    from app.models.remark import Remark
+    from app.services.remark_service import create_single_remark
+
+    r = create_single_remark(
+        db=db,
+        school_id=user.school_id or 1,
+        author_id=user.id,
+        student_id=body.student_id,
+        class_id=body.class_id,
+        content=body.content,
+        sentiment_tag=body.sentiment_tag,
+        subject_id=body.subject_id,
+    )
+
+    student = db.query(User).filter(User.id == r.student_id).first()
+    author = db.query(User).filter(User.id == r.author_id).first()
+    subj = db.query(Subject).filter(Subject.id == r.subject_id).first() if r.subject_id else None
+
+    return RemarkRecordOut(
+        id=r.id,
+        student_id=r.student_id,
+        student_name=student.full_name if student else None,
+        author_id=r.author_id,
+        author_name=author.full_name if author else None,
+        class_id=r.class_id,
+        subject_id=r.subject_id,
+        subject_name=subj.name if subj else None,
+        content=r.content,
+        sentiment_tag=r.sentiment_tag,
+        created_at=r.created_at,
+    )
+
+
+@router.post("/remarks/bulk")
+def create_bulk_remarks_endpoint(
+    body: BulkRemarkRequest,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Teacher creates remarks for multiple students in one batch request."""
+    from app.services.remark_service import create_bulk_remarks
+
+    raw_items = [
+        {"student_id": item.student_id, "content": item.content, "sentiment_tag": item.sentiment_tag}
+        for item in body.remarks
+    ]
+    created = create_bulk_remarks(
+        db=db,
+        school_id=user.school_id or 1,
+        author_id=user.id,
+        class_id=body.class_id,
+        remarks_data=raw_items,
+        subject_id=body.subject_id,
+    )
+    return {"status": "created", "count": len(created)}
+
+
+@router.get("/remarks/{student_id}", response_model=list[RemarkRecordOut])
+def get_student_remark_history(
+    student_id: int,
+    sentiment_tag: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """View chronological remark history for a student with optional sentiment filter."""
+    from app.models.remark import Remark
+
+    if user.role == "student" and user.id != student_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Cannot view another student's remarks")
+
+    query = db.query(Remark).filter(Remark.student_id == student_id)
+    if sentiment_tag:
+        query = query.filter(Remark.sentiment_tag == sentiment_tag.lower())
+
+    rows = query.order_by(Remark.created_at.desc()).all()
+
+    results = []
+    for r in rows:
+        student = db.query(User).filter(User.id == r.student_id).first()
+        author = db.query(User).filter(User.id == r.author_id).first()
+        subj = db.query(Subject).filter(Subject.id == r.subject_id).first() if r.subject_id else None
+        results.append(
+            RemarkRecordOut(
+                id=r.id,
+                student_id=r.student_id,
+                student_name=student.full_name if student else None,
+                author_id=r.author_id,
+                author_name=author.full_name if author else None,
+                class_id=r.class_id,
+                subject_id=r.subject_id,
+                subject_name=subj.name if subj else None,
+                content=r.content,
+                sentiment_tag=r.sentiment_tag,
+                created_at=r.created_at,
+            )
+        )
+    return results
+

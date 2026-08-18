@@ -8,8 +8,10 @@ hundred faces; it would not be for a growing curriculum corpus, so `kb_chunks` g
 real HNSW index - created via raw `op.execute` in the migration, since Alembic
 autogenerate does not emit pgvector index types.
 """
+from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
@@ -17,6 +19,12 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.class_ import SchoolClass
+    from app.models.school import School
+    from app.models.subject import Subject
+    from app.models.user import User
 
 EMBEDDING_DIM = 1536
 """Must equal services/llm.py::EMBEDDING_DIMENSIONS. Kept as a separate constant here
@@ -108,7 +116,7 @@ class ChatbotLog(Base):
     by one aggregation job, never searched by nearest-neighbour globally. An HNSW
     index would cost write throughput on every question asked and buy nothing."""
 
-    class_id: Mapped[int] = mapped_column(ForeignKey("classes.id"), nullable=False)
+    class_id: Mapped[int | None] = mapped_column(ForeignKey("classes.id"), nullable=True)
     subject_id: Mapped[int | None] = mapped_column(ForeignKey("subjects.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

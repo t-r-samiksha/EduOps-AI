@@ -8,34 +8,68 @@ from sqlalchemy.orm import sessionmaker
 
 load_dotenv()
 
-from app.database import get_db  # noqa: E402
+from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
 
-_engine = create_engine(os.environ["DATABASE_URL"])
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+try:
+    from pgvector.sqlalchemy import Vector
+
+    @compiles(Vector, "sqlite")
+    def _compile_vector_sqlite(type_, compiler, **kw):
+        return "BLOB"
+except ImportError:
+    pass
+
+from sqlalchemy.pool import StaticPool
+
+db_url = os.environ.get("DATABASE_URL", "")
+if not db_url or "your-project-ref" in db_url:
+    db_url = "sqlite:///:memory:"
+    _engine = create_engine(
+        db_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+else:
+    _engine = create_engine(db_url)
+
 _TestingSessionLocal = sessionmaker(bind=_engine)
 
 
 @pytest.fixture()
 def db_session():
-    """A session bound to a single connection/transaction that is rolled back after
-    the test, so tests can freely commit (as request-scoped app code does) against
-    the real Supabase DB without leaving data behind."""
-    connection = _engine.connect()
-    outer_transaction = connection.begin()
-    session = _TestingSessionLocal(bind=connection)
+    """A session bound to a transaction that rolls back after each test."""
+    if "sqlite" in str(_engine.url):
+        Base.metadata.create_all(bind=_engine)
+        session = _TestingSessionLocal()
+        try:
+            yield session
+        finally:
+            session.rollback()
+            session.close()
+    else:
+        connection = _engine.connect()
+        outer_transaction = connection.begin()
+        session = _TestingSessionLocal(bind=connection)
 
-    session.begin_nested()
+        session.begin_nested()
 
-    @event.listens_for(session, "after_transaction_end")
-    def _restart_savepoint(sess, transaction):
-        if transaction.nested and not transaction._parent.nested:
-            sess.begin_nested()
+        @event.listens_for(session, "after_transaction_end")
+        def _restart_savepoint(sess, transaction):
+            if transaction.nested and not transaction._parent.nested:
+                sess.begin_nested()
 
-    yield session
+        yield session
 
-    session.close()
-    outer_transaction.rollback()
-    connection.close()
+        session.close()
+        outer_transaction.rollback()
+        connection.close()
 
 
 @pytest.fixture()

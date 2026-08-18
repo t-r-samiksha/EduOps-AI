@@ -51,3 +51,11 @@ Thumbs.db
 
 .claude/
 CLAUDE.md
+
+# Local SQLite scratch DB used by some backend tests. backend/test_eduops.db is
+# already tracked (committed on the person-B branch) - this only stops NEW copies
+# from being added. To stop git showing churn on the tracked one:
+#   git update-index --skip-worktree backend/test_eduops.db
+# Removing the tracked file is Person B's call, not something the merge did.
+*.db
+!backend/test_eduops.db

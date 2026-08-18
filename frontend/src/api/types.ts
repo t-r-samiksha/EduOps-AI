@@ -1191,3 +1191,195 @@ export interface ChildSummary {
   fees: ChildSummaryFee[];
   upcoming: { type: string; title: string; date: string }[];
 }
+
+// --- Classroom Stream (Person B) --------------------------------------------
+
+export type PostType = "note" | "announcement" | "material";
+
+export interface PostAttachment {
+  id: number;
+  post_id: number;
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  file_size: number;
+  created_at: string;
+}
+
+export interface PostAuthor {
+  id: number;
+  full_name: string | null;
+  email: string | null;
+  role?: string | null;
+}
+
+export interface StreamPost {
+  id: number;
+  classroom_id: number;
+  author_id: number;
+  author: PostAuthor | null;
+  post_type: PostType;
+  title: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+  attachments: PostAttachment[];
+}
+
+export interface Classroom {
+  id: number;
+  school_id: number;
+  class_id: number;
+  class_name: string;
+  subject_id: number;
+  subject_name: string | null;
+  teacher_id: number;
+  teacher_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StreamResponse {
+  classroom: Classroom;
+  items: StreamPost[];
+}
+
+export interface CreateAttachmentInput {
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  file_size: number;
+}
+
+export interface CreatePostRequest {
+  post_type: PostType;
+  title: string;
+  content: string;
+  attachments?: CreateAttachmentInput[];
+}
+
+export interface UploadAttachmentResponse {
+  file_name: string;
+  file_url: string;
+  file_type: string;
+  file_size: number;
+}
+
+// --- Resources Library (Person B) -------------------------------------------
+
+export interface ResourceItem {
+  id: number;
+  title: string;
+  description: string | null;
+  unit: string | null;
+  school_id: number;
+  grade_level: number;
+  class_id: number | null;
+  class_name: string | null;
+  subject_id: number | null;
+  subject_name: string | null;
+  teacher_id: number;
+  teacher_name: string | null;
+  file_url: string;
+  mime_type: string;
+  file_size: number;
+  needs_reindex: boolean;
+  indexed_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface ResourceUploadResponse extends ResourceItem {
+  chunk_count: number;
+}
+
+export interface ResourceListResponse {
+  items: ResourceItem[];
+}
+
+export interface UnitsListResponse {
+  units: string[];
+}
+
+export interface ResourceFilters {
+  class_id?: number;
+  grade_level?: number;
+  subject_id?: number;
+  unit?: string;
+  file_type?: string;
+  q?: string;
+}
+
+// --- Assignments & Submissions (Person B) -----------------------------------
+
+export type SubmissionStatus = "submitted" | "late" | "missing" | "graded" | "pending";
+
+export interface SubmissionItem {
+  id: number;
+  assignment_id: number;
+  student_id: number;
+  student_name: string | null;
+  student_email: string | null;
+  file_url: string | null;
+  file_name: string | null;
+  file_size: number;
+  grade: number | null;
+  feedback: string | null;
+  status: SubmissionStatus;
+  submitted_at: string | null;
+  graded_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssignmentStats {
+  enrolled_count: number;
+  submitted_count: number;
+  late_count: number;
+  missing_count: number;
+  graded_count: number;
+  average_grade: number | null;
+}
+
+export interface AssignmentItem {
+  id: number;
+  school_id: number;
+  class_id: number;
+  class_name: string | null;
+  subject_id: number | null;
+  subject_name: string | null;
+  teacher_id: number;
+  teacher_name: string | null;
+  title: string;
+  description: string | null;
+  deadline: string;
+  max_marks: number;
+  attachment_url: string | null;
+  attachment_name: string | null;
+  created_at: string;
+  updated_at: string;
+  stats?: AssignmentStats | null;
+  my_submission?: SubmissionItem | null;
+}
+
+export interface CreateAssignmentRequest {
+  class_id: number;
+  subject_id?: number;
+  title: string;
+  description?: string;
+  deadline: string;
+  max_marks?: number;
+  attachment_url?: string;
+  attachment_name?: string;
+}
+
+export interface SubmitAssignmentRequest {
+  file_url: string;
+  file_name?: string;
+  file_size?: number;
+}
+
+export interface GradeSubmissionRequest {
+  grade: number;
+  feedback?: string;
+}

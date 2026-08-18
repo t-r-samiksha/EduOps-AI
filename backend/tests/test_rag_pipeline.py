@@ -613,3 +613,101 @@ def test_student_requesting_another_grade_gets_403_not_empty_list(client, rag_se
 def test_resources_router_requires_authentication(client):
     """One 401 test for the router is enough (per the testing amendment)."""
     assert client.get("/resources").status_code == 401
+
+
+# --- MERGE REGRESSIONS: person-B branch integration ------------------------------
+
+
+def test_teacher_search_verified_answer_never_inherits_a_resource_title(db_session, rag_seed):
+    """REGRESSION (merge `akshaya` -> `samiksha`, HD-3).
+
+    Mirror of test_verified_answer_chunk_never_inherits_a_resource_title above, for
+    the Teacher Assistant Bot's retrieval path. `search_chunks_for_teacher` was added
+    on the person-B branch against the pre-`source_type` schema and joined on
+    `Resource.id == KbChunk.source_id` alone, so a verified_doubt_answer chunk whose
+    source_id collided with a real resource id inherited that resource's title and the
+    Teacher Bot cited a teacher's reply under an unrelated document's name.
+
+    Same construction as the student-side test: the collision is made certain by
+    pointing the verified-answer chunk's source_id at a REAL resource's id.
+    """
+    from app.models.knowledge import SOURCE_TYPE_VERIFIED_DOUBT_ANSWER
+    from app.services.retrieval import search_chunks_for_teacher
+
+    resource = Resource(
+        title="Grade 3 Photosynthesis Notes.pdf",
+        file_url="resources/test/photosynthesis.pdf",
+        mime_type="application/pdf",
+        school_id=rag_seed["school"].id,
+        grade_level=3,
+        uploaded_by=rag_seed["teacher"].id,
+    )
+    db_session.add(resource)
+    db_session.flush()
+
+    shared = _unit_vector(axis=0)
+    db_session.add_all([
+        KbChunk(source_type=SOURCE_TYPE_RESOURCE, source_id=resource.id, chunk_index=0,
+                chunk_text="photosynthesis converts light into chemical energy",
+                embedding=shared, school_id=rag_seed["school"].id, grade_level=3),
+        # Deliberately shares that integer as its source_id.
+        KbChunk(source_type=SOURCE_TYPE_VERIFIED_DOUBT_ANSWER, source_id=resource.id, chunk_index=0,
+                chunk_text="Question: do plants breathe? Answer: they exchange gases through stomata.",
+                embedding=_unit_vector(axis=1), school_id=rag_seed["school"].id, grade_level=3),
+    ])
+    db_session.commit()
+
+    hits = search_chunks_for_teacher(
+        db_session,
+        query_embedding=shared,
+        school_id=rag_seed["school"].id,
+        grade_levels=[3],
+        top_k=5,
+    )
+    by_text = {h.chunk_text[:20]: h for h in hits}
+    assert len(hits) == 2
+
+    # The genuine resource chunk still resolves its title - the fix is not "stop joining".
+    resource_hit = next(h for h in hits if h.source_id == resource.id and "photosynthesis" in h.chunk_text)
+    assert resource_hit.title == "Grade 3 Photosynthesis Notes.pdf"
+
+    # The verified answer must NOT wear the resource's title.
+    answer_hit = next(h for h in hits if "stomata" in h.chunk_text)
+    assert answer_hit.title != "Grade 3 Photosynthesis Notes.pdf"
+
+
+def test_extract_text_raises_on_an_unreadable_pdf_rather_than_returning_empty():
+    """REGRESSION (merge `akshaya` -> `samiksha`, HD-2).
+
+    The person-B branch wrapped PDF parsing in `except Exception: return ""`. That
+    turned an unreadable file into a successful zero-chunk ingestion: ingest_resource
+    stamps `indexed_at`, so the nightly re-index job (which selects `indexed_at IS
+    NULL`) never retries it, and the resource is permanently invisible to every bot
+    with no error logged anywhere.
+
+    extract_text must let the parse failure propagate so the upload endpoint can turn
+    it into a 422 the teacher can act on.
+    """
+    from app.services.ingestion import extract_text
+
+    garbage = b"%PDF-1.4\nthis is not actually a parseable pdf body"
+    with pytest.raises(Exception):
+        extract_text(garbage, mime_type="application/pdf", filename="scan.pdf")
+
+
+def test_extract_text_returns_empty_for_images_without_raising():
+    """The counterpart to the test above: images legitimately carry no text layer and
+    are not OCR'd here, so empty is the CORRECT answer for them - not a swallowed
+    failure. This is Person B's image-upload path and must keep working."""
+    from app.services.ingestion import extract_text
+
+    assert extract_text(b"\x89PNG\r\n\x1a\n", mime_type="image/png", filename="diagram.png") == ""
+
+
+def test_extract_text_strips_nul_bytes_postgres_rejects():
+    """Postgres `text` rejects NUL bytes outright, so a document carrying one would
+    fail the kb_chunks INSERT rather than the extraction. Kept from the person-B
+    branch, which fixed this."""
+    from app.services.ingestion import extract_text
+
+    assert "\x00" not in extract_text(b"alpha\x00beta", mime_type="text/plain", filename="n.txt")

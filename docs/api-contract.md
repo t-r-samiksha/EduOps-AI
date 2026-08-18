@@ -2438,6 +2438,66 @@ _Owns: assignments, quizzes, gradebook, report cards, library, homework calendar
 This section is Person B's to extend — add/adjust endpoints here without touching
 Person A/C's sections.
 
+> ### ⚠️ THIS SECTION IS THE SPEC, NOT THE BUILD — paths below differ from the code
+>
+> Recorded during the `akshaya` → `samiksha` merge (2026-08-18). The endpoints
+> documented in this section were specified before implementation and **the shipped
+> routes use different paths**. Both are kept here deliberately: the spec shapes
+> because they record the intended design, the as-built table because that is what
+> actually answers a request today.
+>
+> **If you are calling the API, use the as-built column.** Verified against
+> `app/routers/*.py` on the merged branch, not from documentation.
+>
+> | This section documents | As built (use this) |
+> |---|---|
+> | `POST /classroom/{class_id}/assignments` | `POST /assignments` |
+> | `GET /classroom/{class_id}/assignments` | `GET /assignments/{class_id}` |
+> | `POST /assignments/{id}/submissions` | `POST /assignments/{assignment_id}/submit` |
+> | `POST /assignments/{id}/submissions/{submission_id}/grade` | `PUT /assignments/{assignment_id}/grade/{submission_id}` |
+> | `POST /gradebook/entries` | `POST /gradebook/entry` |
+> | `GET /classroom/{class_id}/stream` | `GET /classroom/{classroom_id}/stream` |
+> | `POST /classroom/{class_id}/stream` | `POST /classroom/{classroom_id}/post` |
+>
+> Full as-built route list for this domain (49 routes), by router:
+>
+> - **assignments** — `POST /assignments`, `GET /assignments`, `GET /assignments/{class_id}`,
+>   `GET /assignments/detail/{assignment_id}`, `DELETE /assignments/{assignment_id}`,
+>   `POST /assignments/{assignment_id}/upload`, `POST /assignments/{assignment_id}/submit`,
+>   `GET /assignments/{assignment_id}/submissions`,
+>   `PUT /assignments/{assignment_id}/grade/{submission_id}`,
+>   `POST /assignments/{assignment_id}/nudge/{student_id}`,
+>   `POST /assignments/{assignment_id}/nudge-missing`
+> - **classroom** — `GET /classroom/my-classrooms`, `POST /classroom`,
+>   `GET /classroom/{classroom_id}`, `GET /classroom/{classroom_id}/stream`,
+>   `POST /classroom/{classroom_id}/post`, `DELETE /classroom/{classroom_id}/post/{post_id}`,
+>   `POST /classroom/{classroom_id}/upload`
+> - **gradebook** — `POST /gradebook/entry`, `POST /gradebook/bulk`,
+>   `GET /gradebook/{student_id}`, `GET /gradebook/class/{class_id}`,
+>   `GET /gradebook/config/weights`, `PUT /gradebook/config/weights`
+> - **quizzes** — `POST /quizzes`, `GET /quizzes`, `GET /quizzes/detail/{quiz_id}`,
+>   `POST /quizzes/{quiz_id}/attempt`, `GET /quizzes/{quiz_id}/results`
+> - **report_cards** — `POST /report_cards/generate/{student_id}`,
+>   `POST /report_cards/bulk-generate/{class_id}`, `GET /report_cards/{student_id}`,
+>   `GET /report_cards/detail/{report_card_id}`
+> - **library** — `GET /library/catalog`, `POST /library/items`, `POST /library/issue`,
+>   `PUT /library/return/{loan_id}`, `GET /library/my-loans/{student_id}`, `GET /library/loans`
+> - **calendar** — `GET /calendar/homework/{student_id}`, `GET /calendar/{user_id}`,
+>   `POST /calendar/sync`
+> - **analytics** — `GET /analytics/student/{student_id}`
+> - **resources** — `GET /resources/units`, `GET /resources/{class_id}`,
+>   `DELETE /resources/{resource_id}` (added alongside Person A/C's existing
+>   `POST /resources/upload` and `GET /resources`)
+> - **remarks** — `POST /remarks`, `POST /remarks/bulk`, `GET /remarks/{student_id}`
+> - **bots** — `POST /bots/teacher/ask`
+>
+> **`/remarks` is not a collision.** `GET /remarks/{student_id}` (Person B, table
+> `remarks`) and `GET /remarks/student/{student_id}` (Person A/C, table
+> `remark_stubs`) are different paths with different segment counts and cannot shadow
+> each other. They are also backed by two tables that nothing synchronises — see
+> `docs/audit/remarks-disconnect.md` before assuming a remark written through one is
+> readable through the other.
+
 ### Classroom stream
 
 #### `GET /classroom/{class_id}/stream`
@@ -3149,9 +3209,35 @@ Global search across announcements, resources, and people.
 - **Roles:** any authenticated
 - **Query:** `?q=&type=&page=`
 - **Response:**
+#### `POST /bots/teacher/ask`
+Teacher Assistant Bot endpoint for lesson planning, quiz/MCQ generation, curriculum Q&A, and student performance summaries grounded in school RAG resources.
+- **Roles:** `teacher`, `admin`, `principal`
+- **Request:**
 ```json
-{ "items": [ { "type": "announcement", "id": 5, "title": "Sports day", "snippet": "..." } ], "total": 1, "page": 1, "page_size": 20 }
+{
+  "query": "Create 5 MCQs from Physics Unit 1",
+  "grade_level": 9,
+  "subject_id": 2,
+  "class_id": 10,
+  "mode": "quiz"
+}
 ```
+- **Response:**
+```json
+{
+  "answer": "Here are 5 MCQs based on Physics Unit 1:\n\n**Question 1**\nWhat is Newton's First Law also known as?\nA. Law of Acceleration\nB. Law of Inertia\nC. Law of Action-Reaction\nD. Law of Gravitation\n\n*Correct Answer:* B\n*Explanation:* Newton's first law states that an object remains at rest or in uniform motion unless acted upon by an external force (Inertia).\n...",
+  "citations": [
+    {
+      "chunk_id": 101,
+      "source_id": 15,
+      "title": "Physics Unit 1 Notes",
+      "snippet": "Newton's first law of motion: A body continues in its state of rest or uniform motion..."
+    }
+  ],
+  "mode": "quiz"
+}
+```
+- **Errors:** `400` on empty query; `403` if teacher accesses unauthorized grades or classes.
 
 ## Open questions
 

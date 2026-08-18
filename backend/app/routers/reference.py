@@ -82,19 +82,23 @@ def _users_by_role(db: Session, school_id: int, role_name: str) -> list[User]:
 
 @router.get("/lookup", response_model=LookupResponse)
 def get_lookup(
-    school_id: int,
+    school_id: int | None = None,
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    target_school_id = school_id or user.school_id
+    if not target_school_id:
+        return LookupResponse(subjects=[], teachers=[], students=[], rooms=[], classes=[])
+
     # Deactivated master-data rows are excluded everywhere below - this is what
     # makes master_data.py/teachers.py's "deactivate" endpoints actually mean
     # something end to end, rather than just flipping a column nothing reads.
-    subjects = db.query(Subject).filter(Subject.school_id == school_id, Subject.is_active.is_(True)).all()
-    teachers = _users_by_role(db, school_id, "teacher")
-    students = _users_by_role(db, school_id, "student")
-    rooms = db.query(Room).filter(Room.school_id == school_id, Room.is_active.is_(True)).all()
+    subjects = db.query(Subject).filter(Subject.school_id == target_school_id, Subject.is_active.is_(True)).all()
+    teachers = _users_by_role(db, target_school_id, "teacher")
+    students = _users_by_role(db, target_school_id, "student")
+    rooms = db.query(Room).filter(Room.school_id == target_school_id, Room.is_active.is_(True)).all()
     classes = (
-        db.query(SchoolClass).filter(SchoolClass.school_id == school_id, SchoolClass.is_active.is_(True)).all()
+        db.query(SchoolClass).filter(SchoolClass.school_id == target_school_id, SchoolClass.is_active.is_(True)).all()
     )
 
     teacher_ids = [t.id for t in teachers]

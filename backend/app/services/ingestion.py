@@ -40,7 +40,7 @@ PDF_MIME_TYPES = {"application/pdf"}
 
 def extract_text(raw: bytes, *, mime_type: str, filename: str = "") -> str:
     """Bytes -> plain text, by type. Plain text/markdown pass through; PDFs go through
-    pypdf's per-page text extraction.
+    pypdf's per-page text extraction. Images return empty text.
 
     PDF SUPPORT IS TEXT-LAYER ONLY. pypdf reads the text a PDF already carries; it does
     NOT do OCR. A scanned PDF (pages that are images of text) extracts to nothing, and
@@ -48,7 +48,19 @@ def extract_text(raw: bytes, *, mime_type: str, filename: str = "") -> str:
     empty resource. This project does have a Tesseract OCR pipeline
     (services/ocr_engine.py), but it targets the separate `documents` admin flow and is
     not wired in here - bridging the two is real work, not a one-liner.
+
+    DO NOT WRAP THE PARSE IN `except Exception: return ""`. Returning empty text on a
+    malformed PDF makes ingest_resource() stamp `indexed_at` and produce zero chunks, so
+    the resource is marked "done", is invisible to every bot, and the nightly re-index
+    job (which selects `indexed_at IS NULL`) never retries it. The teacher sees
+    201 Created and nothing else, forever. Let the parse raise and let the upload
+    endpoint turn it into a 422 the caller can act on.
     """
+    if mime_type.startswith("image/"):
+        # Images carry no text layer and are not OCR'd here (see the docstring). Empty
+        # is the CORRECT answer for them, not a swallowed failure.
+        return ""
+
     if mime_type in PDF_MIME_TYPES or filename.lower().endswith(".pdf"):
         import io
 
@@ -58,9 +70,11 @@ def extract_text(raw: bytes, *, mime_type: str, filename: str = "") -> str:
         # Page-joined with blank lines so chunk_text's paragraph-preferring splitter
         # treats a page boundary as a natural break point.
         pages = [(page.extract_text() or "").strip() for page in reader.pages]
-        return "\n\n".join(p for p in pages if p)
+        # NUL bytes are stripped because Postgres `text` rejects them outright - a PDF
+        # carrying one would fail the kb_chunks INSERT, not the extraction.
+        return "\n\n".join(p for p in pages if p).replace("\x00", "")
 
-    return raw.decode("utf-8", errors="replace")
+    return raw.decode("utf-8", errors="replace").replace("\x00", "")
 
 
 CHUNK_TARGET_TOKENS = 500
@@ -130,6 +144,7 @@ def ingest_resource(db: Session, resource_id: int) -> int:
     text = extract_text(raw, mime_type=resource.mime_type, filename=resource.file_url)
     chunks = chunk_text(text)
     if not chunks:
+        resource.needs_reindex = False
         resource.indexed_at = datetime.now(timezone.utc)
         return 0
 
@@ -176,6 +191,7 @@ def ingest_resource(db: Session, resource_id: int) -> int:
         if index >= len(chunks):
             db.delete(row)
 
+    resource.needs_reindex = False
     resource.indexed_at = datetime.now(timezone.utc)
     db.flush()
     return len(chunks)

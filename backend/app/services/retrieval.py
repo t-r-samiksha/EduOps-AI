@@ -205,3 +205,53 @@ def search_chunks(
         )
         for chunk, dist, resource_title, thread_title, verifier_name, verifier_email in rows
     ]
+
+
+def search_chunks_for_teacher(
+    db: Session,
+    *,
+    query_embedding: list[float],
+    school_id: int,
+    grade_levels: list[int] | None = None,
+    subject_id: int | None = None,
+    top_k: int = DEFAULT_TOP_K,
+) -> list[RetrievedChunk]:
+    """Top-k nearest chunks for a teacher, scoped to their school and taught grade levels.
+
+    Tenant isolation is enforced strictly: school_id is ALWAYS filtered. If grade_levels
+    are provided (from teacher's timetable qualifications), retrieval is limited to those
+    grades.
+    """
+    distance = KbChunk.embedding.cosine_distance(query_embedding)
+    query = (
+        db.query(KbChunk, distance.label("distance"), Resource.title)
+        # THE source_type CONDITION IS LOAD-BEARING, not defensive tidiness - same
+        # reasoning as search_chunks() above. `source_id` is only meaningful together
+        # with `source_type`: a verified-doubt-answer chunk with source_id=12 would
+        # otherwise join to Resource id=12, an unrelated document, and this function
+        # would hand the Teacher Bot that resource's title as the citation for text
+        # that never came from it.
+        .outerjoin(
+            Resource,
+            and_(Resource.id == KbChunk.source_id, KbChunk.source_type == SOURCE_TYPE_RESOURCE),
+        )
+        .filter(KbChunk.school_id == school_id)
+    )
+    if grade_levels:
+        query = query.filter(KbChunk.grade_level.in_(grade_levels))
+    if subject_id is not None:
+        query = query.filter(KbChunk.subject_id == subject_id)
+
+    rows = query.order_by(distance).limit(top_k).all()
+    return [
+        RetrievedChunk(
+            chunk_id=chunk.id,
+            source_id=chunk.source_id,
+            chunk_text=chunk.chunk_text,
+            distance=float(dist),
+            title=title,
+            subject_id=chunk.subject_id,
+        )
+        for chunk, dist, title in rows
+    ]
+

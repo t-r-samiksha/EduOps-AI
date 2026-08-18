@@ -53,8 +53,28 @@ class Intervention(Base):
 class RemarkStub(Base):
     """PLACEHOLDER TABLE - not the real thing.
 
-    Person B owns the actual gradebook/report-card/remarks system, which doesn't
-    exist in this repo yet. There's nowhere real for a "teacher remark" to live, and
+    *** NOT WIRED TO models/remark.py's `Remark` (table `remarks`). READ THIS FIRST. ***
+    Since the person-B merge, TWO remark tables exist and NOTHING SYNCHRONISES THEM:
+
+      - `remark_stubs` (this table) is what the READ side uses: the parent portal
+        remarks feed, the Parent Assistant Bot's qualitative summary, the nightly risk
+        scorer's sentiment input, and GET /remarks/student/{student_id}. Sentiment is
+        computed per request by services/remark_sentiment.py (VADER) - there is no
+        sentiment column here, deliberately, so the scorer's thresholds can change
+        without a backfill.
+      - `remarks` is what the WRITE side uses: POST /remarks and POST /remarks/bulk
+        (Person B's BulkRemarksPage), read back only by GET /remarks/{student_id}.
+        It carries a hand-picked `sentiment_tag` string, never a computed score.
+
+    So a remark a teacher files through Person B's UI does NOT appear in the parent
+    feed, does NOT reach the Parent Bot, and does NOT affect risk scoring. That is a
+    known, accepted deferral, not a bug to fix by pointing one at the other casually -
+    both read paths are demo-critical. See docs/audit/merge-01-conflicts.md (D-1) and
+    docs/audit/remarks-disconnect.md before changing either.
+
+    Person B's gradebook/report-card/remarks system now DOES exist in this repo (it
+    did not when this table was written). There's still nowhere real for the scorer's
+    remark text to live, and
     the early-warning scorer needs *some* remark text to run sentiment analysis
     against to be genuinely testable end-to-end (not just against hardcoded strings
     in a unit test). This table exists ONLY to hold synthetic seeded remark text for
