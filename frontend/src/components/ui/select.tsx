@@ -1,6 +1,6 @@
 import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const Select = SelectPrimitive.Root;
@@ -27,6 +27,39 @@ const SelectTrigger = React.forwardRef<
 ));
 SelectTrigger.displayName = SelectPrimitive.Trigger.displayName;
 
+/** Arrows Radix shows only when the list actually overflows.
+ *
+ * They are the affordance that replaces a scrollbar here - scrollbars are hidden app-wide
+ * (see index.css), and a long list with no visible cue that it continues is how the clipped
+ * dropdown went unnoticed in the first place. */
+const SelectScrollUpButton = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.ScrollUpButton>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.ScrollUpButton>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.ScrollUpButton
+    ref={ref}
+    className={cn("flex cursor-default items-center justify-center py-1 text-ink-muted", className)}
+    {...props}
+  >
+    <ChevronUp className="h-4 w-4" />
+  </SelectPrimitive.ScrollUpButton>
+));
+SelectScrollUpButton.displayName = SelectPrimitive.ScrollUpButton.displayName;
+
+const SelectScrollDownButton = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.ScrollDownButton>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.ScrollDownButton>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.ScrollDownButton
+    ref={ref}
+    className={cn("flex cursor-default items-center justify-center py-1 text-ink-muted", className)}
+    {...props}
+  >
+    <ChevronDown className="h-4 w-4" />
+  </SelectPrimitive.ScrollDownButton>
+));
+SelectScrollDownButton.displayName = SelectPrimitive.ScrollDownButton.displayName;
+
 const SelectContent = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
@@ -36,13 +69,38 @@ const SelectContent = React.forwardRef<
       ref={ref}
       position={position}
       className={cn(
-        "z-50 min-w-[8rem] overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-elevated",
+        // max-h + a scrollable viewport. WITHOUT THESE THE LIST WAS SIMPLY CUT OFF: the
+        // content had `overflow-hidden` and no height limit, so a 30-student roster grew
+        // taller than the window, Radix positioned it past the top edge, and the overflow
+        // was clipped with no way to reach it - not scrollable, not reachable by keyboard
+        // paging, just gone. Found on the attendance Enroll-student picker.
+        //
+        // --radix-select-content-available-height is the space Radix measured between the
+        // trigger and the viewport edge, so the list uses whatever room actually exists
+        // rather than a guessed pixel value that is wrong on short screens.
+        "z-50 max-h-[var(--radix-select-content-available-height)] min-w-[8rem]",
+        "overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-elevated",
         position === "popper" && "translate-y-1",
         className
       )}
       {...props}
     >
-      <SelectPrimitive.Viewport className="p-1">{children}</SelectPrimitive.Viewport>
+      <SelectScrollUpButton />
+      <SelectPrimitive.Viewport
+        className={cn(
+          "p-1",
+          // show-scrollbar deliberately opts back IN to a visible bar (index.css hides them
+          // globally). This is the case that utility exists for: a list you must scroll to
+          // reach an item, where a hidden bar leaves no hint the rest is there.
+          "max-h-[var(--radix-select-content-available-height)] overflow-y-auto show-scrollbar",
+          // popper mode: match the trigger's width so the list lines up under it instead of
+          // shrinking to its longest item.
+          position === "popper" && "w-full min-w-[var(--radix-select-trigger-width)]"
+        )}
+      >
+        {children}
+      </SelectPrimitive.Viewport>
+      <SelectScrollDownButton />
     </SelectPrimitive.Content>
   </SelectPrimitive.Portal>
 ));
@@ -70,4 +128,13 @@ const SelectItem = React.forwardRef<
 ));
 SelectItem.displayName = SelectPrimitive.Item.displayName;
 
-export { Select, SelectGroup, SelectValue, SelectTrigger, SelectContent, SelectItem };
+export {
+  Select,
+  SelectGroup,
+  SelectValue,
+  SelectTrigger,
+  SelectContent,
+  SelectItem,
+  SelectScrollUpButton,
+  SelectScrollDownButton,
+};
