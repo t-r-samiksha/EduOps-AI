@@ -29,22 +29,98 @@ def _to_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _norm(value):
+    """Compares stored vs derived field values across the naive/aware boundary.
+
+    calendar_events.start_time is timestamptz, so Postgres hands back aware datetimes
+    while a freshly-derived value can be naive (Exam combines a date with a time-of-day
+    column). Comparing those raises TypeError; comparing them as strings would report every
+    event as changed on every sync. Naive is treated as UTC, which is what _to_utc assumes.
+    """
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _reconcile(
+    db: Session, user: User, source_type: str, desired: dict[int, dict]
+) -> tuple[int, int, int]:
+    """Makes this user's events for one source_type match `desired` exactly.
+
+    THREE-WAY, not insert-only. The previous version only ever added rows, so:
+      - a rescheduled deadline kept its OLD calendar slot forever (the row existed, so the
+        `if not existing` branch was skipped and nothing updated it);
+      - a deleted assignment or quiz left its event behind permanently;
+      - a student unenrolled from a class kept seeing that class's work, because
+        entitlement is expressed by `desired` being rebuilt from current enrollment.
+
+    Only rows matching this exact (user, source_type) are considered, so manually-created
+    events - which carry no source_type this function owns - are never touched.
+    """
+    existing = {
+        ev.source_id: ev
+        for ev in db.query(CalendarEvent)
+        .filter(CalendarEvent.user_id == user.id, CalendarEvent.source_type == source_type)
+        .all()
+    }
+    created = updated = deleted = 0
+
+    for source_id, fields in desired.items():
+        ev = existing.pop(source_id, None)
+        if ev is None:
+            db.add(
+                CalendarEvent(
+                    school_id=user.school_id,
+                    user_id=user.id,
+                    source_id=source_id,
+                    source_type=source_type,
+                    **fields,
+                )
+            )
+            created += 1
+            continue
+        drift = [k for k, v in fields.items() if _norm(getattr(ev, k)) != _norm(v)]
+        if drift:
+            for k in drift:
+                setattr(ev, k, fields[k])
+            updated += 1
+
+    # Whatever is left in `existing` has no live source row (or the user lost access to
+    # it), so it is stale by definition.
+    for ev in existing.values():
+        db.delete(ev)
+        deleted += 1
+
+    return created, updated, deleted
+
+
 def sync_user_calendar(
     db: Session,
     user_id: int,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
 ) -> dict[str, int]:
-    """Idempotently syncs timetable slots, exams, assignments, and quizzes for a user."""
+    """Reconciles a user's calendar against assignments, quizzes and exams.
+
+    Idempotent AND convergent: reruns after a source row is edited or deleted bring the
+    calendar back in line, rather than only ever adding. See _reconcile.
+    """
     user = db.query(User).filter(User.id == user_id).one_or_none()
     if not user:
-        return {"created": 0, "updated": 0}
+        # Same keys as the success path. This used to return {"created","updated"} while
+        # the success path returned {"synced_events"}, so a caller reading either key
+        # raised KeyError on whichever branch it did not expect.
+        return {"synced_events": 0, "created": 0, "updated": 0, "deleted": 0}
 
     now = datetime.now(timezone.utc)
-    start = start_date or (now - timedelta(days=7))
-    end = end_date or (now + timedelta(days=60))
+    # start_date/end_date are accepted for call-site compatibility but deliberately do NOT
+    # filter the source queries. GET /calendar/{user_id} already windows its own read, and
+    # narrowing the sources here would make _reconcile treat every event outside the window
+    # as stale and delete it - so a default-window sync would erase the far-future events a
+    # wider sync had just created.
+    _ = (start_date, end_date)
 
-    events_synced = 0
+    created = updated = deleted = 0
 
     # 1. Sync Assignment Deadlines
     if user.role.name == "student":
@@ -64,32 +140,20 @@ def sync_user_calendar(
             .all()
         )
 
+    desired_assignments = {}
     for a in assignments:
         dl_utc = _to_utc(a.deadline)
-        # 1-hour event block for deadline
-        existing = (
-            db.query(CalendarEvent)
-            .filter(
-                CalendarEvent.user_id == user.id,
-                CalendarEvent.source_type == "assignment",
-                CalendarEvent.source_id == a.id,
-            )
-            .first()
-        )
-        if not existing:
-            ev = CalendarEvent(
-                school_id=user.school_id,
-                user_id=user.id,
-                event_type="assignment",
-                title=f"Due: {a.title}",
-                subject_id=a.subject_id,
-                start_time=dl_utc - timedelta(hours=1),
-                end_time=dl_utc,
-                source_id=a.id,
-                source_type="assignment",
-            )
-            db.add(ev)
-            events_synced += 1
+        desired_assignments[a.id] = {
+            "event_type": "assignment",
+            "title": f"Due: {a.title}",
+            "subject_id": a.subject_id,
+            "start_time": dl_utc - timedelta(hours=1),  # 1-hour block before the deadline
+            "end_time": dl_utc,
+        }
+    c, u, d = _reconcile(db, user, "assignment", desired_assignments)
+    created += c
+    updated += u
+    deleted += d
 
     # 2. Sync Quiz Windows
     if user.role.name == "student":
@@ -105,73 +169,54 @@ def sync_user_calendar(
             .all()
         )
 
+    desired_quizzes = {}
     for q in quizzes:
-        start_t = _to_utc(q.available_from) if q.available_from else (now)
+        start_t = _to_utc(q.available_from) if q.available_from else now
         end_t = _to_utc(q.available_until) if q.available_until else (start_t + timedelta(hours=2))
-
-        existing = (
-            db.query(CalendarEvent)
-            .filter(
-                CalendarEvent.user_id == user.id,
-                CalendarEvent.source_type == "quiz",
-                CalendarEvent.source_id == q.id,
-            )
-            .first()
-        )
-        if not existing:
-            ev = CalendarEvent(
-                school_id=user.school_id,
-                user_id=user.id,
-                event_type="quiz",
-                title=f"Quiz: {q.title}",
-                subject_id=q.subject_id,
-                start_time=start_t,
-                end_time=end_t,
-                source_id=q.id,
-                source_type="quiz",
-            )
-            db.add(ev)
-            events_synced += 1
+        desired_quizzes[q.id] = {
+            "event_type": "quiz",
+            "title": f"Quiz: {q.title}",
+            "subject_id": q.subject_id,
+            "start_time": start_t,
+            "end_time": end_t,
+        }
+    c, u, d = _reconcile(db, user, "quiz", desired_quizzes)
+    created += c
+    updated += u
+    deleted += d
 
     # 3. Sync Exams
     exams = db.query(Exam).filter(Exam.school_id == user.school_id).all()
+    desired_exams = {}
     for ex in exams:
         # Exam.start_time/end_time are TIME-of-day columns and exam_date holds the
         # day; calendar_events.start_time is timestamptz. Combine them, or the INSERT
         # fails with a DatatypeMismatch (time vs timestamp with time zone).
-        ex_start = _to_utc(datetime.combine(ex.exam_date, ex.start_time))
-        ex_end = _to_utc(datetime.combine(ex.exam_date, ex.end_time))
-        existing = (
-            db.query(CalendarEvent)
-            .filter(
-                CalendarEvent.user_id == user.id,
-                CalendarEvent.source_type == "exam",
-                CalendarEvent.source_id == ex.id,
-            )
-            .first()
-        )
-        if not existing:
-            ev = CalendarEvent(
-                school_id=user.school_id,
-                user_id=user.id,
-                event_type="exam",
-                # Exam has no `name` column - the readable identity is its
-                # subject plus exam_type ("mid_term"/"unit_test"/...).
-                title=(
-                    f"Exam: {ex.subject.name if ex.subject else 'Unknown subject'}"
-                    + (f" ({ex.exam_type.replace('_', ' ')})" if ex.exam_type else "")
-                ),
-                subject_id=ex.subject_id,
-                start_time=ex_start,
-                end_time=ex_end,
-                source_id=ex.id,
-                source_type="exam",
-            )
-            db.add(ev)
-            events_synced += 1
+        desired_exams[ex.id] = {
+            "event_type": "exam",
+            # Exam has no `name` column - the readable identity is its
+            # subject plus exam_type ("mid_term"/"unit_test"/...).
+            "title": (
+                f"Exam: {ex.subject.name if ex.subject else 'Unknown subject'}"
+                + (f" ({ex.exam_type.replace('_', ' ')})" if ex.exam_type else "")
+            ),
+            "subject_id": ex.subject_id,
+            "start_time": _to_utc(datetime.combine(ex.exam_date, ex.start_time)),
+            "end_time": _to_utc(datetime.combine(ex.exam_date, ex.end_time)),
+        }
+    c, u, d = _reconcile(db, user, "exam", desired_exams)
+    created += c
+    updated += u
+    deleted += d
 
     db.commit()
-    return {"synced_events": events_synced}
+    # synced_events is retained as the created-count for callers that already read it.
+    return {
+        "synced_events": created,
+        "created": created,
+        "updated": updated,
+        "deleted": deleted,
+    }
 
 
 def get_homework_calendar_events(

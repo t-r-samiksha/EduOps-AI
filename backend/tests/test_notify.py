@@ -110,12 +110,30 @@ def test_dispatch_all_optional_fields(db_session, seed):
     assert row.source_id == 4242
 
 
-def test_dispatch_does_not_validate_source_type(db_session, seed):
-    """Documented behaviour: an unknown source_type is stored, not raised on - a
-    cosmetic mistake must not fail the state change it accompanies."""
-    dispatch_notification(db_session, user_id=seed["parent_a"].id, source_type="not_a_real_kind", title="x")
-    db_session.commit()
-    assert _rows_for(db_session, seed["parent_a"].id)[0].source_type == "not_a_real_kind"
+def test_dispatch_validates_source_type(db_session, seed):
+    """REVERSED DECISION, deliberately. This test previously asserted the opposite - that
+    an unknown source_type was stored rather than raised on, so a cosmetic mistake could
+    not fail the state change it accompanied.
+
+    That reasoning did not survive contact with the codebase. NINE of twenty source types
+    had been dispatched without ever being declared, across BOTH developers' features
+    (`assignment_*` x5, `quiz_published`, `doubt_reply`, `doubt_answer_verified`,
+    `top_doubts`) - precisely because nothing objected. Every one landed in the bell with
+    no icon and no click target, since the frontend maps on exactly this vocabulary.
+
+    An undeclared source is not cosmetic: it is a notification a user receives and cannot
+    act on. Every existing call site was audited against SOURCE_TYPES before the check was
+    enabled, and test_person_b_authz.py::test_every_dispatch_call_site_uses_a_declared_
+    source_type keeps that audit running so a tenth one cannot drift in.
+    """
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown notification source_type"):
+        dispatch_notification(
+            db_session, user_id=seed["parent_a"].id, source_type="not_a_real_kind", title="x"
+        )
+    # Nothing was written - the raise happens before db.add().
+    assert _rows_for(db_session, seed["parent_a"].id) == []
 
 
 def test_dispatch_twice_creates_two_rows(db_session, seed):

@@ -12,7 +12,10 @@ from app.models.role import Role
 from app.models.school import School
 from app.models.subject import Subject
 from app.models.user import User
-from app.services.assignment_service import detect_assignment_deadlines_and_missing
+from app.services.assignment_service import (
+    DEADLINE_SCAN_LOOKBACK_DAYS,
+    detect_assignment_deadlines_and_missing,
+)
 from app.services.auth import CurrentUser, get_current_user
 
 ACADEMIC_YEAR = "2026-27"
@@ -255,6 +258,74 @@ def test_missing_submission_detection(client, seed, db_session):
     )
     assert missing_sub is not None
     assert missing_sub.status == "missing"
+
+
+def test_deadline_job_is_idempotent(client, seed, db_session):
+    """A second run the same night must not re-nudge anyone.
+
+    Guards the scheduled job (scheduler.py JOB_ID_ASSIGNMENT_DEADLINES). The missing path
+    is self-limiting via its status="missing" row; the reminder path needed an explicit
+    guard, since it dispatched to every unsubmitted student on every invocation.
+    """
+    now = datetime.now(timezone.utc)
+    past = Assignment(
+        school_id=seed["school"].id, class_id=seed["class"].id,
+        subject_id=seed["subject"].id, teacher_id=seed["teacher"].id,
+        title="Overdue", deadline=now - timedelta(days=1), max_marks=100.0,
+    )
+    soon = Assignment(
+        school_id=seed["school"].id, class_id=seed["class"].id,
+        subject_id=seed["subject"].id, teacher_id=seed["teacher"].id,
+        title="Due tomorrow", deadline=now + timedelta(hours=6), max_marks=100.0,
+    )
+    db_session.add_all([past, soon])
+    db_session.flush()
+
+    first = detect_assignment_deadlines_and_missing(db_session)
+    assert first["missing_marked"] >= 2
+    assert first["reminders_sent"] >= 2, "the 24h window should have fired once"
+
+    def _counts():
+        return (
+            db_session.query(Notification)
+            .filter(Notification.source_type == "assignment_missing").count(),
+            db_session.query(Notification)
+            .filter(Notification.source_type == "assignment_reminder").count(),
+        )
+
+    after_first = _counts()
+    second = detect_assignment_deadlines_and_missing(db_session)
+    assert second == {"missing_marked": 0, "reminders_sent": 0}
+    assert _counts() == after_first, "second run created notifications"
+
+    third = detect_assignment_deadlines_and_missing(db_session)
+    assert third == {"missing_marked": 0, "reminders_sent": 0}
+    assert _counts() == after_first
+
+
+def test_deadline_scan_ignores_assignments_older_than_lookback(client, seed, db_session):
+    """An assignment past the lookback window is not resurrected.
+
+    Without the bound, a student enrolling mid-year was marked missing - and notified -
+    for every assignment ever set in the class.
+    """
+    ancient = Assignment(
+        school_id=seed["school"].id, class_id=seed["class"].id,
+        subject_id=seed["subject"].id, teacher_id=seed["teacher"].id,
+        title="Last term's essay",
+        deadline=datetime.now(timezone.utc)
+        - timedelta(days=DEADLINE_SCAN_LOOKBACK_DAYS + 5),
+        max_marks=100.0,
+    )
+    db_session.add(ancient)
+    db_session.flush()
+
+    result = detect_assignment_deadlines_and_missing(db_session)
+    assert result["missing_marked"] == 0
+    assert (
+        db_session.query(AssignmentSubmission)
+        .filter(AssignmentSubmission.assignment_id == ancient.id).count() == 0
+    )
 
 
 def test_teacher_grades_submission(client, seed, db_session):

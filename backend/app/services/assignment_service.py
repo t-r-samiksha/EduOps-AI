@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.assignment import Assignment, AssignmentSubmission
 from app.models.class_ import SchoolClass
 from app.models.enrollment import Enrollment
+from app.models.notification import Notification
 from app.models.parent_student import ParentStudent
 from app.models.subject import Subject
 from app.models.user import User
@@ -93,14 +94,48 @@ def get_student_academic_risk_factors(db: Session, student_id: int) -> dict:
     }
 
 
+DEADLINE_SCAN_LOOKBACK_DAYS = 30
+"""How far back to look for passed deadlines.
+
+Unbounded, this scanned EVERY assignment ever created on every run. Two problems beyond
+the query cost: a student who joins a class in March would be marked missing - and
+notified - for every assignment set since September, and the scan grows forever."""
+
+
+def _already_notified(db: Session, *, user_id: int, source_type: str, source_id: int) -> bool:
+    """Whether this exact notification has already been sent.
+
+    IDEMPOTENCY GUARD. The missing-submission path is self-limiting (it writes a
+    status="missing" row, so the student is no longer "without a submission" next run), but
+    the 24h reminder path had nothing: it dispatched to every unsubmitted student on every
+    invocation. Nightly cadence hid that, since a 24-hour window catches each assignment on
+    exactly one run - but a manual run on the same night, or any cadence change, would
+    re-notify the whole class. The failure mode of a nudge feature is spam, so the guard is
+    on the notification itself rather than on the schedule.
+    """
+    return (
+        db.query(Notification.id)
+        .filter(
+            Notification.user_id == user_id,
+            Notification.source_type == source_type,
+            Notification.source_id == source_id,
+        )
+        .first()
+        is not None
+    )
+
+
 def detect_assignment_deadlines_and_missing(db: Session) -> dict:
     """Scheduled task to detect passed and approaching deadlines.
     - Marks missing submissions for passed deadlines.
     - Sends approaching deadline reminders (<= 24 hours).
     - Triggers notifications to students and parents.
+
+    Idempotent: safe to run twice in one night. See _already_notified.
     """
     now = datetime.now(timezone.utc)
     one_day_ahead = now + timedelta(hours=24)
+    scan_since = now - timedelta(days=DEADLINE_SCAN_LOOKBACK_DAYS)
 
     missing_marked = 0
     reminders_sent = 0
@@ -108,7 +143,7 @@ def detect_assignment_deadlines_and_missing(db: Session) -> dict:
     # 1. Passed deadlines -> find missing students
     past_assignments = (
         db.query(Assignment)
-        .filter(Assignment.deadline <= now)
+        .filter(Assignment.deadline <= now, Assignment.deadline >= scan_since)
         .all()
     )
 
@@ -178,7 +213,14 @@ def detect_assignment_deadlines_and_missing(db: Session) -> dict:
             .all()
         }
 
-        unsubmitted_ids = [sid for sid in enrolled_ids if sid not in submitted_ids]
+        unsubmitted_ids = [
+            sid
+            for sid in enrolled_ids
+            if sid not in submitted_ids
+            and not _already_notified(
+                db, user_id=sid, source_type="assignment_reminder", source_id=a.id
+            )
+        ]
         if unsubmitted_ids:
             dispatch_bulk(
                 db,

@@ -23,9 +23,9 @@ from app.models.parent_student import ParentStudent
 from app.models.subject import Subject
 from app.models.timetable import TimetableSlot
 from app.models.user import User
+from app.services.announcements import publish_announcement
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.scoping import deny_parent
-from app.services.notify import dispatch_bulk
 
 router = APIRouter(tags=["classroom-stream"])
 
@@ -382,31 +382,44 @@ def create_stream_post(
         )
         db.add(attachment_row)
 
-    # Person C Announcement Integration
-    if body.post_type == "announcement":
-        enrolled_student_ids = _get_enrolled_student_ids(db, classroom.class_id, classroom.subject_id)
-        if enrolled_student_ids:
-            subject = db.query(Subject).filter(Subject.id == classroom.subject_id).one_or_none()
-            subj_title = subject.name if subject else "Class"
-            # N-3: students only, previously. A class announcement that parents never see
-            # is the announcement most worth sending - "bring a leaf on Thursday" is
-            # addressed to whoever packs the bag. Linked guardians are included, and
-            # dispatch_bulk de-duplicates a parent with two children in the class.
-            parent_ids = [
-                row.parent_id
-                for row in db.query(ParentStudent.parent_id)
-                .filter(ParentStudent.student_id.in_(enrolled_student_ids))
-                .distinct()
-            ]
-            dispatch_bulk(
-                db,
-                user_ids=[*enrolled_student_ids, *parent_ids],
-                source_type="announcement",
-                title=f"[{subj_title}] {body.title}",
-                body=body.content[:250],
-                priority="important",
-                source_id=post.id,
-            )
+    # A stream post of type "announcement" becomes a REAL announcement row.
+    #
+    # It used to call dispatch_bulk directly with source_type="announcement" and
+    # source_id=post.id, so stream-post ids shared an id namespace with announcement ids
+    # and a notification could deep-link to the wrong record. It also meant a class
+    # announcement never appeared in the announcement feed - only inside the stream of the
+    # one classroom, which is the place a parent does not look. publish_announcement fixes
+    # both: source_id is an Announcement.id, and the feed picks it up.
+    #
+    # Audience is still computed HERE, not by resolve_audience. A class-scoped
+    # announcement reaches the whole homeroom, but an elective classroom must reach only
+    # the students taking that elective (N-2) - so the narrowed list is passed through as
+    # audience_override, with linked guardians added (N-3). Both earlier fixes survive.
+    if post.post_type == "announcement":
+        subject = db.query(Subject).filter(Subject.id == classroom.subject_id).one_or_none()
+        subj_title = subject.name if subject else "Class"
+        student_ids = _get_enrolled_student_ids(db, classroom.class_id, classroom.subject_id)
+        parent_ids = [
+            row.parent_id
+            for row in db.query(ParentStudent.parent_id)
+            .filter(ParentStudent.student_id.in_(student_ids))
+            .distinct()
+        ] if student_ids else []
+        publish_announcement(
+            db,
+            author_id=user.id,
+            school_id=classroom.school_id,
+            scope_type="class",
+            scope_class_id=classroom.class_id,
+            title=f"[{subj_title}] {body.title.strip()}",
+            body=body.content.strip(),
+            category="academic",
+            priority="important",
+            # audit_logs.action is varchar(30) - a longer verb raises
+            # StringDataRightTruncation at commit, not at import.
+            audit_action="announce_from_stream",
+            audience_override=[*student_ids, *parent_ids],
+        )
 
     db.commit()
     db.refresh(post)

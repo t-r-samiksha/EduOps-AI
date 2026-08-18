@@ -50,8 +50,11 @@ from app.database import SessionLocal
 from app.models.attendance import AttendanceRecord
 from app.models.class_ import SchoolClass
 from app.models.enrollment import Enrollment
+from app.models.parent_student import ParentStudent
 from app.models.risk import RemarkStub, RiskFlag
+from app.models.user import User
 from app.services.attendance_stats import attendance_snapshot
+from app.services.notify import dispatch_bulk
 from app.services.gradebook_service import get_student_gradebook_summary
 from app.services.risk_scorer import AttendanceSignal, GradeSignal, RemarkSignal, score_student
 
@@ -104,6 +107,54 @@ def _build_remark_signal(session: Session, student_id: int) -> RemarkSignal | No
     return RemarkSignal(student_id=student_id, remark_texts=[r.remark_text for r in rows])
 
 
+def _notify_new_flag(session: Session, flag: RiskFlag, student_name: str | None) -> int:
+    """Tell the homeroom teacher and the linked parents that a flag was raised.
+
+    This job created flags and told NOBODY. Manual POST /risk/flag dispatched; the nightly
+    job - which is the real flag source, and now the one that sees grades - did not, so
+    the tail of the learning chain ended in a database row nobody was looking at.
+
+    ON CREATION ONLY. run_nightly_scoring refreshes an already-open flag's score and
+    reasons every night; dispatching there would re-notify the same family nightly for as
+    long as the situation persists, which is how a useful alert becomes ignored noise. The
+    same reasoning as report-card publication (see report_card_service).
+
+    Audience matches POST /risk/flag's: parents via ParentStudent, plus the homeroom
+    teacher resolved from the student's primary enrollment.
+    """
+    enrollment = (
+        session.query(Enrollment)
+        .filter(Enrollment.student_id == flag.student_id, Enrollment.is_primary.is_(True))
+        .one_or_none()
+    )
+    school_class = (
+        session.query(SchoolClass).filter(SchoolClass.id == enrollment.class_id).one_or_none()
+        if enrollment is not None
+        else None
+    )
+    recipients = [
+        row.parent_id
+        for row in session.query(ParentStudent.parent_id).filter(
+            ParentStudent.student_id == flag.student_id
+        )
+    ]
+    if school_class is not None and school_class.class_teacher_id is not None:
+        recipients.append(school_class.class_teacher_id)
+    if not recipients:
+        return 0
+
+    dispatch_bulk(
+        session,
+        user_ids=recipients,
+        source_type="early_warning",
+        title=f"{student_name or 'A student'} flagged as {flag.risk_level} risk",
+        body="; ".join(flag.reasons),
+        priority="urgent" if flag.risk_level == "high" else "important",
+        source_id=flag.id,
+    )
+    return len(recipients)
+
+
 def run_nightly_scoring(session: Session, school_id: int, academic_year: str) -> dict:
     student_ids = {
         row.student_id
@@ -117,7 +168,7 @@ def run_nightly_scoring(session: Session, school_id: int, academic_year: str) ->
     }
 
     since = date.today() - timedelta(days=ATTENDANCE_LOOKBACK_DAYS)
-    created = updated = low_risk_skipped = 0
+    created = updated = low_risk_skipped = notified = 0
 
     for student_id in student_ids:
         attendance = _build_attendance_signal(session, student_id, since)
@@ -138,9 +189,14 @@ def run_nightly_scoring(session: Session, school_id: int, academic_year: str) ->
             existing_open.reasons = result.reasons
             updated += 1
         else:
-            session.add(
-                RiskFlag(student_id=student_id, risk_level=result.risk_level, score=result.score, reasons=result.reasons, status="open")
+            flag = RiskFlag(
+                student_id=student_id, risk_level=result.risk_level, score=result.score,
+                reasons=result.reasons, status="open",
             )
+            session.add(flag)
+            session.flush()  # need flag.id for the notification's source_id
+            student = session.query(User).filter(User.id == student_id).one_or_none()
+            notified += _notify_new_flag(session, flag, student.full_name if student else None)
             created += 1
 
     session.commit()
@@ -149,6 +205,7 @@ def run_nightly_scoring(session: Session, school_id: int, academic_year: str) ->
         "flags_created": created,
         "flags_updated": updated,
         "low_risk_skipped": low_risk_skipped,
+        "people_notified": notified,
     }
 
 
@@ -171,6 +228,7 @@ def main() -> None:
     print(f"  new flags created:      {summary['flags_created']}")
     print(f"  existing flags updated: {summary['flags_updated']}")
     print(f"  low risk (no flag):     {summary['low_risk_skipped']}")
+    print(f"  people notified:        {summary['people_notified']}")
 
 
 if __name__ == "__main__":

@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.services.audit_log import write_audit_log
+from app.services.notify import dispatch_bulk
 from app.models.announcement import Announcement
 from app.models.class_ import SchoolClass
 from app.models.enrollment import Enrollment
@@ -283,3 +285,80 @@ def scope_label(db: Session, announcement: Announcement) -> str:
         return f"Grade {announcement.scope_grade_level}"
     cls = db.query(SchoolClass).filter(SchoolClass.id == announcement.scope_class_id).one_or_none()
     return cls.name if cls is not None else f"Class {announcement.scope_class_id}"
+
+
+def publish_announcement(
+    db: Session,
+    *,
+    author_id: int,
+    school_id: int,
+    scope_type: str,
+    title: str,
+    body: str,
+    scope_grade_level: int | None = None,
+    scope_class_id: int | None = None,
+    category: str = "general",
+    priority: str = "normal",
+    audit_action: str = "create_announcement",
+    audience_override: list[int] | None = None,
+) -> tuple[Announcement, list[int]]:
+    """Creates an Announcement row, resolves its audience, and dispatches it.
+
+    THE ONLY WAY AN ANNOUNCEMENT SHOULD COME INTO EXISTENCE. Extracted so the classroom
+    stream can reuse it: a stream post of type "announcement" previously dispatched
+    notifications directly with source_type="announcement" and source_id=<StreamPost.id>,
+    which put stream-post ids and announcement ids in ONE id namespace. A notification's
+    (source_type, source_id) is how the client resolves what to open, so post 41 and
+    announcement 41 were indistinguishable - one of them would deep-link to the other's
+    content. Routing through here means source_id is always an Announcement.id, and the
+    post also becomes visible in the announcement feed instead of only in the stream.
+
+    Does NOT commit - dispatch runs inside the caller's transaction, per notify.py's
+    convention, so the announcement, its notifications and its audit row commit together
+    or not at all. The caller commits.
+    """
+    ann = Announcement(
+        school_id=school_id,
+        author_id=author_id,
+        scope_type=scope_type,
+        scope_grade_level=scope_grade_level,
+        scope_class_id=scope_class_id,
+        title=title.strip(),
+        body=body.strip(),
+        category=category,
+        priority=priority,
+    )
+    db.add(ann)
+    db.flush()  # need ann.id for source_id and for the audit row
+
+    # audience_override exists for ONE case: an elective classroom. resolve_audience
+    # expands a class scope to every student enrolled in the class, but an elective
+    # classroom's announcement must reach only the students taking that subject - the N-2
+    # fix in classroom.py::_get_enrolled_student_ids. Passing the narrowed list keeps
+    # delivery correct; scope_class_id still records which class it belongs to.
+    audience = resolve_audience(db, ann) if audience_override is None else sorted(
+        set(audience_override) - {author_id}
+    )
+    dispatch_bulk(
+        db,
+        user_ids=audience,
+        source_type="announcement",
+        title=ann.title,
+        body=ann.body[:280],
+        priority=ann.priority,  # urgent arrives urgent
+        source_id=ann.id,
+    )
+    write_audit_log(
+        db,
+        actor_id=author_id,
+        action=audit_action,
+        entity_type="announcements",
+        entity_id=ann.id,
+        detail={
+            "scope_type": ann.scope_type,
+            "recipients": len(audience),
+            "priority": ann.priority,
+            "narrowed_audience": audience_override is not None,
+        },
+    )
+    return ann, audience

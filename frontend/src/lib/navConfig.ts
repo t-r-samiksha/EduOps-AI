@@ -100,6 +100,7 @@ export const NAV_ITEMS: Record<Role, NavEntry[]> = {
         { label: "Homework Calendar", path: "/admin/calendar", icon: CalendarIcon },
         { label: "Student Analytics", path: "/admin/analytics", icon: TrendingUp },
         { label: "Remarks", path: "/admin/remarks", icon: MessageSquare },
+        { label: "Syllabus Plans", path: "/admin/syllabus", icon: BookOpenCheck },
         { label: "Syllabus Pace", path: "/admin/syllabus-pace", icon: Compass },
       ],
     },
@@ -116,7 +117,6 @@ export const NAV_ITEMS: Record<Role, NavEntry[]> = {
       label: "Operations",
       icon: Compass,
       children: [
-        { label: "Syllabus", path: "/admin/syllabus", icon: BookOpenCheck },
         { label: "Approvals", path: "/admin/approvals", icon: FileCheck2 },
         { label: "Document OCR", path: "/admin/ocr", icon: ScanText },
         { label: "Exams", path: "/admin/exams", icon: Armchair },
@@ -144,6 +144,7 @@ export const NAV_ITEMS: Record<Role, NavEntry[]> = {
         { label: "Homework Calendar", path: "/principal/calendar", icon: CalendarIcon },
         { label: "Student Analytics", path: "/principal/analytics", icon: TrendingUp },
         { label: "Remarks", path: "/principal/remarks", icon: MessageSquare },
+        { label: "Syllabus Plans", path: "/principal/syllabus", icon: BookOpenCheck },
         { label: "Syllabus Pace", path: "/principal/syllabus-pace", icon: Compass },
       ],
     },
@@ -160,7 +161,6 @@ export const NAV_ITEMS: Record<Role, NavEntry[]> = {
       label: "Operations",
       icon: Compass,
       children: [
-        { label: "Syllabus", path: "/principal/syllabus", icon: BookOpenCheck },
         { label: "Approvals", path: "/principal/approvals", icon: FileCheck2 },
         { label: "Document OCR", path: "/principal/ocr", icon: ScanText },
         { label: "Exams", path: "/principal/exams", icon: Armchair },
@@ -173,7 +173,7 @@ export const NAV_ITEMS: Record<Role, NavEntry[]> = {
     { label: "Announcements", path: "/teacher/announcements", icon: Megaphone },
     { label: "Attendance", path: "/teacher/attendance", icon: ScanFace },
     { label: "Timetable", path: "/teacher/timetable", icon: CalendarClock },
-    { label: "Doubts", path: "/teacher/doubts", icon: MessagesSquare },
+    { label: "Student Doubts", path: "/teacher/doubts", icon: MessagesSquare },
     { label: "Assistant Bot", path: "/teacher/assistant", icon: Bot },
     {
       label: "Teaching",
@@ -202,7 +202,7 @@ export const NAV_ITEMS: Record<Role, NavEntry[]> = {
       icon: Users,
       children: [
         { label: "Staffing", path: "/teacher/staffing", icon: Users },
-        { label: "Syllabus", path: "/teacher/syllabus", icon: BookOpenCheck },
+        { label: "Syllabus Plans", path: "/teacher/syllabus", icon: BookOpenCheck },
         { label: "Syllabus Pace", path: "/teacher/syllabus-pace", icon: Compass },
         { label: "Exam Duties", path: "/teacher/exams", icon: Armchair },
         { label: "Early-Warning", path: "/teacher/risk", icon: AlertTriangle },
@@ -214,7 +214,7 @@ export const NAV_ITEMS: Record<Role, NavEntry[]> = {
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
     { label: "Announcements", path: "/student/announcements", icon: Megaphone },
     { label: "Doubt Bot", path: "/student/doubt-bot", icon: Bot },
-    { label: "Doubts", path: "/student/doubts", icon: MessagesSquare },
+    { label: "Ask a Teacher", path: "/student/doubts", icon: MessagesSquare },
     { label: "Assignments", path: "/student/assignments", icon: ClipboardList },
     { label: "Timetable", path: "/student/timetable", icon: CalendarClock },
     {

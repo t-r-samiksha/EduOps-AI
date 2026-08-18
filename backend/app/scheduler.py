@@ -52,6 +52,7 @@ from app.services.ingestion import ingest_pending
 from app.services.notify import dispatch_notification
 from scripts.run_monthly_fee_invoicing import AUTO_GENERATE_WINDOW_DAYS, run_monthly_invoicing
 from scripts.run_nightly_admin_briefing import BRIEFING_OUTPUT_DIR, compile_briefing
+from app.services.assignment_service import detect_assignment_deadlines_and_missing
 from scripts.run_nightly_risk_scoring import run_nightly_scoring
 from scripts.run_nightly_syllabus_anomaly_scan import run_scan
 
@@ -73,6 +74,7 @@ JOB_ID_ADMIN_BRIEFING = "nightly_admin_briefing"
 JOB_ID_FEE_INVOICING = "monthly_fee_invoicing"
 JOB_ID_RESOURCE_REINDEX = "nightly_resource_reindex"
 JOB_ID_WEEKLY_TOP_DOUBTS = "weekly_top_doubts"
+JOB_ID_ASSIGNMENT_DEADLINES = "nightly_assignment_deadlines"
 
 
 def _active_school_academic_year_pairs(session: Session) -> list[tuple[int, str]]:
@@ -270,11 +272,32 @@ def run_weekly_top_doubts_job() -> dict:
     return totals
 
 
+def run_assignment_deadline_job() -> dict:
+    """Marks overdue submissions missing and nudges students + linked parents.
+
+    NOT per-school, unlike the other jobs - detect_assignment_deadlines_and_missing scans
+    by deadline across all schools in one pass, so there is no
+    _active_school_academic_year_pairs loop here. It commits internally.
+    """
+    logger.info("assignment deadlines: starting")
+    session = SessionLocal()
+    try:
+        totals = detect_assignment_deadlines_and_missing(session)
+    except Exception:
+        session.rollback()
+        logger.exception("assignment deadlines: FAILED")
+        raise
+    finally:
+        session.close()
+    logger.info("assignment deadlines: done - %s", totals)
+    return totals
+
+
 _scheduler: BackgroundScheduler | None = None
 
 
 def build_scheduler() -> BackgroundScheduler:
-    """Builds (without starting) a scheduler with all 4 jobs registered. Kept
+    """Builds (without starting) a scheduler with all 7 jobs registered. Kept
     separate from `start_scheduler()` so tests can build one without touching
     the module-level singleton or actually starting a background thread."""
     scheduler = BackgroundScheduler(timezone="UTC")
@@ -303,6 +326,14 @@ def build_scheduler() -> BackgroundScheduler:
     scheduler.add_job(
         run_weekly_top_doubts_job, CronTrigger(day_of_week='mon', hour=6, minute=0),
         id=JOB_ID_WEEKLY_TOP_DOUBTS, replace_existing=True,
+    )
+    # 01:45, ahead of the 02:00-02:45 batch. It is the only job that notifies a family
+    # about a deadline that has only just passed, so it goes first; it is DB-only and
+    # cheap, and it has no data dependency on the rest of the batch (checked: nothing in
+    # risk scoring or the admin briefing reads AssignmentSubmission).
+    scheduler.add_job(
+        run_assignment_deadline_job, CronTrigger(hour=1, minute=45),
+        id=JOB_ID_ASSIGNMENT_DEADLINES, replace_existing=True,
     )
     return scheduler
 

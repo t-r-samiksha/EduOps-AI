@@ -103,7 +103,111 @@ plans all start in the past deliberately, so the demo does not show this. The ho
 either a `status="not_started"` when `today < term_start_date`, or a school-level term
 calendar — a design decision, not a patch.
 
+## Resource scope: the listing and the bot disagree about who can see a class-scoped file
+
+Kept as a deferral because consolidating the two resources pages (`pb-04-duplicates.md`
+D-2, Step 2) was skipped — but **this defect is independent of the page duplication and
+outlives that decision.**
+
+`resources` carries BOTH `grade_level` (NOT NULL) and `class_id` (nullable). The two read
+paths disagree about which one scopes visibility:
+
+| Path | Scopes on | Code |
+|---|---|---|
+| Listing (`GET /resources`) | `class_id` when set, else `grade_level` | `resources.py` role branches |
+| **Bot retrieval** | **`grade_level` only** | chunks stamped at `ingestion.py:174`, filtered at `retrieval.py:186` |
+
+`kb_chunks` has no `class_id` column at all, so a chunk cannot carry class scope even in
+principle.
+
+**Consequence, concretely:** a teacher uploads a worksheet scoped to **Grade 3 - A only**.
+A Grade 3 - B student does **not** see it in their resources list — correct, and it looks
+like the scope is being honoured. But that student asks the Doubt Bot a question it answers,
+and **the bot retrieves and cites it**, because retrieval matches on grade 3. The listing
+implies an isolation the retrieval path does not provide.
+
+Nobody is currently affected: Riverside's seeded resources are all grade-scoped
+(`class_id IS NULL`), so the two paths agree by accident. It becomes live the first time
+anyone uploads through Person B's screen, which sends `class_id`.
+
+**Fix shape** (not applied): either add `class_id` to `kb_chunks` and filter on it in
+`search_chunks`, or drop class scoping from the listing so both paths agree that grade is
+the only unit. The second is smaller and matches what the RAG pipeline already assumes.
+Doing it properly means touching upload, listing and retrieval together on a live screen,
+which is why it was deferred rather than half-done.
+
+## SCHEMA GAP · Nothing owns "when is Term 1"
+
+Stated on its own because it is one missing concept with **two** distinct symptoms already
+recorded above, and a future term-calendar feature should find both consequences written
+down in one place.
+
+There is no table, column or constant mapping dates to terms. What exists instead:
+
+- `SyllabusPlan.term_start_date` / `term_end_date` — **per-plan** date columns. Every plan
+  carries its own private definition of the term window.
+- `GradebookEntry.term` / `GradebookWeight.term` — **free-text strings** (`"Term 1"`),
+  with nothing tying them to dates.
+- `ReportCard.term` + `academic_year` — the same free text, which is why report-card
+  attendance had to be scoped to the **academic year** rather than the term.
+
+### Symptom 1 — M-6: auto-graded work is filed under a hardcoded term
+
+`gradebook_service.DEFAULT_TERM = "Term 1"`. Quiz attempts and assignment grading cannot
+derive a term, so they assert one. **Once Term 2 begins, every auto-graded quiz and
+assignment still files into Term 1**, and a Term 2 gradebook silently absorbs Term 1
+scores.
+
+### Symptom 2 — syllabus pace: two subjects in one class disagree about the term
+
+Because term dates are per-plan, two plans for the same class and academic year can hold
+different windows. Observed live in school 6318, Grade 1 - A: Math starts 2026-08-18,
+social studies starts 2026-08-01, so the pace tracker reports `Expected 0%` and
+`Expected 8%` side by side. Both are arithmetically correct. The pair reads as a bug
+because the term is not a shared concept.
+
+And the latent form: a plan whose `term_start_date` is in the **future** yields negative
+elapsed, floored to 0 by `_clamp`, so it displays the same `Expected 0%` as a plan starting
+today — while every logged checkpoint reads as *ahead of schedule*.
+
+### What the fix would need
+
+A school-level term calendar: `(school_id, academic_year, term_name, start_date, end_date)`,
+unique on the first three. Then `term_for(date)` replaces `DEFAULT_TERM` at the two
+gradebook call sites, and `SyllabusPlan` reads its window from the calendar instead of
+carrying its own dates — collapsing both symptoms. Migration, model, and a backfill for
+existing plans; not a patch, and out of scope pre-demo.
+
 ---
+
+## SCHEMA GAP · An announcement cannot be scoped to an elective
+
+Surfaced while doing S-D (stream announcements now create real `Announcement` rows).
+
+`SCOPE_TYPES` is `school` / `grade` / `class`. A classroom, however, is
+`(class_id, subject_id)` — an elective classroom holds a *subset* of the class. So there is
+no scope that says "the students taking Grade 3-A Music".
+
+**How S-D handles it, and the residue.** `publish_announcement(..., audience_override=)`
+delivers to the narrowed elective roster only, so the N-2 fix survives and **notifications
+are correct**. But the row is stored `scope_type="class"`, and the feed's `can_see()` reads
+that scope — so a classmate *not* taking the elective sees the announcement in
+`GET /announcements/feed` even though they were never notified.
+
+| | Elective announcement |
+|---|---|
+| Notified | elective students + linked guardians (correct) |
+| Visible in feed | **every student in the class** (wider) |
+
+Not a confidentiality problem — the content is "bring your recorder on Thursday", addressed
+to a subset of a class that already shares a room. It is an inconsistency between the
+delivery audience and the read audience, and it is **new surface area for the same missing
+concept**: the schema has no unit smaller than a class.
+
+**Proper fix** — a fourth scope: `scope_type="classroom"` with `scope_classroom_id`, which
+makes `resolve_audience` do the narrowing itself and lets `audience_override` be deleted.
+That is a migration (`SCOPE_TYPES`, the CHECK constraint, a nullable FK) plus a
+`can_see`/`visible_scope_for` branch — deliberately not attempted in Group 6.
 
 # Needs a real browser — the manual-pass checklist
 

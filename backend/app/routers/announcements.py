@@ -31,14 +31,13 @@ from app.models.role import Role
 from app.models.user import User
 from app.services.announcements import (
     can_see,
+    publish_announcement,
     related_children,
     resolve_audience,
     scope_label,
     visible_scope_for,
 )
-from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
-from app.services.notify import dispatch_bulk
 
 router = APIRouter(tags=["announcements"])
 
@@ -258,37 +257,17 @@ def create_announcement(
     """Post an announcement, then deliver it through the existing notification path."""
     _assert_can_post(db, user, body)
 
-    ann = Announcement(
-        school_id=user.school_id,  # from the token, never the body
+    ann, audience = publish_announcement(
+        db,
         author_id=user.id,
+        school_id=user.school_id,  # from the token, never the body
         scope_type=body.scope_type,
         scope_grade_level=body.scope_grade_level,
         scope_class_id=body.scope_class_id,
-        title=body.title.strip(),
-        body=body.body.strip(),
+        title=body.title,
+        body=body.body,
         category=body.category,
         priority=body.priority,
-    )
-    db.add(ann)
-    db.flush()  # need ann.id for source_id and for the audit row
-
-    audience = resolve_audience(db, ann)
-    dispatch_bulk(
-        db,
-        user_ids=audience,
-        source_type="announcement",
-        title=ann.title,
-        body=ann.body[:280],
-        priority=ann.priority,  # urgent arrives urgent
-        source_id=ann.id,
-    )
-    write_audit_log(
-        db,
-        actor_id=user.id,
-        action="create_announcement",
-        entity_type="announcements",
-        entity_id=ann.id,
-        detail={"scope_type": ann.scope_type, "recipients": len(audience), "priority": ann.priority},
     )
     db.commit()
     db.refresh(ann)
