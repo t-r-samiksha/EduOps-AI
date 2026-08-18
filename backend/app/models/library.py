@@ -1,9 +1,16 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.school import School
+    from app.models.user import User
 
 LIBRARY_TYPES = ("book", "past_paper", "journal", "ebook")
 LOAN_STATUSES = ("active", "returned", "overdue")

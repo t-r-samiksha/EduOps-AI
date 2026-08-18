@@ -20,7 +20,7 @@ load_dotenv()
 # percent-encoded password like samiksha%40eduopsai) unless doubled to "%%",
 # which in turn silently corrupts the value for anything that DOESN'T go
 # through ConfigParser (i.e. the real app in app/database.py).
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL = os.environ["DATABASE_URL"].strip()
 
 config = context.config
 
