@@ -12,6 +12,7 @@ from app.scheduler import shutdown_scheduler, start_scheduler
 from app.routers import (
     admin_alerts,
     admissions,
+    announcements,
     analytics,
     approvals,
     assignments,
@@ -95,6 +96,7 @@ app.include_router(students.router)
 app.include_router(parents.router)
 app.include_router(remarks.router)
 app.include_router(notifications.router)
+app.include_router(announcements.router)
 app.include_router(resources.router)
 app.include_router(bots.router)
 app.include_router(threads.router)

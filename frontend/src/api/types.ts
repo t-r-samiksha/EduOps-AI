@@ -1383,3 +1383,76 @@ export interface GradeSubmissionRequest {
   grade: number;
   feedback?: string;
 }
+
+// --- Announcements (Person C) ------------------------------------------------
+// A source that routes through the existing notification dispatch, not a second
+// inbox — see backend/app/services/announcements.py. `scope_label` and
+// `related_children` are both resolved server-side so the UI renders the same
+// targeting the backend enforced, rather than recomputing it and drifting.
+
+export type AnnouncementScope = "school" | "grade" | "class";
+export type AnnouncementCategory = "event" | "academic" | "fee" | "general";
+export type AnnouncementPriority = "normal" | "important" | "urgent";
+
+export interface AnnouncementChild {
+  id: number;
+  name: string | null;
+}
+
+export interface Announcement {
+  id: number;
+  title: string;
+  body: string;
+  category: AnnouncementCategory;
+  priority: AnnouncementPriority;
+  scope_type: AnnouncementScope;
+  scope_grade_level: number | null;
+  scope_class_id: number | null;
+  /** "School" / "Grade 3" / "Grade 3 - A" — resolved server-side. */
+  scope_label: string;
+  author_id: number;
+  author_name: string | null;
+  created_at: string;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  /** Parents only: which of THEIR children this relates to. Empty for a school-wide
+   * item (it relates to everyone) and for every non-parent role. */
+  related_children: AnnouncementChild[];
+}
+
+export interface AnnouncementFeed {
+  items: Announcement[];
+  unacknowledged_count: number;
+}
+
+export interface AnnouncementCreateRequest {
+  scope_type: AnnouncementScope;
+  scope_grade_level?: number | null;
+  scope_class_id?: number | null;
+  title: string;
+  body: string;
+  category: AnnouncementCategory;
+  priority: AnnouncementPriority;
+}
+
+export interface AnnouncementCreateResult {
+  announcement: Announcement;
+  /** Notifications actually dispatched — the author's reach, shown immediately. */
+  recipients: number;
+}
+
+export interface AckPerson {
+  user_id: number;
+  name: string | null;
+  role: string | null;
+  acknowledged_at?: string | null;
+}
+
+export interface AnnouncementAckStatus {
+  announcement_id: number;
+  audience_size: number;
+  acknowledged_count: number;
+  acknowledged_pct: number;
+  acknowledged: AckPerson[];
+  outstanding: AckPerson[];
+}

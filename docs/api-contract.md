@@ -3011,7 +3011,7 @@ See the ⚠️ note under `POST /bots/student/ask` about the join that makes thi
 ### Announcements
 
 **✅ BUILT.** Backed by `announcements` + `announcement_acknowledgments`
-(`backend/app/models/announcement.py`, migration `d41f8a2c95b7`), audience resolution in
+(`backend/app/models/announcement.py`, migration `fe79e04e5564`), audience resolution in
 `backend/app/services/announcements.py`.
 
 > **THE ONE ARCHITECTURAL RULE: announcements are a SOURCE that routes through the
@@ -3079,6 +3079,13 @@ a caller belongs to is derived from their own identity, so no client can widen i
 ```
 - **`related_children`** is populated for a parent only: which of *their* children the item relates to, as a list — a parent with two children in Grade 3 gets **one** deduplicated item naming both, not two copies. Empty for a school-wide item (it relates to everyone) and for non-parent roles.
 - **`scope_label`** is resolved server-side (`School` / `Grade 3` / `Grade 3 - A`) so the UI badge needs no second lookup.
+
+#### `GET /announcements/postable-scopes`
+What the caller may post to — so the composer can **offer** only that.
+- **Roles:** all five (students and parents get an empty, `can_post: false` result)
+- **Response:** `{ "can_post": true, "can_post_school": false, "grades": [3], "classes": [ { "id": 5208, "name": "Grade 3 - A", "grade_level": 3 } ] }`
+- Exists because `/reference/lookup` returns *every* class in the school — right for an admin, wrong for a teacher, whose composer would otherwise offer classes the server then 403s. A teacher gets `can_post_school: false` so the option is **absent**, not greyed out.
+- **This is a rendering convenience, NOT the authorization boundary.** `POST /announcements` re-checks the matrix regardless of what the composer offered, and there is a test asserting a teacher who ignores this endpoint and posts school-wide anyway still gets a `403`.
 
 #### `GET /announcements/{id}`
 Single item, same visibility rules as the feed.

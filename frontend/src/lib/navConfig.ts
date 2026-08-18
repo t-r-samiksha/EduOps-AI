@@ -15,6 +15,7 @@ import {
   GraduationCap,
   HelpCircle,
   LayoutGrid,
+  Megaphone,
   Library,
   MessageSquare,
   MessagesSquare,
@@ -47,6 +48,7 @@ export interface NavItem {
 export const NAV_ITEMS: Record<Role, NavItem[]> = {
   admin: [
     { label: "Command Center", path: "/admin", icon: LayoutGrid, end: true },
+    { label: "Announcements", path: "/admin/announcements", icon: Megaphone },
     { label: "Fees", path: "/admin/fees", icon: Wallet, badge: "pending-fee-payment-requests" },
     { label: "Attendance", path: "/admin/attendance", icon: ScanFace },
     { label: "Timetable", path: "/admin/timetable", icon: CalendarClock },
@@ -72,6 +74,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   ],
   principal: [
     { label: "Dashboard", path: "/principal", icon: LayoutGrid, end: true },
+    { label: "Announcements", path: "/principal/announcements", icon: Megaphone },
     { label: "Fees", path: "/principal/fees", icon: Wallet, badge: "pending-fee-payment-requests" },
     { label: "Attendance", path: "/principal/attendance", icon: ScanFace },
     { label: "Timetable", path: "/principal/timetable", icon: CalendarClock },
@@ -97,6 +100,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   ],
   teacher: [
     { label: "Dashboard", path: "/teacher", icon: LayoutGrid, end: true },
+    { label: "Announcements", path: "/teacher/announcements", icon: Megaphone },
     { label: "Fees", path: "/teacher/fees", icon: Wallet },
     { label: "Attendance", path: "/teacher/attendance", icon: ScanFace },
     { label: "Timetable", path: "/teacher/timetable", icon: CalendarClock },
@@ -120,6 +124,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   ],
   student: [
     { label: "Dashboard", path: "/student", icon: LayoutGrid, end: true },
+    { label: "Announcements", path: "/student/announcements", icon: Megaphone },
     { label: "Attendance", path: "/student/attendance", icon: ScanFace },
     { label: "Doubts", path: "/student/doubts", icon: MessagesSquare },
     { label: "Classroom", path: "/student/classroom", icon: BookOpen },
@@ -139,6 +144,7 @@ export const NAV_ITEMS: Record<Role, NavItem[]> = {
   ],
   parent: [
     { label: "Dashboard", path: "/parent", icon: LayoutGrid, end: true },
+    { label: "Announcements", path: "/parent/announcements", icon: Megaphone },
     { label: "My Child", path: "/parent/child", icon: UserIcon },
     { label: "Attendance", path: "/parent/attendance", icon: ScanFace },
     { label: "Ask", path: "/parent/bot", icon: Bot },

@@ -290,3 +290,21 @@ and both nav entries removed.
 - Person B's `POST /assignments` authorization gap (`test_unauthorized_teacher_cannot_create`).
 - No school-scope check on `GET /classroom/{id}`, `GET /gradebook/class/{class_id}`,
   `POST /report_cards/generate/{student_id}`, `POST /calendar/sync`.
+
+---
+
+## Method caveat — one feed was fetched with a dependency override
+
+During the announcements checkpoint, every feed was fetched with a real Supabase
+sign-in **except one**: the Grade 1 student's, because the non-demo Riverside students
+had no known password. That one used a FastAPI dependency override, which bypasses the
+real auth path — so it demonstrated the *scoping* but not the *authentication* around it.
+
+Closed since: `student1.1786787329065@riverside-school.test` (Ananya Joshi, Grade 1 - A)
+was added to `DEMO_LOGINS`, so her password is reset to the shared demo password on every
+seed run and she can be signed into like any other demo account. Verified with a real
+token — her feed returns the school-wide announcements and **not** the Grade 3 or 3-A
+ones.
+
+That matters beyond tidiness: showing the *absence* of a Grade 3 announcement in a real
+browser is more convincing than asserting it in a test, and it needs a real login to do.

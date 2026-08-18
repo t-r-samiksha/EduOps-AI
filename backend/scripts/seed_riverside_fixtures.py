@@ -82,6 +82,10 @@ DEMO_LOGINS = [
     ("meera.teacher@riverside-school.test", "teacher  - Top Doubts, Math across 3-A + 3-B"),
     ("guardian.kumar@riverside-school.test", "parent   - portal + Parent Bot, 2 children"),
     ("founder@riverside-school.test", "admin    - Command Center, resources, approvals"),
+    # A SECOND student, in a DIFFERENT grade. Exists so scoped delivery can be shown
+    # rather than asserted: sign in as her and the Grade 3 announcement is simply
+    # absent from her feed, while the school-wide one is there.
+    ("student1.1786787329065@riverside-school.test", "student  - Grade 1 - A, sees NO Grade 3 announcements"),
 ]
 
 # --- Parent-portal demo profiles -----------------------------------------------------
@@ -1035,6 +1039,116 @@ def _reset_demo_passwords() -> list[tuple[str, str]]:
     return reset
 
 
+
+# --- Announcements -------------------------------------------------------------------
+# Spread across all three scopes so the scope badge has something to distinguish, and
+# across categories/priorities so the feed is not visually uniform. Written to sit inside
+# the existing narrative: the fee announcement lands on a school where Diya's fee is
+# overdue, the academic one on a grade where she is behind.
+#
+# DELIBERATELY NOT SEEDED: anything that duplicates what will be written live on stage.
+# The composer must have something left to demonstrate.
+ANNOUNCEMENTS = [
+    # (author_email_or_None, scope_type, grade, class_name, days_before_anchor,
+    #  category, priority, title, body)
+    (None, "school", None, None, 12, "general", "normal",
+     "Annual Day rehearsals begin Monday",
+     "Rehearsals run during the last period all week. Students should bring their costume "
+     "list home for parents to check."),
+    (None, "school", None, None, 5, "fee", "important",
+     "Term 1 fee deadline is the 25th",
+     "Term 1 tuition is due on 25 August. Payment can be made at the office or through the "
+     "parent portal, where a receipt can be uploaded for confirmation."),
+    (None, "school", None, None, 1, "general", "urgent",
+     "School closed Thursday for maintenance",
+     "The water supply work has been brought forward, so the school will be closed on "
+     "Thursday. Buses will not run and no classes will be held."),
+    ("meera.teacher@riverside-school.test", "grade", 3, None, 8, "academic", "important",
+     "Grade 3 multiplication assessment next week",
+     "Both sections sit a short written assessment on tables 2 to 12 and regrouping. "
+     "The practice worksheet has already gone home."),
+    ("meera.teacher@riverside-school.test", "class", None, "Grade 3 - A", 3, "event", "normal",
+     "3-A library visit on Friday",
+     "We walk to the public library after the second period. Please return any overdue "
+     "books before Friday so borrowing cards stay active."),
+]
+
+
+def _get_or_create_announcements(session: Session, counts: dict) -> int:
+    """Seeded announcements, one per scope at minimum.
+
+    Idempotent by (school_id, title). Each is dispatched through the REAL notification
+    path - services/notify.py with source_type="announcement" - rather than having
+    notification rows written directly, so the seeded state is exactly what posting
+    through the API produces. Announcements are a source, not a second delivery system.
+    """
+    from app.models.announcement import Announcement
+    from app.services.announcements import resolve_audience
+    from app.services.notify import dispatch_bulk
+
+    admin = (
+        session.query(User).filter(User.email == "founder@riverside-school.test").one_or_none()
+        or session.query(User).filter(User.school_id == SCHOOL_ID).order_by(User.id).first()
+    )
+    created = 0
+    for author_email, scope_type, grade, class_name, days_before, category, priority, title, body in ANNOUNCEMENTS:
+        if session.query(Announcement).filter(
+            Announcement.school_id == SCHOOL_ID, Announcement.title == title
+        ).one_or_none() is not None:
+            continue
+
+        author = admin
+        if author_email:
+            found = session.query(User).filter(User.email == author_email).one_or_none()
+            if found is not None:
+                author = found
+        if author is None:
+            continue
+
+        class_id = None
+        if class_name:
+            cls = (
+                session.query(SchoolClass)
+                .filter(SchoolClass.school_id == SCHOOL_ID, SchoolClass.name == class_name)
+                .one_or_none()
+            )
+            if cls is None:
+                continue
+            class_id = cls.id
+
+        ann = Announcement(
+            school_id=SCHOOL_ID,
+            author_id=author.id,
+            scope_type=scope_type,
+            scope_grade_level=grade,
+            scope_class_id=class_id,
+            title=title,
+            body=body,
+            category=category,
+            priority=priority,
+            created_at=datetime.combine(
+                SEED_ANCHOR_DATE - timedelta(days=days_before), time(9, 0), tzinfo=timezone.utc
+            ),
+        )
+        session.add(ann)
+        session.flush()
+
+        audience = resolve_audience(session, ann)
+        dispatch_bulk(
+            session,
+            user_ids=audience,
+            source_type="announcement",
+            title=ann.title,
+            body=ann.body[:280],
+            priority=ann.priority,
+            source_id=ann.id,
+        )
+        created += 1
+    if created:
+        counts["announcements"] = counts.get("announcements", 0) + created
+    return created
+
+
 def seed(session: Session, counts: dict) -> dict:
     parent = _get_parent(session)
     children = _children(session, parent.id)
@@ -1091,6 +1205,9 @@ def seed(session: Session, counts: dict) -> dict:
             _get_or_create_attendance(session, child, enrollment.class_id, pattern, counts)
         if first_name in remark_sets:
             _get_or_create_remarks(session, child, remark_sets[first_name], counts)
+
+    # After 3-B exists, so a Grade 3 announcement resolves across BOTH sections.
+    _get_or_create_announcements(session, counts)
 
     _differentiate_fees(session, records, children, counts)
     # Must run LAST: it scores against the attendance and remarks seeded just above.

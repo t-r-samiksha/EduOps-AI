@@ -46,6 +46,7 @@ import BulkRemarksPage from "@/components/remarks/BulkRemarksPage";
 import TeacherSyllabusPacePage from "@/components/syllabus/TeacherSyllabusPacePage";
 import TeacherResources from "@/routes/teacher/Resources";
 import TeacherAssistantBot from "@/components/bots/TeacherAssistantBot";
+import AnnouncementsPage from "@/components/announcements/AnnouncementsPage";
 
 interface RouteConfig {
   path: string;
@@ -57,6 +58,7 @@ interface RouteConfig {
 // (Person B/C territory). Every other entry is a real, live-data screen.
 const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal", role: "principal", element: <PrincipalDashboard /> },
+  { path: "/principal/announcements", role: "principal", element: <AnnouncementsPage /> },
   { path: "/principal/classroom", role: "principal", element: <ClassroomStreamPage /> },
   { path: "/principal/classroom/:id", role: "principal", element: <ClassroomStreamPage /> },
   { path: "/principal/resources", role: "principal", element: <ResourcesPage /> },
@@ -93,6 +95,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/school-management", role: "principal", element: <SchoolManagementPage /> },
 
   { path: "/admin", role: "admin", element: <AdminDashboard /> },
+  { path: "/admin/announcements", role: "admin", element: <AnnouncementsPage /> },
   { path: "/admin/classroom", role: "admin", element: <ClassroomStreamPage /> },
   { path: "/admin/classroom/:id", role: "admin", element: <ClassroomStreamPage /> },
   { path: "/admin/resources", role: "admin", element: <ResourcesPage /> },
@@ -122,6 +125,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/school-management", role: "admin", element: <SchoolManagementPage /> },
 
   { path: "/teacher", role: "teacher", element: <TeacherDashboard /> },
+  { path: "/teacher/announcements", role: "teacher", element: <AnnouncementsPage /> },
   { path: "/teacher/classroom", role: "teacher", element: <ClassroomStreamPage /> },
   { path: "/teacher/classroom/:id", role: "teacher", element: <ClassroomStreamPage /> },
   { path: "/teacher/resources", role: "teacher", element: <TeacherResources /> },
@@ -148,6 +152,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/assistant", role: "teacher", element: <TeacherAssistantBot /> },
 
   { path: "/student", role: "student", element: <StudentDashboard /> },
+  { path: "/student/announcements", role: "student", element: <AnnouncementsPage /> },
   { path: "/student/attendance", role: "student", element: <StudentAttendance /> },
   { path: "/student/timetable", role: "student", element: <TimetablePage /> },
   { path: "/student/fees", role: "student", element: <FeesPage /> },
@@ -169,6 +174,7 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/student/remarks", role: "student", element: <BulkRemarksPage /> },
 
   { path: "/parent", role: "parent", element: <ParentDashboard /> },
+  { path: "/parent/announcements", role: "parent", element: <AnnouncementsPage /> },
   { path: "/parent/child", role: "parent", element: <ChildSummary /> },
   { path: "/parent/attendance", role: "parent", element: <ChildAttendance /> },
   { path: "/parent/bot", role: "parent", element: <ParentBot /> },
