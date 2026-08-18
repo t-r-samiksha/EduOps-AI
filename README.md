@@ -3,6 +3,7 @@
 **An AI-first, unified school operations _and_ learning platform.**
 
 Live link: https://eduops-ai-one.vercel.app
+
 Video link: https://drive.google.com/file/d/1ILSkCM_AZziuY_I4qJKxsKnmOZflj101/view?usp=drivesdk
 
 EduOps AI collapses the fragmented mix of manual data entry, physical document storage,
