@@ -102,6 +102,16 @@ app.include_router(bots.router)
 app.include_router(threads.router)
 
 
+@app.get("/")
+@app.head("/")
+def root():
+    return {"status": "ok", "app": "EduOps AI API"}
+
+
 @app.get("/health")
+@app.get("/health/")
+@app.get("/health ")
+@app.head("/health")
 def health_check():
     return {"status": "ok"}
+
