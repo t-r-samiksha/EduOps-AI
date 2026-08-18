@@ -187,7 +187,7 @@ def risk_flag(db_session, seed):
 
 
 def test_risk_acknowledge_writes_audit_entry(client, db_session, seed, risk_flag):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.put(f"/risk/{risk_flag.id}/acknowledge")
     assert resp.status_code == 200
 
@@ -197,7 +197,7 @@ def test_risk_acknowledge_writes_audit_entry(client, db_session, seed, risk_flag
 
 
 def test_risk_intervention_writes_audit_entry(client, db_session, seed, risk_flag):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.post(f"/risk/{risk_flag.id}/intervention", json={"note": "Called parent", "action_taken": "called_parent"})
     assert resp.status_code == 200
     intervention_id = resp.json()["id"]
@@ -209,7 +209,7 @@ def test_risk_intervention_writes_audit_entry(client, db_session, seed, risk_fla
 
 
 def test_risk_resolve_writes_audit_entry(client, db_session, seed, risk_flag):
-    _override_user("admin", user_id=seed["admin_user"].id)
+    _override_user("admin", user_id=seed["admin_user"].id, school_id=seed["school"].id)
     resp = client.put(f"/risk/{risk_flag.id}/resolve")
     assert resp.status_code == 200
 
