@@ -57,8 +57,25 @@ def get_student_homework_calendar(
     user: CurrentUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Retrieve normalized academic deadlines (assignments, quizzes, exams) for a student."""
-    assert_can_view_student_record(db, user, student_id, what="calendar")
+    """Retrieve normalized academic deadlines (assignments, quizzes, exams) for a user.
+
+    Named `{student_id}` for backwards compatibility, but the id may be any user: the
+    service already branches on role and returns a TEACHER's own taught-class deadlines and
+    an admin's school-wide ones (see get_homework_calendar_events).
+    """
+    # YOUR OWN CALENDAR NEEDS NO STUDENT-RECORD CHECK.
+    #
+    # assert_can_view_student_record answers "may I see this STUDENT's record", and its
+    # teacher branch tests `student_id in students_taught_by(...)`. A teacher's own user id is
+    # not one of their students, so a teacher asking for their own deadlines was rejected with
+    # 403 - the page rendered "Could not load the academic calendar" for every teacher. Admins
+    # slipped through only because that branch returns early.
+    #
+    # Checked before the gate rather than inside it: this is not a claim about student
+    # records, so widening the shared student gate to admit self-reads would loosen it for
+    # gradebooks, report cards and analytics too.
+    if student_id != user.id:
+        assert_can_view_student_record(db, user, student_id, what="calendar")
 
     return get_homework_calendar_events(db, student_id)
 
@@ -72,7 +89,9 @@ def get_user_calendar_events(
     db: Session = Depends(get_db),
 ):
     """Retrieve synchronized academic schedule and deadlines for a user."""
-    assert_can_view_student_record(db, user, user_id, what="calendar")
+    # Same self-read exemption as GET /calendar/homework/{student_id} above.
+    if user_id != user.id:
+        assert_can_view_student_record(db, user, user_id, what="calendar")
 
     # Run idempotent sync
     sync_user_calendar(db, user_id, start, end)

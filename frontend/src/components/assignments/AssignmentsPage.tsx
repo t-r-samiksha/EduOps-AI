@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
+import { useHighlightedItem, HIGHLIGHT_RING } from "@/hooks/useHighlightedItem";
 import {
   FileCheck,
   Search,
@@ -85,6 +86,7 @@ function formatDeadline(iso: string | null | undefined) {
 }
 
 export default function AssignmentsPage() {
+  const { highlightedId, isFading } = useHighlightedItem();
   const params = useParams<{ classId?: string }>();
   const classIdFromRoute = params.classId ? Number(params.classId) : undefined;
 
@@ -510,7 +512,12 @@ export default function AssignmentsPage() {
             return (
               <Card
                 key={a.id}
-                className="border-border hover:border-border-strong transition-all flex flex-col justify-between bg-surface group shadow-sm"
+                // data-highlight-id + the ring: the homework calendar links here with
+                // ?highlight=<id> and useHighlightedItem scrolls this row into view.
+                data-highlight-id={String(a.id)}
+                className={`border-border hover:border-border-strong transition-all flex flex-col justify-between bg-surface group shadow-sm ${
+                  highlightedId === a.id && !isFading ? HIGHLIGHT_RING : ""
+                }`}
               >
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between gap-2">

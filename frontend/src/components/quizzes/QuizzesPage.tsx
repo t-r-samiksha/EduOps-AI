@@ -25,6 +25,7 @@ import {
   Question,
 } from "@/api/hooks/useQuizzes";
 import { useAuthStore } from "@/store/authStore";
+import { useHighlightedItem, HIGHLIGHT_RING } from "@/hooks/useHighlightedItem";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 
@@ -63,6 +64,7 @@ export default function QuizzesPage() {
   ]);
 
   // Taking Quiz State
+  const { highlightedId, isFading } = useHighlightedItem();
   const [activeQuizId, setActiveQuizId] = useState<number | null>(null);
   const { data: activeQuiz } = useQuizDetail(activeQuizId ?? undefined);
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string>>({});
@@ -375,7 +377,17 @@ export default function QuizzesPage() {
             quizzes.map((quiz) => {
               const hasAttempted = !!quiz.my_attempt;
               return (
-                <Card key={quiz.id} className="border shadow-xs hover:shadow-md transition-shadow">
+                <Card
+                  key={quiz.id}
+                  // Linked from the homework calendar with ?highlight=<id>. The card is
+                  // highlighted, NOT auto-opened: opening a quiz starts a timed attempt with a
+                  // server-side started_at, so a URL that opened one would burn a student's
+                  // attempt because they tapped a reminder. They press Start themselves.
+                  data-highlight-id={String(quiz.id)}
+                  className={`border shadow-xs hover:shadow-md transition-shadow ${
+                    highlightedId === quiz.id && !isFading ? HIGHLIGHT_RING : ""
+                  }`}
+                >
                   <CardContent className="p-5 flex flex-col justify-between h-full space-y-4">
                     <div>
                       <div className="flex items-start justify-between gap-2">

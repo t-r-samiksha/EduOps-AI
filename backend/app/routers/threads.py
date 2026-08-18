@@ -14,7 +14,9 @@ TEACHER SCOPE IS TWO DIFFERENT RULES, deliberately:
   - read/reply: homeroom teacher OR any teacher with an active slot for that class. A
     subject teacher who teaches Grade 1-A Math has to be able to answer a Grade 1-A
     Math doubt, and homeroom-only would lock them out of the feature entirely.
-  - verify/unverify: homeroom teacher ONLY (services/scoping.teacher_class_ids).
+  - verify/unverify: any teacher OF THE CLASS - homeroom UNION timetable-taught
+    (_teaching_class_ids, the same set that gates read/reply). Was homeroom-only,
+    which locked subject teachers out of verifying answers in their own subject.
     Certifying content into the grade-wide corpus is the class teacher's call.
 """
 
@@ -115,8 +117,9 @@ def _display_name(user: User | None) -> str:
 def _teaching_class_ids(db: Session, teacher_id: int) -> set[int]:
     """Homeroom classes plus any class this teacher actually teaches a period to.
 
-    Wider than scoping.teacher_class_ids on purpose, and used ONLY for read/reply -
-    see the module docstring.
+    Wider than scoping.teacher_class_ids on purpose. Gates read, reply AND verify - the
+    verify boundary used the narrower homeroom-only set until subject teachers turned out to
+    be locked out of verifying answers in their own subject. See _assert_teaching_teacher.
     """
     owned = set(teacher_class_ids(db, teacher_id))
     taught = {
@@ -178,19 +181,31 @@ def _load_thread(db: Session, user: CurrentUser, thread_id: int) -> DoubtThread:
     return thread
 
 
-def _assert_homeroom_teacher(db: Session, user: CurrentUser, thread: DoubtThread) -> None:
-    """The verify/unverify boundary - stricter than membership.
+def _assert_teaching_teacher(db: Session, user: CurrentUser, thread: DoubtThread) -> None:
+    """The verify/unverify boundary - stricter than membership, wider than homeroom.
 
     A student must never be able to certify their own or a classmate's answer into the
-    knowledge base: the teacher's judgement is the only thing separating this corpus
-    from unmoderated student guesses. And a teacher may only certify for the class they
-    are the class teacher of.
+    knowledge base: the teacher's judgement is the only thing separating this corpus from
+    unmoderated student guesses. That part is unchanged.
+
+    WAS HOMEROOM-ONLY, and that was wrong. It used scoping.teacher_class_ids, so only the
+    class teacher could verify - which meant the Maths teacher for Grade 1-A, the person
+    actually qualified to judge a Maths answer, got "Only this class's teacher can verify an
+    answer for it" on a thread in their own subject. The homeroom teacher might teach a
+    different subject entirely. A teacher with no homeroom could never verify anything.
+
+    Now uses the SAME `_teaching_class_ids` that already gates read/reply on this router
+    (homeroom UNION timetable-taught), so anyone who teaches the class can verify for it.
+    Deliberately not narrowed further to "only if you teach the thread's subject": a
+    DoubtThread carries a class, and matching on subject would silently drop threads whose
+    subject is unset - denying verification is a worse failure than a slightly wide gate
+    among colleagues who all teach the same students.
     """
     if user.role != "teacher":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a teacher can verify an answer")
-    if thread.class_id not in teacher_class_ids(db, user.id):
+    if thread.class_id not in _teaching_class_ids(db, user.id):
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Only this class's teacher can verify an answer for it"
+            status.HTTP_403_FORBIDDEN, "Only a teacher of this class can verify an answer for it"
         )
 
 
@@ -387,7 +402,7 @@ def verify_reply(
     it does not.
     """
     thread = _load_thread(db, user, thread_id)
-    _assert_homeroom_teacher(db, user, thread)
+    _assert_teaching_teacher(db, user, thread)
 
     reply = db.query(ThreadReply).filter(ThreadReply.id == reply_id).one_or_none()
     if reply is None:
@@ -463,7 +478,7 @@ def unverify_reply(
     keeps quoting an answer nobody stands behind.
     """
     thread = _load_thread(db, user, thread_id)
-    _assert_homeroom_teacher(db, user, thread)
+    _assert_teaching_teacher(db, user, thread)
 
     if thread.verified_reply_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This thread has no verified answer")

@@ -1,5 +1,6 @@
-import { AlertCircle, Download, Loader2, Sparkles } from "lucide-react";
-import { useFileDownload } from "@/hooks/useFileDownload";
+import { useState } from "react";
+import { Eye, Sparkles } from "lucide-react";
+import FileViewerDialog from "@/components/shared/FileViewerDialog";
 
 export interface PostAttachmentRef {
   id: number;
@@ -11,8 +12,11 @@ export interface PostAttachmentRef {
   resource_id?: number | null;
 }
 
-/** One downloadable post attachment. See useFileDownload for why this is a button
- * making an authenticated request rather than a plain link to `att.file_url`. */
+/** One viewable post attachment.
+ *
+ * A button rather than a link because `att.file_url` is an object path in a PRIVATE bucket -
+ * the bytes come through an authenticated, role-scoped route. Opens FileViewerDialog, which
+ * renders the file inline and keeps Download available. */
 export default function AttachmentLink({
   attachment,
   formatBytes,
@@ -22,17 +26,14 @@ export default function AttachmentLink({
   formatBytes: (bytes: number) => string;
   icon: React.ComponentType<{ className?: string }>;
 }) {
-  const { open, isLoading, error } = useFileDownload(
-    `/classroom/attachments/${attachment.id}/download`,
-  );
+  const [open, setOpen] = useState(false);
 
   return (
     <div className="flex flex-col gap-1">
       <button
         type="button"
-        onClick={open}
-        disabled={isLoading}
-        className="flex w-full items-center justify-between gap-3 rounded-xl border border-border bg-elevated/30 p-2.5 text-left transition-colors hover:bg-elevated/70 disabled:opacity-60 group"
+        onClick={() => setOpen(true)}
+        className="flex w-full items-center justify-between gap-3 rounded-xl border border-border bg-elevated/30 p-2.5 text-left transition-colors hover:bg-elevated/70 group"
       >
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-accent">
@@ -62,18 +63,15 @@ export default function AttachmentLink({
             </span>
           </div>
         </div>
-        {isLoading ? (
-          <Loader2 className="h-4 w-4 shrink-0 animate-spin text-ink-faint" />
-        ) : (
-          <Download className="h-4 w-4 shrink-0 text-ink-faint group-hover:text-accent" />
-        )}
+        <Eye className="h-4 w-4 shrink-0 text-ink-faint group-hover:text-accent" />
       </button>
-      {error && (
-        <p className="flex items-start gap-1 pl-1 text-[11px] text-urgent" role="alert">
-          <AlertCircle className="mt-px h-3 w-3 shrink-0" />
-          {error}
-        </p>
-      )}
+      <FileViewerDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        path={`/classroom/attachments/${attachment.id}/download`}
+        fileName={attachment.file_name}
+        mimeType={attachment.file_type}
+      />
     </div>
   );
 }

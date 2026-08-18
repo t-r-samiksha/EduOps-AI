@@ -421,3 +421,51 @@ def test_parent_sees_own_childs_loans_but_not_the_catalog(client, rh_seed, rh_pa
     assert client.get("/library/catalog").status_code == 403
     assert client.get(f"/library/my-loans/{rh_seed['flagged'].id}").status_code == 200
     assert client.get(f"/library/my-loans/{rh_seed['healthy'].id}").status_code == 403
+
+
+def test_teacher_can_read_their_own_homework_calendar(client, rh_seed):
+    """REGRESSION. A teacher asking for their OWN deadlines was refused with 403.
+
+    GET /calendar/homework/{id} guarded with assert_can_view_student_record, whose teacher
+    branch tests `id in students_taught_by(...)`. A teacher's own user id is not one of their
+    students, so the check rejected them - and the page rendered "Could not load the academic
+    calendar" for every teacher in the app. Admins slipped through only because that branch
+    returns early.
+
+    The service itself always handled staff: it branches on role and returns a teacher's
+    taught-class deadlines. Only the gate was wrong.
+    """
+    teacher = rh_seed["teacher"]
+    _override_user("teacher", user_id=teacher.id, school_id=rh_seed["school"].id)
+
+    res = client.get(f"/calendar/homework/{teacher.id}")
+    assert res.status_code == 200, res.text
+    assert isinstance(res.json(), list)
+
+
+def test_teacher_still_cannot_read_a_calendar_for_a_student_they_do_not_teach(
+    client, rh_seed, db_session
+):
+    """The self-read exemption must not become "any id"."""
+    from app.models.school import School as _School
+
+    other_school = _School(name="Calendar Outsider School")
+    db_session.add(other_school)
+    db_session.flush()
+    student_role = db_session.query(Role).filter(Role.name == "student").one()
+    outsider_student = _user(db_session, student_role, "rh_outsider", other_school)
+    db_session.commit()
+
+    _override_user("teacher", user_id=rh_seed["teacher"].id, school_id=rh_seed["school"].id)
+    res = client.get(f"/calendar/homework/{outsider_student.id}")
+    assert res.status_code == 403
+
+
+def test_student_can_read_their_own_synced_calendar(client, rh_seed):
+    """GET /calendar/{user_id} carried the same self-read gap."""
+    student = rh_seed["flagged"]
+    _override_user("student", user_id=student.id, school_id=rh_seed["school"].id)
+
+    res = client.get(f"/calendar/{student.id}")
+    assert res.status_code == 200
+    assert isinstance(res.json(), list)

@@ -26,6 +26,22 @@ export function useStudentRemarks(studentId?: number, sentimentTag?: string) {
   });
 }
 
+/** Recent remarks for a whole class section, keyed by student id.
+ *
+ * One request for the roster rather than one per student - the bulk grid needs every row's
+ * history at once, and thirty calls to /remarks/{student_id} is what this replaces. */
+export function useClassRemarks(classId?: number, limitPerStudent = 3) {
+  return useQuery<{ class_id: number; by_student: Record<string, RemarkRecord[]> }>({
+    queryKey: ["class-remarks", classId, limitPerStudent],
+    queryFn: () =>
+      apiGet<{ class_id: number; by_student: Record<string, RemarkRecord[]> }>(
+        `/remarks/class/${classId}`,
+        { limit_per_student: limitPerStudent },
+      ),
+    enabled: typeof classId === "number" && !Number.isNaN(classId),
+  });
+}
+
 export function useCreateRemark() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -58,6 +74,9 @@ export function useCreateBulkRemarks() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["remarks"] });
       queryClient.invalidateQueries({ queryKey: ["report-cards"] });
+      // Without this the grid's inline history still showed the pre-save state, which reads
+      // as the save not having worked.
+      queryClient.invalidateQueries({ queryKey: ["class-remarks"] });
     },
   });
 }

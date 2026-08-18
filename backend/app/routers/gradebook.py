@@ -25,7 +25,6 @@ from app.services.gradebook_service import (
     get_term_weights,
     score_to_gpa,
 )
-from app.services.scoping import teacher_class_ids
 
 router = APIRouter(tags=["gradebook"])
 

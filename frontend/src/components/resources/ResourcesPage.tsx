@@ -4,7 +4,6 @@ import {
   FolderKanban,
   Search,
   Plus,
-  Download,
   Trash2,
   FileText,
   FileIcon,
@@ -13,12 +12,11 @@ import {
   FileArchive,
   Layers,
   Sparkles,
-  ExternalLink,
   BookOpen,
   Filter,
   X,
   Clock,
-  Loader2,
+  Eye,
 } from "lucide-react";
 import PageHeader from "@/components/shared/PageHeader";
 import ConfirmDialog from "@/components/shared/ConfirmDialog";
@@ -38,7 +36,7 @@ import {
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { useAuthStore } from "@/store/authStore";
-import { useFileDownload } from "@/hooks/useFileDownload";
+import FileViewerDialog from "@/components/shared/FileViewerDialog";
 import { timeAgo } from "@/lib/format";
 import type { ResourceItem } from "@/api/types";
 
@@ -72,38 +70,48 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** The per-card download control.
+/** The per-card View control.
  *
- * A separate component only because the hook it needs cannot be called inside the
- * `items.map()` that renders the cards.
+ * A separate component only because the state it needs cannot live inside the `items.map()`
+ * that renders the cards.
  *
- * This was `<a href={r.file_url}>`, but file_url is an object PATH inside a PRIVATE
- * bucket, not a URL - so the browser resolved it against the frontend origin and every
- * download 404ed. See useFileDownload. */
-function ResourceDownloadButton({ resourceId }: { resourceId: number }) {
-  const { open, isLoading, error } = useFileDownload(`/resources/${resourceId}/download`);
+ * WAS "Download / Open", NOW "View". Saving a file, hunting for it in Downloads and opening
+ * a copy that is stale the moment a teacher re-uploads is a poor way to answer "what is in
+ * this worksheet" - which is what people almost always want. FileViewerDialog renders PDFs,
+ * images and text inline and still offers Download, including for formats the browser cannot
+ * render at all.
+ *
+ * (Before that it was `<a href={r.file_url}>`, but file_url is an object PATH inside a
+ * PRIVATE bucket, not a URL - so the browser resolved it against the frontend origin and
+ * every download 404ed.) */
+function ResourceViewButton({
+  resourceId,
+  title,
+  mimeType,
+}: {
+  resourceId: number;
+  title: string;
+  mimeType?: string;
+}) {
+  const [open, setOpen] = useState(false);
 
   return (
     <div className="mt-1 flex w-full flex-col gap-1">
       <button
         type="button"
-        onClick={open}
-        disabled={isLoading}
-        className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-border bg-elevated/40 py-2 text-xs font-medium text-ink transition-colors hover:bg-elevated disabled:opacity-60"
+        onClick={() => setOpen(true)}
+        className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-border bg-elevated/40 py-2 text-xs font-medium text-ink transition-colors hover:bg-elevated"
       >
-        {isLoading ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
-        ) : (
-          <Download className="h-3.5 w-3.5 text-accent" />
-        )}
-        <span>{isLoading ? "Opening…" : "Download / Open"}</span>
-        {!isLoading && <ExternalLink className="ml-0.5 h-3 w-3 text-ink-faint" />}
+        <Eye className="h-3.5 w-3.5 text-accent" />
+        <span>View</span>
       </button>
-      {error && (
-        <p className="text-[11px] text-urgent" role="alert">
-          {error}
-        </p>
-      )}
+      <FileViewerDialog
+        open={open}
+        onClose={() => setOpen(false)}
+        path={`/resources/${resourceId}/download`}
+        fileName={title}
+        mimeType={mimeType}
+      />
     </div>
   );
 }
@@ -585,7 +593,11 @@ export default function ResourcesPage() {
                   </div>
 
                   {/* Preview / Download Button */}
-                  <ResourceDownloadButton resourceId={r.id} />
+                  <ResourceViewButton
+                    resourceId={r.id}
+                    title={r.title}
+                    mimeType={r.mime_type}
+                  />
                 </CardContent>
               </Card>
             );

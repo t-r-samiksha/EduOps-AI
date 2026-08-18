@@ -11,7 +11,7 @@ this module's response shape).
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -22,7 +22,12 @@ from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.scoping import assert_can_view_student_record
 from app.services.remark_sentiment import analyze_sentiment
-from app.services.scoping import assert_parent_linked, students_in_classes, teacher_class_ids
+from app.services.scoping import (
+    assert_can_view_class,
+    assert_parent_linked,
+    classes_taught_by,
+    students_in_classes,
+)
 
 router = APIRouter(tags=["remarks"])
 
@@ -68,7 +73,14 @@ def student_remarks(
         if student.school_id != user.school_id:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Student not found")
     elif user.role == "teacher":
-        if student_id not in students_in_classes(db, teacher_class_ids(db, user.id)):
+        # classes_taught_by, not teacher_class_ids: homeroom UNION timetable-taught.
+        #
+        # Homeroom-only left this endpoint inconsistent with the WRITE path beside it. A
+        # subject teacher can record remarks for any class they teach (POST /remarks/bulk,
+        # whose roster comes from GET /reference/class/{id}/students - gated on taught
+        # classes), but could not read remarks for those same students back. Writable and
+        # unreadable by the same person is not a defensible boundary.
+        if student_id not in students_in_classes(db, classes_taught_by(db, user.id)):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized for this student")
     elif user.role == "parent":
         assert_parent_linked(db, user.id, student_id)
@@ -206,6 +218,82 @@ def create_bulk_remarks_endpoint(
         subject_id=body.subject_id,
     )
     return {"status": "created", "count": len(created)}
+
+
+class ClassRemarksResponse(BaseModel):
+    class_id: int
+    by_student: dict[int, list[RemarkRecordOut]]
+    """Keyed by student id. A MAP rather than a flat list so the grid can look up a row's
+    history directly instead of filtering the whole class's remarks per render."""
+
+
+@router.get("/remarks/class/{class_id}", response_model=ClassRemarksResponse)
+def get_class_remarks(
+    class_id: int,
+    limit_per_student: int = Query(default=3, ge=1, le=20),
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """Recent remarks for every student in a class section, newest first.
+
+    WHY THIS EXISTS. The bulk remarks grid showed a teacher an empty text box per student with
+    no indication of what had already been recorded, so the same observation could be entered
+    week after week with nothing surfacing the duplication - and a teacher had no way to see
+    whether a colleague had already noted the same thing.
+
+    ONE REQUEST FOR THE WHOLE ROSTER. Fetching per student would be an N+1 across a class of
+    thirty; the alternative (reusing GET /remarks/{student_id} thirty times) is what made this
+    worth its own endpoint.
+
+    `limit_per_student` is applied in Python rather than as a per-student SQL limit: a
+    lateral/window query for a handful of rows per class is not worth the complexity, and the
+    class's full remark history is small.
+    """
+    from app.models.remark import Remark
+
+    assert_can_view_class(db, user, class_id, what="class remarks")
+
+    rows = (
+        db.query(Remark)
+        .filter(Remark.class_id == class_id)
+        .order_by(Remark.created_at.desc(), Remark.id.desc())
+        .all()
+    )
+
+    author_ids = {r.author_id for r in rows}
+    authors = {
+        u.id: u for u in db.query(User).filter(User.id.in_(author_ids or [-1])).all()
+    }
+    subject_ids = {r.subject_id for r in rows if r.subject_id}
+    subjects = {
+        sub.id: sub
+        for sub in db.query(Subject).filter(Subject.id.in_(subject_ids or [-1])).all()
+    }
+
+    by_student: dict[int, list[RemarkRecordOut]] = {}
+    for r in rows:
+        bucket = by_student.setdefault(r.student_id, [])
+        if len(bucket) >= limit_per_student:
+            continue
+        author = authors.get(r.author_id)
+        subj = subjects.get(r.subject_id) if r.subject_id else None
+        bucket.append(
+            RemarkRecordOut(
+                id=r.id,
+                student_id=r.student_id,
+                student_name=None,
+                author_id=r.author_id,
+                author_name=(author.full_name or author.email) if author else None,
+                class_id=r.class_id,
+                subject_id=r.subject_id,
+                subject_name=subj.name if subj else None,
+                content=r.content,
+                sentiment_tag=r.sentiment_tag,
+                created_at=r.created_at,
+            )
+        )
+
+    return ClassRemarksResponse(class_id=class_id, by_student=by_student)
 
 
 @router.get("/remarks/{student_id}", response_model=list[RemarkRecordOut])

@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -28,7 +29,7 @@ from app.models.user import User
 from app.services.announcements import publish_announcement
 from app.services.classroom_materials import index_post_attachments
 from app.services.auth import CurrentUser, get_current_user, require_role
-from app.services.scoping import deny_parent
+from app.services.scoping import classes_taught_by, deny_parent
 from app.services.supabase_admin import download_resource_file
 
 router = APIRouter(tags=["classroom-stream"])
@@ -173,8 +174,12 @@ def _assert_can_view_classroom(db: Session, user: CurrentUser, classroom: Classr
         return
 
     if user.role == "teacher":
-        # Teacher of this classroom or homeroom class teacher
+        # Teacher of this classroom, or any teacher responsible for its class (homeroom
+        # UNION timetable-taught). Must match get_my_classrooms' own filter, or a space
+        # would be listed and then 403 when opened.
         if classroom.teacher_id == user.id:
+            return
+        if classroom.class_id in classes_taught_by(db, user.id):
             return
         school_class = db.query(SchoolClass).filter(SchoolClass.id == classroom.class_id).one_or_none()
         if school_class and school_class.class_teacher_id == user.id:
@@ -234,10 +239,19 @@ def _assert_can_post_to_classroom(db: Session, user: CurrentUser, classroom: Cla
     if user.role == "teacher":
         if classroom.teacher_id == user.id:
             return
+        # Anyone who TEACHES the class may post to its stream - a subject teacher sharing
+        # their own material is the primary use of a class stream, and locking it to the
+        # single "assigned" teacher meant the space was read-only for everyone else who
+        # stands in front of those students. classes_taught_by covers homeroom too, so the
+        # explicit class_teacher_id branch below is now redundant but harmless.
+        if classroom.class_id in classes_taught_by(db, user.id):
+            return
         school_class = db.query(SchoolClass).filter(SchoolClass.id == classroom.class_id).one_or_none()
         if school_class and school_class.class_teacher_id == user.id:
             return
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the assigned teacher can post to this classroom")
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Only a teacher of this class can post to its stream"
+        )
 
     raise HTTPException(status.HTTP_403_FORBIDDEN, "Students and parents cannot create classroom posts")
 
@@ -276,8 +290,25 @@ def get_my_classrooms(
     if user.role in ("admin", "principal"):
         classrooms = query.order_by(Classroom.class_name, Classroom.id).all()
     elif user.role == "teacher":
-        # Teacher's own classrooms or where they teach
-        classrooms = query.filter(Classroom.teacher_id == user.id).order_by(Classroom.class_name).all()
+        # Own classrooms UNION every class they are responsible for (homeroom or timetable).
+        #
+        # THE COMMENT HERE ALREADY SAID "or where they teach" AND THE CODE NEVER DID IT. It
+        # filtered on Classroom.teacher_id alone, so a teacher only ever saw spaces they were
+        # recorded as owning - a subject teacher for Grade 1-A saw "No Classroom Spaces Found",
+        # and so did that class's own homeroom teacher whenever an ADMIN had created the space
+        # (which is how they get created in practice). The stream was effectively invisible to
+        # everyone except whoever happened to be stamped on the row.
+        taught_class_ids = classes_taught_by(db, user.id)
+        classrooms = (
+            query.filter(
+                or_(
+                    Classroom.teacher_id == user.id,
+                    Classroom.class_id.in_(taught_class_ids or [-1]),
+                )
+            )
+            .order_by(Classroom.class_name)
+            .all()
+        )
     elif user.role == "student":
         student_class_ids = [
             row.class_id
@@ -562,14 +593,36 @@ def get_classroom_stream(
     )
 
 
-@router.delete("/classroom/{classroom_id}/post/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_stream_post(
+class PostUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    content: str | None = Field(default=None, min_length=1)
+    """Partial update - omit a field to leave it unchanged, same convention as every other
+    *Update schema in this codebase (master_data.py, teachers.py, students.py).
+
+    Attachments are deliberately NOT editable here: they are stored objects with a linked
+    `resources` row and kb_chunks embeddings, so swapping one out is a delete-and-re-upload,
+    not a field edit. Remove the post and repost if the files were wrong."""
+
+
+@router.put("/classroom/{classroom_id}/post/{post_id}", response_model=StreamPostOut)
+def update_stream_post(
     classroom_id: int,
     post_id: int,
+    body: PostUpdateRequest,
     user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
     db: Session = Depends(get_db),
 ):
-    """Delete a stream post. Only the post author or school admin/principal can delete."""
+    """Edit a stream post's title or body.
+
+    WHY THIS EXISTS. There was no edit route at all - a post could only be created and
+    deleted, so fixing a typo or a wrong due date meant deleting the post (losing its
+    attachments, and any indexed resource with them) and writing it again. Any teacher of
+    the class may edit, matching who may post and delete.
+    """
+    classroom = db.query(Classroom).filter(Classroom.id == classroom_id).one_or_none()
+    if not classroom:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Classroom not found")
+
     post = (
         db.query(StreamPost)
         .filter(StreamPost.id == post_id, StreamPost.classroom_id == classroom_id)
@@ -578,8 +631,71 @@ def delete_stream_post(
     if not post:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Post not found")
 
-    if user.role not in ("admin", "principal") and post.author_id != user.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only delete your own posts")
+    _assert_can_post_to_classroom(db, user, classroom)
+
+    if body.title is not None:
+        post.title = body.title.strip()
+    if body.content is not None:
+        post.content = body.content.strip()
+
+    # NOT re-published as an announcement on edit, even for post_type="announcement".
+    # Creation dispatches notifications through publish_announcement; doing that again on
+    # every edit would re-notify every student and parent for a typo fix.
+    db.commit()
+    db.refresh(post)
+
+    author_user = db.query(User).filter(User.id == post.author_id).one_or_none()
+    return StreamPostOut(
+        id=post.id,
+        classroom_id=post.classroom_id,
+        author_id=post.author_id,
+        author=(
+            PostAuthorOut(
+                id=author_user.id,
+                full_name=author_user.full_name or author_user.email,
+                email=author_user.email,
+                role=None,
+            )
+            if author_user
+            else None
+        ),
+        post_type=post.post_type,
+        title=post.title,
+        content=post.content,
+        created_at=post.created_at,
+        updated_at=post.updated_at,
+        attachments=[AttachmentOut.model_validate(a) for a in post.attachments],
+    )
+
+
+@router.delete("/classroom/{classroom_id}/post/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_stream_post(
+    classroom_id: int,
+    post_id: int,
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """Delete a stream post. Any teacher of the class, or an admin/principal, may delete."""
+    classroom = db.query(Classroom).filter(Classroom.id == classroom_id).one_or_none()
+    if not classroom:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Classroom not found")
+
+    post = (
+        db.query(StreamPost)
+        .filter(StreamPost.id == post_id, StreamPost.classroom_id == classroom_id)
+        .one_or_none()
+    )
+    if not post:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Post not found")
+
+    # Any teacher of this class may delete, not only the post's author.
+    #
+    # Co-teachers of one stream are peers: a subject teacher and the homeroom teacher share
+    # the same students and the same space, and requiring the original author meant a
+    # mistaken or outdated post could not be removed by the person standing in front of the
+    # class. _assert_can_post_to_classroom is the same gate that decides who may WRITE here,
+    # reused so the two cannot drift - students and parents are already excluded by it.
+    _assert_can_post_to_classroom(db, user, classroom)
 
     db.delete(post)
     db.commit()

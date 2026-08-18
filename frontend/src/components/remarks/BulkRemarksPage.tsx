@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useClassRoster } from "@/api/hooks/useClassRoster";
-import { useStudentRemarks, useCreateBulkRemarks } from "@/api/hooks/useRemarks";
+import { useStudentRemarks, useCreateBulkRemarks, useClassRemarks } from "@/api/hooks/useRemarks";
 import { useAuthStore } from "@/store/authStore";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
@@ -50,6 +50,11 @@ export default function BulkRemarksPage() {
     isTeacherOrAdmin && selectedClassId ? Number(selectedClassId) : undefined,
   );
   const students = roster.data?.students ?? [];
+  // Existing remarks per student, so a teacher can see what is already recorded instead of
+  // being shown an empty box and re-entering the same observation every week.
+  const existing = useClassRemarks(
+    isTeacherOrAdmin && selectedClassId ? Number(selectedClassId) : undefined,
+  );
 
   const [selectedSentimentFilter, setSelectedSentimentFilter] = useState<string>("all");
   const viewed = useViewedStudent();
@@ -132,7 +137,7 @@ export default function BulkRemarksPage() {
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
             {isTeacherOrAdmin
-              ? "Record sentiment-tagged feedback. Negative remarks feed a student's early-warning risk score."
+              ? "Recorded remarks print on the student's report card and feed their early-warning risk score."
               : "Review chronological feedback and teacher observations from your classes."}
           </p>
         </div>
@@ -224,8 +229,25 @@ export default function BulkRemarksPage() {
                         };
                         return (
                           <tr key={st.id} className="transition-colors hover:bg-muted/20">
-                            <td className="p-4 font-semibold text-foreground">{st.name}</td>
-                            <td className="p-4">
+                            <td className="p-4 align-top">
+                              <span className="font-semibold text-foreground">{st.name}</span>
+                              {(existing.data?.by_student?.[String(st.id)]?.length ?? 0) > 0 && (
+                                <ul className="mt-1.5 space-y-1">
+                                  {existing.data!.by_student[String(st.id)].map((r) => (
+                                    <li key={r.id} className="text-[11px] leading-snug">
+                                      <span className="italic text-muted-foreground">
+                                        "{r.content}"
+                                      </span>
+                                      <span className="ml-1 whitespace-nowrap text-muted-foreground/70">
+                                        · {r.sentiment_tag} ·{" "}
+                                        {new Date(r.created_at).toLocaleDateString()}
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </td>
+                            <td className="p-4 align-top">
                               <Input
                                 placeholder="Enter constructive remark or praise..."
                                 value={entry.content}
@@ -233,7 +255,7 @@ export default function BulkRemarksPage() {
                                 className="text-xs"
                               />
                             </td>
-                            <td className="p-4">
+                            <td className="p-4 align-top">
                               <div className="flex gap-1.5">
                                 {SENTIMENT_PILLS.map((pill) => {
                                   const isSelected = entry.sentiment_tag === pill.key;

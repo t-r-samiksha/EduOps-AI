@@ -225,17 +225,22 @@ def test_security_teacher_cannot_verify_in_a_class_they_do_not_teach(client, see
 
 
 def test_security_homeroom_teacher_of_another_section_cannot_verify(client, seed, db_session):
-    """SECURITY 4. CROSS-CLASS WITHIN ONE SCHOOL - the case most likely to be wrong,
-    because both teachers are legitimate homeroom teachers of the same grade in the
-    same school, and a verified answer from either thread lands in the same grade-3
-    corpus. 3-A's teacher must not certify content on a 3-B thread.
+    """SECURITY 4. CROSS-CLASS WITHIN ONE SCHOOL - both teachers are legitimate homeroom
+    teachers of the same grade in the same school, and a verified answer from either thread
+    lands in the same grade-3 corpus. A teacher with no link to 3-B must not touch a 3-B
+    thread.
 
-    Covers BOTH refusal paths, which fail at different gates:
-      (a) no relationship to 3-B at all      -> blocked at the membership gate
-      (b) TEACHES 3-B but is homeroom of 3-A -> passes membership, blocked at the
-          certification gate. This is the sharp case: it is the only one where the
-          router's two teacher rules actually diverge, and the one that would silently
-          pass if verify had reused the wider _teaching_class_ids.
+    (a) no relationship to 3-B at all -> refused, at the membership gate. Unchanged.
+    (b) TEACHES 3-B but is homeroom of 3-A -> NOW ALLOWED to certify.
+
+    Case (b) INVERTED on 2026-08-18 with the verify-policy change. It used to assert 403
+    here, and this docstring used to call it "the one that would silently pass if verify had
+    reused the wider _teaching_class_ids" - which is now exactly what verify does, on
+    purpose. The reasoning for the old rule (certification reaches the whole grade, so it
+    should sit with the class teacher) was overridden because the homeroom teacher may not
+    teach the subject in question at all, leaving the qualified teacher unable to verify.
+    Kept as a test rather than deleted, so the boundary that DOES still hold - (a), a teacher
+    with no relationship to the class - stays covered.
     """
     import datetime
 
@@ -266,13 +271,16 @@ def test_security_homeroom_teacher_of_another_section_cannot_verify(client, seed
     # Membership now genuinely holds - they can see and answer the thread...
     assert client.get(f"/threads/{thread.id}").status_code == 200
     assert client.post(f"/threads/{thread.id}/reply", json={"body": "A thought."}).status_code == 200
-    # ...and certification is still refused, by the narrower rule.
-    resp = client.put(f"/threads/{thread.id}/verify/{reply.id}")
-    assert resp.status_code == 403
-    assert "this class's teacher" in resp.json()["detail"]
+    # ...and since 2026-08-18 they may certify for it too, because they teach it.
+    assert client.put(f"/threads/{thread.id}/verify/{reply.id}").status_code == 200
+    assert len(_chunks(db_session, thread.id)) == 1
+
+    # Unverify, so 3-B's own homeroom teacher re-verifying below is a real assertion rather
+    # than a no-op on an already-verified reply.
+    assert client.put(f"/threads/{thread.id}/unverify").status_code == 200
     assert _chunks(db_session, thread.id) == []
 
-    # 3-B's own homeroom teacher can.
+    # 3-B's own homeroom teacher can, as always.
     _as(seed, "teacher_b", "teacher")
     assert client.put(f"/threads/{thread.id}/verify/{reply.id}").status_code == 200
     assert len(_chunks(db_session, thread.id)) == 1
@@ -304,18 +312,31 @@ def test_security_cross_school_access_returns_no_data(client, seed, db_session):
 # =============================================================================
 
 
-def test_subject_teacher_can_read_and_reply_but_not_verify(client, seed, db_session):
-    """The two-rule split, asserted in one place: a teacher who teaches this class a
-    period participates in threads, but certifying content into the grade-wide corpus
-    stays with the class teacher."""
+def test_subject_teacher_can_read_reply_and_verify(client, seed, db_session):
+    """A teacher who teaches this class may read, reply AND verify.
+
+    POLICY CHANGE, 2026-08-18, and a deliberate one. Verification used to be homeroom-only
+    (scoping.teacher_class_ids) and this test asserted 403 here. The rationale on record was
+    that a verified answer enters the GRADE-WIDE bot corpus, so certifying is a bigger act
+    than replying and belonged to the class teacher alone.
+
+    That was overridden by product decision: the homeroom teacher of Grade 1-A may teach a
+    different subject entirely, so the person actually qualified to judge a Maths answer was
+    the one blocked - and a teacher with no homeroom could never verify anything at all. Read,
+    reply and verify now share `_teaching_class_ids`.
+
+    What still holds, and is covered by SECURITY 3/4/5 below: a teacher with NO relationship
+    to the class cannot verify, and nobody can verify across schools.
+    """
     thread, reply = _make_thread(db_session, seed, "class_a", "student_a")
 
     _as(seed, "subject_teacher", "teacher")
     assert client.get(f"/threads/{thread.id}").status_code == 200
     assert client.post(f"/threads/{thread.id}/reply", json={"body": "Think about density."}).status_code == 200
 
-    assert client.put(f"/threads/{thread.id}/verify/{reply.id}").status_code == 403
-    assert _chunks(db_session, thread.id) == []
+    assert client.put(f"/threads/{thread.id}/verify/{reply.id}").status_code == 200
+    # And the answer really does reach the corpus - the point of verifying.
+    assert len(_chunks(db_session, thread.id)) == 1
 
 
 # =============================================================================

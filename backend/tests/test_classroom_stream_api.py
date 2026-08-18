@@ -504,3 +504,163 @@ def test_attachment_download_rejects_legacy_fabricated_urls(client, seed, db_ses
     )
     res = client.get(f"/classroom/attachments/{legacy_id}/download")
     assert res.status_code in (403, 404)
+
+
+# --- Subject teachers get full access to a classroom space they teach ---
+
+
+def _teach_the_class(db_session, seed, teacher):
+    """Give `teacher` a timetable period in seed["class"] without making them its homeroom
+    teacher or the classroom's recorded owner - the shape that was locked out."""
+    from datetime import time
+
+    from app.models.timetable import Room, TimetableSlot
+
+    room = Room(
+        name=f"CR-{uuid.uuid4().hex[:6]}",
+        capacity=30,
+        room_type="classroom",
+        school_id=seed["school"].id,
+    )
+    db_session.add(room)
+    db_session.flush()
+    db_session.add(
+        TimetableSlot(
+            day_of_week=2,
+            period_number=3,
+            start_time=time(11, 0),
+            end_time=time(11, 45),
+            subject_id=seed["classroom"].subject_id,
+            teacher_id=teacher.id,
+            class_id=seed["class"].id,
+            room_id=room.id,
+            academic_year=ACADEMIC_YEAR,
+            is_active=True,
+        )
+    )
+    db_session.commit()
+
+
+def test_subject_teacher_sees_a_classroom_space_they_did_not_create(client, seed, db_session):
+    """THE BUG: my-classrooms filtered on Classroom.teacher_id ALONE.
+
+    Its own comment said "Teacher's own classrooms or where they teach" and the second half
+    was never implemented - so a subject teacher for a section saw "No Classroom Spaces Found",
+    and so did that class's homeroom teacher whenever an ADMIN had created the space, which is
+    how they get created in practice.
+    """
+    _teach_the_class(db_session, seed, seed["other_teacher"])
+
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+    res = client.get("/classroom/my-classrooms")
+    assert res.status_code == 200
+    assert seed["classroom"].id in [c["id"] for c in res.json()], (
+        "a teacher of this class cannot see its classroom space"
+    )
+
+
+def test_teacher_with_no_link_to_the_class_sees_no_space(client, seed):
+    """The widening must not become "every teacher sees every space"."""
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+    res = client.get("/classroom/my-classrooms")
+    assert res.status_code == 200
+    assert seed["classroom"].id not in [c["id"] for c in res.json()]
+
+
+def test_subject_teacher_can_read_post_edit_and_delete(client, seed, db_session):
+    """Listing a space and being able to use it must agree - a space that appears in the
+    list and then 403s on open is worse than one that never appeared."""
+    _teach_the_class(db_session, seed, seed["other_teacher"])
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+    cid = seed["classroom"].id
+
+    # Read
+    assert client.get(f"/classroom/{cid}").status_code == 200
+    assert client.get(f"/classroom/{cid}/stream").status_code == 200
+
+    # Post
+    created = client.post(
+        f"/classroom/{cid}/post",
+        json={"post_type": "note", "title": "Subject teacher note", "content": "Read chapter 4."},
+    )
+    assert created.status_code == 201, created.text
+    post_id = created.json()["id"]
+
+    # Edit - a route that did not exist at all before; a typo meant deleting and reposting.
+    edited = client.put(
+        f"/classroom/{cid}/post/{post_id}",
+        json={"title": "Subject teacher note (updated)"},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["title"] == "Subject teacher note (updated)"
+    # Untouched field survives a partial update.
+    assert edited.json()["content"] == "Read chapter 4."
+
+    # Delete
+    assert client.delete(f"/classroom/{cid}/post/{post_id}").status_code == 204
+
+
+def test_a_teacher_of_the_class_can_edit_another_teachers_post(client, seed, db_session):
+    """Co-teachers of one stream are peers - requiring the original author meant an outdated
+    post could not be corrected by the person standing in front of the class."""
+    post = StreamPost(
+        classroom_id=seed["classroom"].id,
+        author_id=seed["teacher"].id,
+        post_type="note",
+        title="Original",
+        content="By the assigned teacher.",
+    )
+    db_session.add(post)
+    db_session.commit()
+    post_id = post.id
+
+    _teach_the_class(db_session, seed, seed["other_teacher"])
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+
+    res = client.put(
+        f"/classroom/{seed['classroom'].id}/post/{post_id}",
+        json={"content": "Corrected by a colleague who teaches this class."},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["content"] == "Corrected by a colleague who teaches this class."
+
+
+def test_unrelated_teacher_cannot_post_or_edit(client, seed, db_session):
+    """No timetable period, no homeroom, not the owner - still refused."""
+    post = StreamPost(
+        classroom_id=seed["classroom"].id,
+        author_id=seed["teacher"].id,
+        post_type="note",
+        title="Original",
+        content="x",
+    )
+    db_session.add(post)
+    db_session.commit()
+    post_id = post.id
+
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+    cid = seed["classroom"].id
+    assert client.post(
+        f"/classroom/{cid}/post",
+        json={"post_type": "note", "title": "Nope", "content": "Nope"},
+    ).status_code == 403
+    assert client.put(f"/classroom/{cid}/post/{post_id}", json={"title": "Nope"}).status_code == 403
+    assert client.delete(f"/classroom/{cid}/post/{post_id}").status_code == 403
+
+
+def test_students_and_parents_cannot_edit_posts(client, seed, db_session):
+    post = StreamPost(
+        classroom_id=seed["classroom"].id,
+        author_id=seed["teacher"].id,
+        post_type="note",
+        title="Original",
+        content="x",
+    )
+    db_session.add(post)
+    db_session.commit()
+
+    _override_user("student", user_id=seed["student_enrolled"].id, school_id=seed["school"].id)
+    res = client.put(
+        f"/classroom/{seed['classroom'].id}/post/{post.id}", json={"title": "Hacked"}
+    )
+    assert res.status_code == 403

@@ -18,6 +18,34 @@ owner should never be blocked waiting on a backend endpoint's shape.
 - Every new endpoint gets added here (method, path, request, response, roles allowed)
   before it's implemented.
 
+### "A teacher's classes" means homeroom UNION timetable-taught
+
+Two different sets exist in `services/scoping.py` and picking the wrong one is the most
+repeated bug in this codebase:
+
+- **`teacher_class_ids(db, teacher_id)`** — HOMEROOM ONLY (`SchoolClass.class_teacher_id`).
+- **`classes_taught_by(db, teacher_id)`** — homeroom **UNION** every class they have an
+  active `TimetableSlot` for. **This is what "my classes" means almost everywhere.**
+
+Homeroom-only silently returns an EMPTY result for a subject teacher, and for any teacher
+with no homeroom at all — which is normal. It never errors, so the screen reads as "you have
+nothing" rather than "you were denied". It has been found and fixed in five places:
+
+| Where | Symptom before the fix |
+| --- | --- |
+| `GET /risk/flagged`, `/admin/early-warning/students` | a subject teacher's Early-Warning page was always empty |
+| `PUT /threads/{id}/verify` | *"Only this class's teacher can verify"* to the teacher of that very subject |
+| `GET /classroom/my-classrooms` | *"No Classroom Spaces Found"*, even for the class teacher when an admin created the space |
+| `POST /classroom/{id}/post` | the stream was read-only for every teacher but the one recorded on the row |
+| `GET /remarks/student/{id}` | a teacher could WRITE remarks for a class and not read them back |
+
+Still deliberately homeroom-only, and correct: **fees** (the class teacher handles a section's
+fees) and **attendance day-register ownership** in `routers/attendance.py`. Those keep their
+own private copies by the convention documented at `routers/fees.py:22-24`.
+
+**Before writing a teacher scope check, decide which of the two you mean, and say why in a
+comment.**
+
 ### Uploaded files: NEVER return a Supabase public URL
 
 Every uploaded file in this app lives in a **private** Supabase Storage bucket
@@ -2558,7 +2586,8 @@ Person A/C's sections.
 >   `POST /assignments/{assignment_id}/nudge-missing`
 > - **classroom** — `GET /classroom/my-classrooms`, `POST /classroom`,
 >   `GET /classroom/{classroom_id}`, `GET /classroom/{classroom_id}/stream`,
->   `POST /classroom/{classroom_id}/post`, `DELETE /classroom/{classroom_id}/post/{post_id}`,
+>   `POST /classroom/{classroom_id}/post`, `PUT /classroom/{classroom_id}/post/{post_id}`,
+>   `DELETE /classroom/{classroom_id}/post/{post_id}`,
 >   `POST /classroom/{classroom_id}/upload`,
 >   `GET /classroom/attachments/{attachment_id}/download`
 > - **gradebook** — `POST /gradebook/entry`, `POST /gradebook/bulk`,
@@ -2578,7 +2607,8 @@ Person A/C's sections.
 >   `GET /resources/{resource_id}/download`,
 >   `DELETE /resources/{resource_id}` (added alongside Person A/C's existing
 >   `POST /resources/upload` and `GET /resources`)
-> - **remarks** — `POST /remarks`, `POST /remarks/bulk`, `GET /remarks/{student_id}`
+> - **remarks** — `POST /remarks`, `POST /remarks/bulk`, `GET /remarks/{student_id}`,
+>   `GET /remarks/class/{class_id}`
 > - **bots** — `POST /bots/teacher/ask`
 >
 > **`/remarks` is not a collision.** `GET /remarks/{student_id}` (Person B, table
@@ -2608,6 +2638,38 @@ Create a stream post or shared resource.
 > **This is the original Phase-0 stub. The implemented route is
 > `POST /classroom/{classroom_id}/post`** — see the Person B endpoint inventory above for
 > the full path mapping.
+
+#### `PUT /classroom/{classroom_id}/post/{post_id}`
+Edit a post's title or body. Partial update — omit a field to leave it unchanged.
+- **Roles:** any teacher OF THE CLASS (homeroom or timetable-taught), admin, principal
+- **Request:** `{ "title": "Corrected title", "content": "..." }`
+- **Response:** the updated post, same shape as the create response.
+
+> **There was no edit route at all.** A post could only be created and deleted, so fixing a
+> typo or a wrong due date meant deleting it — losing its attachments and any indexed
+> `resources` row with them — and writing it again.
+
+Attachments are deliberately **not** editable here: each is a stored object with a linked
+`resources` row and `kb_chunks` embeddings, so replacing one is a delete-and-re-upload rather
+than a field edit. An edit does **not** re-dispatch notifications, even for
+`post_type: "announcement"` — creation already did, and re-notifying every student and parent
+for a typo fix would be worse than the typo.
+
+**Delete follows the same rule as post and edit**: any teacher of the class, not only the
+original author. Co-teachers of one stream are peers, and requiring the author meant an
+outdated post could not be removed by the person standing in front of the class.
+
+#### `GET /remarks/class/{class_id}`
+Recent remarks for every student in a section, keyed by student id.
+- **Roles:** teacher (own classes), admin, principal
+- **Query:** `?limit_per_student=3` (1–20)
+- **Response:** `{ "class_id": 41, "by_student": { "103": [ { "id": 9, "content": "...", "sentiment_tag": "academic", "author_name": "Meera Iyer", "created_at": "..." } ] } }`
+
+> Exists so the bulk remarks grid can show what is already recorded for each student. It
+> previously showed an empty box per row with no history, so the same observation could be
+> entered week after week and a teacher could not tell whether a colleague had already noted
+> it. A map rather than a flat list, and one request rather than one per student — thirty
+> calls to `GET /remarks/{student_id}` is what this replaces.
 
 #### Attached files become library resources, indexed for the bots
 
