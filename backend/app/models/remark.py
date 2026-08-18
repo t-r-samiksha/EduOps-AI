@@ -1,9 +1,18 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.class_ import SchoolClass
+    from app.models.school import School
+    from app.models.subject import Subject
+    from app.models.user import User
 
 REMARK_SENTIMENT_TAGS = ("academic", "behavioral", "appreciation")
 
