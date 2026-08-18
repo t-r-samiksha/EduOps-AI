@@ -13,6 +13,7 @@ from app.models.user import User
 from app.services.audit_log import write_audit_log
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.notify import dispatch_bulk
+from app.services.scoping import classes_taught_by
 
 router = APIRouter(tags=["early-warning"])
 
@@ -23,7 +24,24 @@ matches the low/medium/high midpoints implied by risk_scorer.py's own thresholds
 
 
 def _teacher_class_ids(db: Session, teacher_id: int) -> list[int]:
-    return [c.id for c in db.query(SchoolClass).filter(SchoolClass.class_teacher_id == teacher_id).all()]
+    """Classes this teacher is responsible for: homeroom UNION anything they teach.
+
+    WAS HOMEROOM-ONLY (`SchoolClass.class_teacher_id == teacher_id`), which meant a SUBJECT
+    teacher saw an empty Early-Warning page. Every flag was filtered to students in classes
+    they are the homeroom teacher of - so the Maths teacher for Grade 3-B could not see that
+    a student they teach five periods a week had been flagged, and a teacher with no homeroom
+    at all (which is normal) saw nothing anywhere, ever. The page rendered "No flagged
+    students" rather than an error, so it looked like good news instead of a permissions gap.
+
+    Delegates to services/scoping.py::classes_taught_by, whose docstring already records
+    this exact finding on the real Riverside data: scoping Meera Iyer by homeroom cut her
+    from 12 students to 2 and removed Grade 3-B entirely, and Kavya Reddy went to zero.
+
+    KEEPING THE PRIVATE NAME. routers/fees.py:22-24 documents the per-router-copy convention
+    deliberately, so this stays a thin wrapper rather than churning every call site - the
+    behaviour is what was wrong, not the indirection.
+    """
+    return classes_taught_by(db, teacher_id)
 
 
 def _students_in_classes(db: Session, class_ids: list[int]) -> set[int]:
@@ -184,7 +202,9 @@ def list_flagged(
         owned_class_ids = _teacher_class_ids(db, user.id)
         if class_id is not None:
             if class_id not in owned_class_ids:
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your class")
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, "You do not teach this class section"
+                )
             owned_class_ids = [class_id]
         query = query.filter(RiskFlag.student_id.in_(_students_in_classes(db, owned_class_ids) or [-1]))
     elif user.role == "parent":
@@ -211,6 +231,50 @@ def list_flagged(
     return [_enrich_flag_out(db, f) for f in query.order_by(RiskFlag.flagged_at.desc()).all()]
 
 
+def _load_flag_for_staff(db: Session, user: CurrentUser, flag_id: int) -> RiskFlag:
+    """Fetch a flag the caller is actually allowed to act on.
+
+    NOTHING CHECKED THIS. `acknowledge_flag`, `log_intervention` and `resolve_flag` each
+    looked the flag up by id alone, so any authenticated teacher or admin could acknowledge,
+    intervene on, or resolve a flag for a student in ANOTHER SCHOOL by incrementing the id -
+    and `log_intervention` would write their name into that school's intervention history.
+    `GET /risk/flagged` was scoped from the start, so the read path was safe and the write
+    paths were not, which is why it went unnoticed.
+
+    404 rather than 403 for a flag outside the caller's school, so ids in other tenants
+    cannot be probed by status code - same convention as report_cards.py's student check.
+    """
+    flag = db.query(RiskFlag).filter(RiskFlag.id == flag_id).one_or_none()
+    if flag is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Risk flag not found")
+
+    # MIRRORS GET /risk/flagged's OWN BRANCHES, deliberately - one rule per role, so what a
+    # caller can act on can never drift from what they can see (dead buttons on a visible
+    # flag, or worse, a live button on one they cannot).
+    if user.role == "teacher":
+        # Teaching the student IS the authority here, and it is inherently school-scoped:
+        # the classes come from this teacher's own homeroom/timetable rows. Deliberately NOT
+        # also comparing user.school_id - User.school_id is nullable, and a teacher with a
+        # real class assignment but no school column set must still be able to act on their
+        # own students. 403: they are a legitimate teacher, just not this student's.
+        if flag.student_id not in _students_in_classes(db, _teacher_class_ids(db, user.id)):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Not authorized to act on this student's flag"
+            )
+        return flag
+
+    # admin/principal: the flag's student must be in their school. THIS is the cross-tenant
+    # fix - RiskFlag carries no school_id of its own, so without going through the student
+    # an admin could acknowledge, intervene on, or resolve ANY school's flag by incrementing
+    # the id, and log_intervention would write their name into that school's history.
+    # 404 not 403 so ids in other tenants cannot be probed by status code.
+    student_ids = _students_in_school(db, user.school_id)
+    if flag.student_id not in student_ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Risk flag not found")
+
+    return flag
+
+
 # --- PUT /risk/{id}/acknowledge -----------------------------------------------------
 
 
@@ -220,9 +284,7 @@ def acknowledge_flag(
     user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
     db: Session = Depends(get_db),
 ):
-    flag = db.query(RiskFlag).filter(RiskFlag.id == flag_id).one_or_none()
-    if flag is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Risk flag not found")
+    flag = _load_flag_for_staff(db, user, flag_id)
     if flag.status != "open":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Flag is already {flag.status}, cannot acknowledge")
 
@@ -245,6 +307,9 @@ class InterventionOut(BaseModel):
     id: int
     risk_flag_id: int
     created_by: int
+    created_by_name: str | None = None
+    """Resolved on the list endpoint so the UI can show who acted without an extra request
+    per row. Left None on the create response, where the caller is the actor."""
     note: str
     action_taken: str
     created_at: datetime
@@ -264,9 +329,7 @@ def log_intervention(
     if not body.action_taken.strip():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "action_taken must not be empty")
 
-    flag = db.query(RiskFlag).filter(RiskFlag.id == flag_id).one_or_none()
-    if flag is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Risk flag not found")
+    _load_flag_for_staff(db, user, flag_id)
 
     intervention = Intervention(risk_flag_id=flag_id, created_by=user.id, note=body.note, action_taken=body.action_taken)
     db.add(intervention)
@@ -280,6 +343,65 @@ def log_intervention(
     return InterventionOut.model_validate(intervention)
 
 
+# --- GET /risk/{id}/interventions ---------------------------------------------------
+
+
+class InterventionListOut(BaseModel):
+    items: list[InterventionOut]
+
+
+@router.get("/risk/{flag_id}/interventions", response_model=InterventionListOut)
+def list_interventions(
+    flag_id: int,
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """The history of what staff actually did about a flagged student, newest first.
+
+    WHY THIS EXISTS. `POST /risk/{id}/intervention` had NO read counterpart - interventions
+    were write-only. A teacher could log "called parent, no answer", the row saved, and then
+    nothing anywhere in the app ever displayed it: not on the flag, not on the student, not
+    in any report. So the feature was indistinguishable from broken (the dialog closed and
+    nothing changed on screen), and the next teacher had no way to know an outreach had
+    already been made - which is the entire point of an intervention log.
+
+    `created_by_name` is resolved here so the UI can show WHO acted without a second
+    request per row.
+    """
+    _load_flag_for_staff(db, user, flag_id)
+
+    rows = (
+        db.query(Intervention)
+        .filter(Intervention.risk_flag_id == flag_id)
+        # id as tiebreak: created_at is a server_default now(), which is identical for rows
+        # written in the same transaction, so ordering on it alone is unstable.
+        .order_by(Intervention.created_at.desc(), Intervention.id.desc())
+        .all()
+    )
+    authors = {
+        u.id: u
+        for u in db.query(User).filter(User.id.in_([r.created_by for r in rows] or [-1])).all()
+    }
+    return InterventionListOut(
+        items=[
+            InterventionOut(
+                id=r.id,
+                risk_flag_id=r.risk_flag_id,
+                created_by=r.created_by,
+                created_by_name=(
+                    authors[r.created_by].full_name or authors[r.created_by].email
+                    if r.created_by in authors
+                    else None
+                ),
+                note=r.note,
+                action_taken=r.action_taken,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    )
+
+
 # --- PUT /risk/{id}/resolve ---------------------------------------------------------
 
 
@@ -289,9 +411,10 @@ def resolve_flag(
     user: CurrentUser = Depends(require_role("admin", "principal")),
     db: Session = Depends(get_db),
 ):
-    flag = db.query(RiskFlag).filter(RiskFlag.id == flag_id).one_or_none()
-    if flag is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Risk flag not found")
+    # Same cross-tenant gap the other two mutations had - an admin could resolve another
+    # school's flag by id. The gate is a no-op on the teacher branch here (this route is
+    # admin/principal only) but keeps all three mutations on one rule.
+    flag = _load_flag_for_staff(db, user, flag_id)
     if flag.status == "resolved":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Flag is already resolved")
 
@@ -338,7 +461,9 @@ def early_warning_students(
         owned_class_ids = _teacher_class_ids(db, user.id)
         if class_id is not None:
             if class_id not in owned_class_ids:
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your class")
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN, "You do not teach this class section"
+                )
             owned_class_ids = [class_id]
         query = query.filter(RiskFlag.student_id.in_(_students_in_classes(db, owned_class_ids) or [-1]))
     else:

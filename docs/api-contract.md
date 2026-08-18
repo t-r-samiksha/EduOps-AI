@@ -18,6 +18,38 @@ owner should never be blocked waiting on a backend endpoint's shape.
 - Every new endpoint gets added here (method, path, request, response, roles allowed)
   before it's implemented.
 
+### Uploaded files: NEVER return a Supabase public URL
+
+Every uploaded file in this app lives in a **private** Supabase Storage bucket
+(`resources` for teaching material and classroom attachments, `payment-proofs` for fee
+receipts — both created with `public: False`, see `services/supabase_admin.py`). So:
+
+- The stored `file_url` column is an object **PATH**, not a URL. Nothing can link to it
+  directly — not an `<a href>`, not an `<img src>`.
+- Reading a file back always goes through a **role-scoped API route** that streams the
+  bytes, and the frontend fetches it with `api/client.ts::apiGetBlob` so the request
+  carries the bearer token. `GET /classroom/attachments/{id}/download`,
+  `GET /resources/{id}/download` and `GET /admin/fee-payment-requests/{id}/proof` are
+  all this same shape.
+
+**This is written down because it was got wrong twice and shipped both times.** The
+classroom upload handler built
+`{SUPABASE_URL}/storage/v1/object/public/resources/{path}` and returned it as the
+attachment's URL. Supabase answers the `/public/` route for a *private* bucket with
+`{"statusCode":"404","error":"Bucket not found","code":"NoSuchBucket"}` — so every
+attachment link in the app was dead the moment it was created, no matter how well the
+upload itself went. The resources page had the sibling bug: it linked at the bare
+object path, which the browser resolved against the frontend origin.
+
+Making the bucket public would "fix" both by making every object URL guessable and
+routing around the routers' own view scoping — a parent could read another class's
+material by editing a path. Don't. Add a scoped download route instead.
+
+**Related rule: an upload that did not store the bytes is an ERROR.** Both handlers
+used to wrap the upload in `except Exception` and substitute an invented
+`https://storage.eduops.local/...` link, returning `201 Created` with a URL resolving
+to nothing and no record anywhere that the write had failed. Let the 502 propagate.
+
 ## Shared / Phase 0
 
 _Endpoints here are genuinely cross-cutting - not scoped to one person's domain.
@@ -30,6 +62,7 @@ here outside the normal "agree in this doc first" flow._
 | GET    | `/auth/me`  | any authenticated | Current user's identity + role |
 | POST   | `/auth/signup` | **public, no auth** | Real self-serve school + admin account signup |
 | GET    | `/reference/lookup` | any authenticated | Id -> name lookup for subjects/teachers/rooms/classes |
+| GET    | `/reference/class/{class_id}/students` | staff (admin/principal/teacher) | One class section's roster - id + name only |
 
 #### `POST /auth/signup`
 **Public/unauthenticated by design** - this is how a school's first admin account
@@ -57,6 +90,24 @@ login step after signup.
   slowapi/API-gateway layer in this repo) - a real, honestly-flagged gap. Every
   attempt (success or failure) is logged via a dedicated `eduops.signup` logger so
   abuse is at least visible after the fact.
+
+#### `GET /reference/class/{class_id}/students`
+Roles: **admin, principal, teacher** (a teacher only for sections they teach -
+homeroom UNION timetable-taught). Students and parents get 403: a roster is not
+per-child information.
+
+Returns `{class_id, class_name, students: [{id, name, is_primary}]}`.
+
+**Why this exists alongside `/reference/lookup`.** `lookup.students` is every student
+in the *school* with no class information, which cannot answer "pick a student in
+Grade 3-B". The pages that needed that were reduced to asking staff to type a raw
+numeric student id (the library's issue-book dialog, prefilled with `2`) or to
+hardcoding `class_id: 1` (bulk remarks). The only per-class roster that existed was
+`GET /gradebook/class/{class_id}`, which computes a full weighted gradebook summary
+per student - far too much work to fill a dropdown.
+
+Identity is **name**, not roll number: there is no roll-number column anywhere in this
+schema, so name within a section is all a human has to go on.
 
 #### `GET /reference/lookup`
 **Not in the original Phase 0 stub - added out-of-turn during Person A's frontend
@@ -1103,10 +1154,19 @@ algorithmic score - contrast with the nightly job's flags).
 
 #### `GET /risk/flagged`
 List currently-flagged students (excludes `resolved` unless `status` is explicitly
-requested). Role-scoped: teacher sees only students in classes where they're
-`class_teacher` (`403` if `class_id` isn't theirs); parent must pass `student_id` for
-a linked child (`400` if omitted, `403` if not linked); admin/principal see everything
-and may filter freely. Student role is not authorized on this endpoint.
+requested). Role-scoped: a teacher sees students in classes they are **responsible for —
+homeroom UNION anything they teach on the timetable** (`403` if `class_id` isn't one of
+theirs); parent must pass `student_id` for a linked child (`400` if omitted, `403` if not
+linked); admin/principal see their own school and may filter freely. Student role is not
+authorized on this endpoint.
+
+> **This was homeroom-only and is now homeroom-UNION-taught.** Filtering on
+> `SchoolClass.class_teacher_id` alone meant a SUBJECT teacher's Early-Warning page was
+> always empty — the Maths teacher for Grade 3-B could not see that a student they teach
+> five periods a week had been flagged, and a teacher with no homeroom at all (normal) saw
+> nothing anywhere, ever. It rendered "No flagged students" rather than an error, so a
+> permissions gap read as good news. Same rule as `services/scoping.py::classes_taught_by`,
+> whose docstring records the same finding on real data.
 - **Roles:** teacher, admin, principal, parent
 - **Query:** `?risk_level=&class_id=&student_id=&status=`
 - **Response:**
@@ -1135,7 +1195,35 @@ did, independent of the flag's own status.
 - **Request:** `{ "note": "Called parent to discuss attendance", "action_taken": "called_parent" }`
 (`action_taken` is free text, not an enum - e.g. "called parent", "counselor referral", "teacher meeting")
 - **Response:** `{ "id": 3, "risk_flag_id": 7, "created_by": 97, "note": "Called parent to discuss attendance", "action_taken": "called_parent", "created_at": "2026-08-11T03:00:00Z" }`
-- **Errors:** `400` empty `note`/`action_taken`; `404` unknown flag id.
+- **Errors:** `400` empty `note`/`action_taken`; `403` a teacher acting on a student they do
+  not teach; `404` unknown flag id, or a flag whose student is outside an admin/principal's
+  own school.
+
+#### `GET /risk/{id}/interventions`
+The outreach history for one flag, newest first.
+- **Roles:** teacher (own students), admin, principal (own school)
+- **Response:**
+```json
+{ "items": [ { "id": 3, "risk_flag_id": 7, "created_by": 97, "created_by_name": "Meera Iyer", "note": "Called parent to discuss attendance", "action_taken": "called parent", "created_at": "2026-08-11T03:00:00Z" } ] }
+```
+- `created_by_name` is resolved server-side so a UI can name the actor without a lookup per
+  row. It is null on the `POST` response, where the caller is the actor.
+
+> **Why this exists: interventions were WRITE-ONLY.** `POST /risk/{id}/intervention` had no
+> read counterpart, so a teacher could log "called parent, no answer", the row saved, and
+> nothing anywhere in the app ever displayed it — not on the flag, not on the student, not in
+> any report. The feature was indistinguishable from broken (the dialog closed and nothing
+> changed on screen), and the next teacher had no way to know an outreach had already been
+> made, which is the entire point of an intervention log.
+
+> **All three mutations (`acknowledge`, `intervention`, `resolve`) are now ownership-gated.**
+> Each previously looked its flag up by id ALONE, so any authenticated teacher or admin could
+> acknowledge, intervene on, or resolve a flag for a student in another school by incrementing
+> the id — and `intervention` would write their name into that school's history. `RiskFlag`
+> carries no `school_id` of its own, so the check goes through the student. The gate mirrors
+> `GET /risk/flagged`'s own per-role branches so what a caller may act on can never drift from
+> what they can see. A teacher gets `403` (a legitimate teacher, just not this student's); an
+> admin/principal gets `404` for another tenant's flag, so ids cannot be probed by status code.
 
 #### `PUT /risk/{id}/resolve`
 Mark a flag resolved.
@@ -2471,7 +2559,8 @@ Person A/C's sections.
 > - **classroom** — `GET /classroom/my-classrooms`, `POST /classroom`,
 >   `GET /classroom/{classroom_id}`, `GET /classroom/{classroom_id}/stream`,
 >   `POST /classroom/{classroom_id}/post`, `DELETE /classroom/{classroom_id}/post/{post_id}`,
->   `POST /classroom/{classroom_id}/upload`
+>   `POST /classroom/{classroom_id}/upload`,
+>   `GET /classroom/attachments/{attachment_id}/download`
 > - **gradebook** — `POST /gradebook/entry`, `POST /gradebook/bulk`,
 >   `GET /gradebook/{student_id}`, `GET /gradebook/class/{class_id}`,
 >   `GET /gradebook/config/weights`, `PUT /gradebook/config/weights`
@@ -2479,13 +2568,14 @@ Person A/C's sections.
 >   `POST /quizzes/{quiz_id}/attempt`, `GET /quizzes/{quiz_id}/results`
 > - **report_cards** — `POST /report_cards/generate/{student_id}`,
 >   `POST /report_cards/bulk-generate/{class_id}`, `GET /report_cards/{student_id}`,
->   `GET /report_cards/detail/{report_card_id}`
+>   `GET /report_cards/class/{class_id}`, `GET /report_cards/detail/{report_card_id}`
 > - **library** — `GET /library/catalog`, `POST /library/items`, `POST /library/issue`,
 >   `PUT /library/return/{loan_id}`, `GET /library/my-loans/{student_id}`, `GET /library/loans`
 > - **calendar** — `GET /calendar/homework/{student_id}`, `GET /calendar/{user_id}`,
 >   `POST /calendar/sync`
 > - **analytics** — `GET /analytics/student/{student_id}`
 > - **resources** — `GET /resources/units`, `GET /resources/{class_id}`,
+>   `GET /resources/{resource_id}/download`,
 >   `DELETE /resources/{resource_id}` (added alongside Person A/C's existing
 >   `POST /resources/upload` and `GET /resources`)
 > - **remarks** — `POST /remarks`, `POST /remarks/bulk`, `GET /remarks/{student_id}`
@@ -2514,6 +2604,46 @@ Create a stream post or shared resource.
 - **Roles:** teacher
 - **Request:** `{ "type": "post", "content": "Homework due Friday", "attachment_url": null }`
 - **Response:** `{ "id": 1, "created_at": "2026-08-09T06:00:00Z" }`
+
+> **This is the original Phase-0 stub. The implemented route is
+> `POST /classroom/{classroom_id}/post`** — see the Person B endpoint inventory above for
+> the full path mapping.
+
+#### Attached files become library resources, indexed for the bots
+
+`POST /classroom/{classroom_id}/post` accepts `share_with_grade: bool = true`, and every
+attachment on the post also becomes a real `resources` row that is chunked and embedded
+into `kb_chunks` — so the Doubt Bot can answer from it. The link is
+`attachments.resource_id`, echoed on `AttachmentOut.resource_id`.
+
+**Why: posting a file to a classroom used to be invisible to the bots.** The upload handler
+wrote bytes to the storage bucket and stopped — no `resources` row, no `ingest_resource`
+call. `POST /resources/upload` was the only path into the RAG corpus, so a teacher who
+wanted both to share a worksheet with their class *and* let the Doubt Bot answer from it had
+to upload the same PDF twice, in two different screens, with nothing in either saying so.
+The Resources page would read "Showing 0 academic resources" directly beside its own
+"Knowledge Base Indexed for Doubt Bot" label.
+
+The classroom stream and the resource library remain separate **screens** on purpose — one
+is a chronological per-section feed, the other a searchable corpus organised by
+subject/unit that can be shared grade-wide. What is unified is the **write path**.
+
+- **`share_with_grade: true` (default)** → the resource is stored with `class_id = NULL` and
+  `grade_level` set, i.e. **grade-wide**. A Grade 3-B Math worksheet is nearly always just
+  as relevant to Grade 3-A Math, and `class_id IS NULL AND grade_level = :grade` is the
+  shape bot retrieval already expects (`Resource.class_id` narrows library *browsing* only
+  and never scopes retrieval). `false` pins it to the posting section.
+- Either way the **stream post itself stays visible only to its own classroom**. This flag
+  affects the library copy, not the post's audience.
+- **Images** (`image/*`) become library resources but are never ingested — no extractable
+  text — matching `POST /resources/upload`'s own rule. Their `needs_reindex` is set false so
+  the nightly job does not retry them forever.
+- **Ingestion failure does NOT fail the request**, unlike `POST /resources/upload` (which
+  rolls back so nothing unsearchable persists — right when the file *is* the request). Here
+  the request is a teacher's post, and losing it because a PDF had no text layer is the worse
+  outcome. Such resources keep `indexed_at = NULL`, which is exactly what the periodic
+  reindex job selects on, so they retry automatically. The failure is reported on the
+  response as `indexing_warnings: string[]` and logged — never silently swallowed.
 
 ### Assignments
 

@@ -17,8 +17,10 @@ export default function TimetablePage() {
   const schoolId = useCurrentUser().data?.school_id;
   const lookup = useReferenceLookup(schoolId);
   const [classId, setClassId] = useState<number | undefined>(undefined);
+  // enabled: parent only - GET /parent/children is require_role("parent"), so calling it
+  // unconditionally on a page all five roles reach meant a guaranteed 403 per staff visit.
   const { children, selectedChildId, setSelectedChildId, showSelector, isLoading: childrenLoading } =
-    useSelectedChild();
+    useSelectedChild({ enabled: role === "parent" });
 
   const isAdminLike = role === "admin" || role === "principal";
 

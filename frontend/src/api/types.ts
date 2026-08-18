@@ -599,6 +599,9 @@ export interface Intervention {
   id: number;
   risk_flag_id: number;
   created_by: number;
+  /** Who logged it, resolved server-side on the list endpoint so the panel does not need a
+   *  lookup per row. Null on the create response, where the caller is the actor. */
+  created_by_name?: string | null;
   note: string;
   action_taken: string;
   created_at: string;
@@ -1203,9 +1206,15 @@ export interface PostAttachment {
   id: number;
   post_id: number;
   file_name: string;
+  /** Object PATH inside a PRIVATE bucket, NOT a link - never put this in an href.
+   *  Download via GET /classroom/attachments/{id}/download (see useFileDownload). */
   file_url: string;
   file_type: string;
   file_size: number;
+  /** The library `resources` row this file was indexed as, so the Doubt Bot can answer
+   *  from it. Null for images (no extractable text) and for files uploaded before
+   *  classroom posts fed the knowledge base. */
+  resource_id: number | null;
   created_at: string;
 }
 
@@ -1227,6 +1236,11 @@ export interface StreamPost {
   created_at: string;
   updated_at: string;
   attachments: PostAttachment[];
+  /** Notes from adding this post's files to the bots' knowledge base. Only present on the
+   *  create response, and empty on the happy path - a post whose attachment could not be
+   *  indexed still succeeds (losing a teacher's post to an unparseable PDF would be worse),
+   *  so this is how they find out the bot cannot read it yet. */
+  indexing_warnings?: string[];
 }
 
 export interface Classroom {
@@ -1259,6 +1273,11 @@ export interface CreatePostRequest {
   title: string;
   content: string;
   attachments?: CreateAttachmentInput[];
+  /** File the attachments in the resource library for the whole GRADE (default) rather than
+   *  only this class section. Grade-wide because a Grade 3-B Math worksheet is nearly always
+   *  just as useful to Grade 3-A Math, and grade is the unit bot retrieval scopes by. Does
+   *  not affect who sees the stream post itself. */
+  share_with_grade?: boolean;
 }
 
 export interface UploadAttachmentResponse {

@@ -8,7 +8,6 @@ import {
   Trash2,
   Send,
   Plus,
-  Download,
   FileIcon,
   Image as ImageIcon,
   FileCode,
@@ -17,6 +16,7 @@ import {
   Sparkles,
   School,
 } from "lucide-react";
+import AttachmentLink from "@/components/classroom/AttachmentLink";
 import PageHeader from "@/components/shared/PageHeader";
 import ConfirmDialog from "@/components/shared/ConfirmDialog";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,7 @@ import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { useAuthStore } from "@/store/authStore";
 import { timeAgo } from "@/lib/format";
+import { ApiError } from "@/api/client";
 import type { PostType, CreateAttachmentInput } from "@/api/types";
 
 function getFileIcon(fileName: string, mimeType: string) {
@@ -93,6 +94,12 @@ export default function ClassroomStreamPage() {
   const [postContent, setPostContent] = useState("");
   const [stagedAttachments, setStagedAttachments] = useState<CreateAttachmentInput[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [postError, setPostError] = useState<string | null>(null);
+  /** Attached files are filed in the resource library grade-wide by default - see
+   *  CreatePostRequest.share_with_grade. */
+  const [shareWithGrade, setShareWithGrade] = useState(true);
+  const [indexingNotes, setIndexingNotes] = useState<string[]>([]);
 
   // Create classroom modal state (for teachers/admins)
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -111,6 +118,7 @@ export default function ClassroomStreamPage() {
     if (!files || files.length === 0 || !activeClassroomId) return;
 
     setIsUploading(true);
+    setUploadError(null);
     try {
       for (const file of Array.from(files)) {
         const uploaded = await uploadMutation.mutateAsync(file);
@@ -125,7 +133,12 @@ export default function ClassroomStreamPage() {
         ]);
       }
     } catch (err) {
-      console.error("Failed to upload attachment", err);
+      // Was console.error only, so a rejected upload looked like nothing had happened.
+      // This can now legitimately fail loudly (503 when storage is unconfigured, 502 when
+      // the store rejects the bytes) instead of silently returning a dead URL.
+      setUploadError(
+        err instanceof ApiError ? err.message : "Could not upload that file. Please try again."
+      );
     } finally {
       setIsUploading(false);
       e.target.value = "";
@@ -140,16 +153,28 @@ export default function ClassroomStreamPage() {
     e.preventDefault();
     if (!postTitle.trim() || !postContent.trim() || !activeClassroomId) return;
 
-    await createPostMutation.mutateAsync({
-      post_type: postType,
-      title: postTitle.trim(),
-      content: postContent.trim(),
-      attachments: stagedAttachments,
-    });
+    setPostError(null);
+    setIndexingNotes([]);
+    try {
+      const created = await createPostMutation.mutateAsync({
+        post_type: postType,
+        title: postTitle.trim(),
+        content: postContent.trim(),
+        attachments: stagedAttachments,
+        share_with_grade: shareWithGrade,
+      });
 
-    setPostTitle("");
-    setPostContent("");
-    setStagedAttachments([]);
+      // The post succeeded; some file may still not be readable by the bot. Reported, not
+      // swallowed - see CreatePostRequest.indexing_warnings.
+      setIndexingNotes(created.indexing_warnings ?? []);
+      setPostTitle("");
+      setPostContent("");
+      setStagedAttachments([]);
+    } catch (err) {
+      setPostError(
+        err instanceof ApiError ? err.message : "Could not publish this post. Please try again."
+      );
+    }
   };
 
   const handleCreateClassroom = async (e: React.FormEvent) => {
@@ -410,6 +435,52 @@ export default function ClassroomStreamPage() {
                           </div>
                         )}
 
+                        {/* Where the attached files get filed in the resource library, and
+                            therefore what the Doubt Bot can retrieve them for. Only shown
+                            when there is actually a file to file. */}
+                        {stagedAttachments.length > 0 && (
+                          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-border bg-elevated/30 p-2.5">
+                            <input
+                              type="checkbox"
+                              checked={shareWithGrade}
+                              onChange={(e) => setShareWithGrade(e.target.checked)}
+                              className="mt-0.5 accent-accent"
+                            />
+                            <span className="text-[11px] leading-relaxed text-ink-muted">
+                              <span className="font-medium text-ink">
+                                Share with the whole grade
+                              </span>{" "}
+                              — adds these files to the resource library for every section of
+                              this grade, and lets the Doubt Bot answer from them. Uncheck to
+                              keep them to this section only. The post itself is only visible
+                              to this classroom either way.
+                            </span>
+                          </label>
+                        )}
+
+                        {uploadError && (
+                          <p className="text-xs text-urgent" role="alert">
+                            {uploadError}
+                          </p>
+                        )}
+                        {postError && (
+                          <p className="text-xs text-urgent" role="alert">
+                            {postError}
+                          </p>
+                        )}
+                        {indexingNotes.length > 0 && (
+                          <div
+                            className="flex flex-col gap-1 rounded-lg border border-border bg-elevated/40 p-2.5"
+                            role="status"
+                          >
+                            {indexingNotes.map((note, i) => (
+                              <p key={i} className="text-[11px] text-ink-muted">
+                                {note}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+
                         <div className="flex items-center justify-between pt-2 border-t border-border">
                           <label className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-accent cursor-pointer">
                             <Paperclip className="h-4 w-4" />
@@ -579,33 +650,14 @@ export default function ClassroomStreamPage() {
                                   Attachments ({post.attachments.length})
                                 </span>
                                 <div className="grid gap-2 sm:grid-cols-2">
-                                  {post.attachments.map((att) => {
-                                    const AttIcon = getFileIcon(att.file_name, att.file_type);
-                                    return (
-                                      <a
-                                        key={att.id}
-                                        href={att.file_url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="flex items-center justify-between gap-3 rounded-xl border border-border bg-elevated/30 p-2.5 hover:bg-elevated/70 transition-colors group"
-                                      >
-                                        <div className="flex items-center gap-2.5 min-w-0">
-                                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-accent">
-                                            <AttIcon className="h-4 w-4" />
-                                          </div>
-                                          <div className="flex flex-col min-w-0">
-                                            <span className="text-xs font-medium text-ink truncate group-hover:text-accent">
-                                              {att.file_name}
-                                            </span>
-                                            <span className="text-[11px] text-ink-faint">
-                                              {formatBytes(att.file_size)}
-                                            </span>
-                                          </div>
-                                        </div>
-                                        <Download className="h-4 w-4 text-ink-faint group-hover:text-accent shrink-0" />
-                                      </a>
-                                    );
-                                  })}
+                                  {post.attachments.map((att) => (
+                                    <AttachmentLink
+                                      key={att.id}
+                                      attachment={att}
+                                      formatBytes={formatBytes}
+                                      icon={getFileIcon(att.file_name, att.file_type)}
+                                    />
+                                  ))}
                                 </div>
                               </div>
                             )}

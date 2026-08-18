@@ -4,11 +4,13 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.class_ import SchoolClass
+from app.models.enrollment import Enrollment
 from app.models.role import Role
 from app.models.subject import Subject
 from app.models.timetable import Room, TeacherProfile, TeacherSubject
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user
+from app.services.scoping import assert_can_view_class
 
 router = APIRouter(prefix="/reference", tags=["reference"])
 
@@ -132,5 +134,65 @@ def get_lookup(
                 class_teacher_id=c.class_teacher_id,
             )
             for c in classes
+        ],
+    )
+
+
+class ClassStudentItem(NamedItem):
+    is_primary: bool = True
+    """False for a student enrolled in this class as a secondary/elective enrollment
+    rather than as their home section."""
+
+
+class ClassStudentsResponse(BaseModel):
+    class_id: int
+    class_name: str
+    students: list[ClassStudentItem]
+
+
+@router.get("/class/{class_id}/students", response_model=ClassStudentsResponse)
+def get_class_students(
+    class_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The roster of one class section - id, name and roll number only.
+
+    WHY THIS EXISTS ALONGSIDE /reference/lookup. `lookup.students` is every student in the
+    SCHOOL with no class information at all, which is unusable for "pick a student in
+    Grade 3-B" - the pages that needed that were reduced to asking staff to type a numeric
+    student id (the library's issue-book dialog) or to hardcoding `class_id: 1` (bulk
+    remarks). The only existing per-class roster was GET /gradebook/class/{class_id},
+    which computes a full weighted gradebook summary for every student on the roster -
+    far too much work for populating a dropdown.
+
+    Deliberately NOT gated to admin/principal like GET /admin/students: teachers need this
+    for their own sections. assert_can_view_class holds them to those, and denies
+    students/parents outright - a roster is not per-child information.
+
+    Identity is NAME, not roll number: there is no roll-number column anywhere in this
+    schema (checked - not on Enrollment, User or the admissions tables), so name plus
+    section is all there is to identify a student by, and it is what the picker UIs search.
+    """
+    school_class = assert_can_view_class(db, user, class_id, what="class roster")
+
+    rows = (
+        db.query(Enrollment, User)
+        .join(User, Enrollment.student_id == User.id)
+        .filter(Enrollment.class_id == class_id, User.is_active.is_(True))
+        .order_by(User.full_name.asc(), User.id.asc())
+        .all()
+    )
+
+    return ClassStudentsResponse(
+        class_id=class_id,
+        class_name=school_class.name,
+        students=[
+            ClassStudentItem(
+                id=student.id,
+                name=student.full_name or student.email,
+                is_primary=bool(enrollment.is_primary),
+            )
+            for enrollment, student in rows
         ],
     )

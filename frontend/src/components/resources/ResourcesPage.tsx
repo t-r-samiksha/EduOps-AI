@@ -18,6 +18,7 @@ import {
   Filter,
   X,
   Clock,
+  Loader2,
 } from "lucide-react";
 import PageHeader from "@/components/shared/PageHeader";
 import ConfirmDialog from "@/components/shared/ConfirmDialog";
@@ -37,6 +38,7 @@ import {
 import { useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useCurrentUser } from "@/api/hooks/useAuth";
 import { useAuthStore } from "@/store/authStore";
+import { useFileDownload } from "@/hooks/useFileDownload";
 import { timeAgo } from "@/lib/format";
 import type { ResourceItem } from "@/api/types";
 
@@ -69,6 +71,43 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+/** The per-card download control.
+ *
+ * A separate component only because the hook it needs cannot be called inside the
+ * `items.map()` that renders the cards.
+ *
+ * This was `<a href={r.file_url}>`, but file_url is an object PATH inside a PRIVATE
+ * bucket, not a URL - so the browser resolved it against the frontend origin and every
+ * download 404ed. See useFileDownload. */
+function ResourceDownloadButton({ resourceId }: { resourceId: number }) {
+  const { open, isLoading, error } = useFileDownload(`/resources/${resourceId}/download`);
+
+  return (
+    <div className="mt-1 flex w-full flex-col gap-1">
+      <button
+        type="button"
+        onClick={open}
+        disabled={isLoading}
+        className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-border bg-elevated/40 py-2 text-xs font-medium text-ink transition-colors hover:bg-elevated disabled:opacity-60"
+      >
+        {isLoading ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
+        ) : (
+          <Download className="h-3.5 w-3.5 text-accent" />
+        )}
+        <span>{isLoading ? "Opening…" : "Download / Open"}</span>
+        {!isLoading && <ExternalLink className="ml-0.5 h-3 w-3 text-ink-faint" />}
+      </button>
+      {error && (
+        <p className="text-[11px] text-urgent" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 
 export default function ResourcesPage() {
   const params = useParams<{ classId?: string }>();
@@ -546,16 +585,7 @@ export default function ResourcesPage() {
                   </div>
 
                   {/* Preview / Download Button */}
-                  <a
-                    href={r.file_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-center gap-1.5 rounded-xl border border-border bg-elevated/40 hover:bg-elevated text-ink text-xs font-medium py-2 transition-colors w-full mt-1"
-                  >
-                    <Download className="h-3.5 w-3.5 text-accent" />
-                    <span>Download / Open</span>
-                    <ExternalLink className="h-3 w-3 text-ink-faint ml-0.5" />
-                  </a>
+                  <ResourceDownloadButton resourceId={r.id} />
                 </CardContent>
               </Card>
             );

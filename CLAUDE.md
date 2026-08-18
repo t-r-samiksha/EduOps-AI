@@ -103,6 +103,13 @@ Two further entries are known and deliberately unfixed:
 
 So: a clean run of `alembic check` reports exactly these four things. Anything *else*
 appearing is new and worth investigating.
+
+Confirmed again on 2026-08-18 while adding `a8246eec59d8` (`attachments.resource_id`):
+autogenerate emitted six operations for a one-column change — the two destructive
+`drop_index` lines above plus the two known-deferred ones — and all four were stripped
+before applying. Both protected indexes were verified still present in `pg_indexes`
+afterwards. **Autogenerate has now proposed dropping the HNSW index three times.**
+That migration's docstring records the whole edit, and is the template to copy.
 - **A new model file must be imported in `app/models/__init__.py`.** `alembic/env.py`
   does `from app.models import *`, so a model no import reaches is invisible to
   autogenerate — the migration comes back empty and the table is silently never
@@ -110,6 +117,33 @@ appearing is new and worth investigating.
   consistency.) `FeePaymentRequest` sat unregistered for a session and only worked by
   accident because `fees.py` was imported for `FeeRecord`.
 - Env vars go in `.env.example` (never commit real `.env`).
+- **Uploaded files live in PRIVATE buckets — never build a `/object/public/...` URL.**
+  A stored `file_url` is an object PATH, not a link. Reads go through a role-scoped API
+  route that streams the bytes (`GET /classroom/attachments/{id}/download`,
+  `GET /resources/{id}/download`, `GET /admin/fee-payment-requests/{id}/proof`), and the
+  frontend fetches them with `api/client.ts::apiGetBlob` / `hooks/useFileDownload.ts`.
+  This is written down because it was shipped wrong twice: the classroom upload handler
+  returned `{SUPABASE_URL}/storage/v1/object/public/resources/{path}` for a bucket created
+  with `public: False`, which Supabase answers with `NoSuchBucket`, so **every attachment
+  link in the app was dead on creation**; the resources page linked at the bare path.
+  Making the bucket public "fixes" both by making every object URL guessable and routing
+  around the routers' own scoping — don't. Relatedly: **an upload that did not store the
+  bytes is an error.** Both handlers used to swallow storage failures and substitute an
+  invented `https://storage.eduops.local/...` link, returning 201 with a URL resolving to
+  nothing.
+- **Classroom post attachments ARE resource-library resources.** A file attached to a
+  stream post creates a real `resources` row and is chunked/embedded into `kb_chunks`, so
+  the Doubt Bot can answer from it (`app/services/classroom_materials.py`, linked by
+  `attachments.resource_id`). Before this, posting a file to a classroom wrote bytes and
+  nothing else, so `POST /resources/upload` was the only path into the RAG corpus and
+  teachers had to upload the same PDF twice in two screens to get both sharing and bot
+  retrieval. The two SCREENS stay separate on purpose (chronological per-section feed vs
+  searchable grade-wide corpus); only the write path is unified. Defaults to **grade-wide**
+  (`class_id=NULL`, `grade_level` set — the shape bot retrieval scopes by); pass
+  `share_with_grade: false` to pin a file to one section. Ingestion failure here is
+  deliberately NON-fatal (unlike `POST /resources/upload`, which rolls back) — a PDF with no
+  text layer must not cost a teacher their post, so `indexed_at` stays NULL and the
+  periodic reindex job retries it, with the failure reported in `indexing_warnings`.
 
 ## Commands
 

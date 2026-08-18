@@ -24,9 +24,12 @@ import {
   LibraryItem,
 } from "@/api/hooks/useDigitalLibrary";
 import { useAuthStore } from "@/store/authStore";
+import { useViewedStudent } from "@/hooks/useViewedStudent";
+import StudentPicker from "@/components/shared/StudentPicker";
+import { ApiError } from "@/api/client";
 
 export default function DigitalLibraryPage() {
-  const { user, role } = useAuthStore();
+  const { role } = useAuthStore();
   const isLibrarianOrAdmin = role === "admin" || role === "principal" || role === "teacher";
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -39,8 +42,11 @@ export default function DigitalLibraryPage() {
     searchQuery
   );
 
+  // `Number(user.id)` was NaN - user.id is a Supabase UUID - so a student's own loans
+  // never loaded and a parent could not see their child's at all. See useViewedStudent.
+  const viewed = useViewedStudent();
   const { data: studentLoans = [] } = useStudentLoans(
-    !isLibrarianOrAdmin && user?.id ? Number(user.id) : undefined
+    isLibrarianOrAdmin ? undefined : viewed.studentId
   );
   const { data: allLoans = [] } = useAllLoans(isLibrarianOrAdmin ? "all" : undefined);
 
@@ -56,45 +62,82 @@ export default function DigitalLibraryPage() {
   const [newCategory, setNewCategory] = useState("Mathematics");
   const [newType, setNewType] = useState("book");
   const [newCopies, setNewCopies] = useState("3");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [loanError, setLoanError] = useState<string | null>(null);
 
-  // Issue Modal
+  // Issue Modal. Class + student, not a typed-in database id (see StudentPicker).
   const [issueItem, setIssueItem] = useState<LibraryItem | null>(null);
-  const [issueStudentId, setIssueStudentId] = useState("2");
+  const [issueClassId, setIssueClassId] = useState<number | "">("");
+  const [issueStudentId, setIssueStudentId] = useState<number | "">("");
   const [issueDays, setIssueDays] = useState("14");
+  const [issueError, setIssueError] = useState<string | null>(null);
 
   const handleAddItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
 
-    await addItemMutation.mutateAsync({
-      title: newTitle,
-      author: newAuthor,
-      isbn: newIsbn,
-      category: newCategory,
-      type: newType,
-      total_copies: Number(newCopies) || 1,
-    });
-
-    setIsAddOpen(false);
-    setNewTitle("");
-    setNewAuthor("");
+    setAddError(null);
+    try {
+      await addItemMutation.mutateAsync({
+        title: newTitle,
+        author: newAuthor,
+        isbn: newIsbn,
+        category: newCategory,
+        type: newType,
+        total_copies: Number(newCopies) || 1,
+      });
+      setIsAddOpen(false);
+      setNewTitle("");
+      setNewAuthor("");
+    } catch (err) {
+      setAddError(
+        err instanceof ApiError ? err.message : "Could not add this item. Please try again."
+      );
+    }
   };
 
   const handleIssueSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!issueItem) return;
+    if (!issueItem || !issueStudentId) return;
 
-    await issueMutation.mutateAsync({
-      item_id: issueItem.id,
-      student_id: Number(issueStudentId),
-      loan_days: Number(issueDays),
-    });
+    // THE ISSUE BUTTON LOOKED DEAD BECAUSE OF THIS. mutateAsync rejects on a non-2xx, and
+    // nothing caught it: the rejection surfaced only as an unhandled promise in the
+    // console while the dialog sat open, unchanged, as though the click had done nothing.
+    // POST /library/issue 400s on the two things most likely to happen here - "no copies
+    // available" and "student already has an active loan for this item" - so the common
+    // case was a real, actionable message being thrown away.
+    setIssueError(null);
+    try {
+      await issueMutation.mutateAsync({
+        item_id: issueItem.id,
+        student_id: Number(issueStudentId),
+        loan_days: Number(issueDays),
+      });
+      setIssueItem(null);
+      setIssueStudentId("");
+    } catch (err) {
+      setIssueError(
+        err instanceof ApiError ? err.message : "Could not issue this copy. Please try again."
+      );
+    }
+  };
 
-    setIssueItem(null);
+  const openIssueDialog = (item: LibraryItem) => {
+    setIssueItem(item);
+    setIssueError(null);
+    setIssueStudentId("");
   };
 
   const handleReturn = async (loanId: number) => {
-    await returnMutation.mutateAsync(loanId);
+    // Same swallowed-rejection shape as the issue path had.
+    setLoanError(null);
+    try {
+      await returnMutation.mutateAsync(loanId);
+    } catch (err) {
+      setLoanError(
+        err instanceof ApiError ? err.message : "Could not record this return. Please try again."
+      );
+    }
   };
 
   return (
@@ -243,7 +286,7 @@ export default function DigitalLibraryPage() {
                       variant="outline"
                       size="sm"
                       disabled={item.available_copies <= 0}
-                      onClick={() => setIssueItem(item)}
+                      onClick={() => openIssueDialog(item)}
                       className="w-full text-xs flex items-center justify-center gap-1"
                     >
                       <Bookmark className="h-3.5 w-3.5" />
@@ -284,6 +327,11 @@ export default function DigitalLibraryPage() {
                 Active & Overdue Book Loans ({allLoans.length})
               </h3>
             </div>
+            {loanError && (
+              <div className="border-b bg-red-500/10 p-3 text-xs text-red-500" role="alert">
+                {loanError}
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
@@ -422,6 +470,15 @@ export default function DigitalLibraryPage() {
               />
             </div>
 
+            {addError && (
+              <div
+                className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-500"
+                role="alert"
+              >
+                {addError}
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 pt-3 border-t">
               <Button type="button" variant="ghost" onClick={() => setIsAddOpen(false)}>
                 Cancel
@@ -451,16 +508,14 @@ export default function DigitalLibraryPage() {
                 <p className="text-muted-foreground mt-0.5">{issueItem.author}</p>
               </div>
 
-              <div>
-                <label className="text-xs font-semibold text-foreground">Student ID</label>
-                <Input
-                  type="number"
-                  required
-                  value={issueStudentId}
-                  onChange={(e) => setIssueStudentId(e.target.value)}
-                  className="mt-1 text-xs"
-                />
-              </div>
+              <StudentPicker
+                label="Issue to"
+                classId={issueClassId}
+                studentId={issueStudentId}
+                onClassChange={setIssueClassId}
+                onStudentChange={setIssueStudentId}
+              />
+
               <div>
                 <label className="text-xs font-semibold text-foreground">Loan Duration (Days)</label>
                 <Input
@@ -473,11 +528,20 @@ export default function DigitalLibraryPage() {
                 />
               </div>
 
+              {issueError && (
+                <div
+                  className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-500"
+                  role="alert"
+                >
+                  {issueError}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-3 border-t">
                 <Button type="button" variant="ghost" onClick={() => setIssueItem(null)}>
                   Cancel
                 </Button>
-                <Button type="submit" disabled={issueMutation.isPending}>
+                <Button type="submit" disabled={issueMutation.isPending || !issueStudentId}>
                   {issueMutation.isPending ? "Issuing..." : "Confirm Issue"}
                 </Button>
               </div>

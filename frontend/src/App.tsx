@@ -37,13 +37,11 @@ import ResourcesPage from "@/components/resources/ResourcesPage";
 import AssignmentsPage from "@/components/assignments/AssignmentsPage";
 import SubmissionTrackerPage from "@/components/assignments/SubmissionTrackerPage";
 import QuizzesPage from "@/components/quizzes/QuizzesPage";
-import GradebookPage from "@/components/gradebook/GradebookPage";
-import ReportCardsPage from "@/components/report_cards/ReportCardsPage";
+import AcademicRecordsPage from "@/components/gradebook/AcademicRecordsPage";
 import DigitalLibraryPage from "@/components/library/DigitalLibraryPage";
 import HomeworkCalendarPage from "@/components/calendar/HomeworkCalendarPage";
 import StudentAnalyticsPage from "@/components/analytics/StudentAnalyticsPage";
 import BulkRemarksPage from "@/components/remarks/BulkRemarksPage";
-import TeacherSyllabusPacePage from "@/components/syllabus/TeacherSyllabusPacePage";
 import TeacherResources from "@/routes/teacher/Resources";
 import TeacherAssistantBot from "@/components/bots/TeacherAssistantBot";
 import AnnouncementsPage from "@/components/announcements/AnnouncementsPage";
@@ -67,13 +65,13 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/principal/assignments/:classId", role: "principal", element: <AssignmentsPage /> },
   { path: "/principal/assignments/:id/submissions", role: "principal", element: <SubmissionTrackerPage /> },
   { path: "/principal/quizzes", role: "principal", element: <QuizzesPage /> },
-  { path: "/principal/gradebook", role: "principal", element: <GradebookPage /> },
-  { path: "/principal/report-cards", role: "principal", element: <ReportCardsPage /> },
+  { path: "/principal/gradebook", role: "principal", element: <AcademicRecordsPage /> },
+  { path: "/principal/report-cards", role: "principal", element: <AcademicRecordsPage /> },
   { path: "/principal/library", role: "principal", element: <DigitalLibraryPage /> },
   { path: "/principal/calendar", role: "principal", element: <HomeworkCalendarPage /> },
   { path: "/principal/analytics", role: "principal", element: <StudentAnalyticsPage /> },
   { path: "/principal/remarks", role: "principal", element: <BulkRemarksPage /> },
-  { path: "/principal/syllabus-pace", role: "principal", element: <TeacherSyllabusPacePage /> },
+  { path: "/principal/syllabus-pace", role: "principal", element: <SyllabusPage /> },
   { path: "/principal/timetable", role: "principal", element: <TimetablePage /> },
   { path: "/principal/attendance", role: "principal", element: <AttendanceCapture /> },
   { path: "/principal/staffing", role: "principal", element: <StaffingPage /> },
@@ -104,13 +102,13 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/admin/assignments/:classId", role: "admin", element: <AssignmentsPage /> },
   { path: "/admin/assignments/:id/submissions", role: "admin", element: <SubmissionTrackerPage /> },
   { path: "/admin/quizzes", role: "admin", element: <QuizzesPage /> },
-  { path: "/admin/gradebook", role: "admin", element: <GradebookPage /> },
-  { path: "/admin/report-cards", role: "admin", element: <ReportCardsPage /> },
+  { path: "/admin/gradebook", role: "admin", element: <AcademicRecordsPage /> },
+  { path: "/admin/report-cards", role: "admin", element: <AcademicRecordsPage /> },
   { path: "/admin/library", role: "admin", element: <DigitalLibraryPage /> },
   { path: "/admin/calendar", role: "admin", element: <HomeworkCalendarPage /> },
   { path: "/admin/analytics", role: "admin", element: <StudentAnalyticsPage /> },
   { path: "/admin/remarks", role: "admin", element: <BulkRemarksPage /> },
-  { path: "/admin/syllabus-pace", role: "admin", element: <TeacherSyllabusPacePage /> },
+  { path: "/admin/syllabus-pace", role: "admin", element: <SyllabusPage /> },
   { path: "/admin/timetable", role: "admin", element: <TimetablePage /> },
   { path: "/admin/attendance", role: "admin", element: <AttendanceCapture /> },
   { path: "/admin/staffing", role: "admin", element: <StaffingPage /> },
@@ -134,13 +132,13 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/teacher/assignments/:classId", role: "teacher", element: <AssignmentsPage /> },
   { path: "/teacher/assignments/:id/submissions", role: "teacher", element: <SubmissionTrackerPage /> },
   { path: "/teacher/quizzes", role: "teacher", element: <QuizzesPage /> },
-  { path: "/teacher/gradebook", role: "teacher", element: <GradebookPage /> },
-  { path: "/teacher/report-cards", role: "teacher", element: <ReportCardsPage /> },
+  { path: "/teacher/gradebook", role: "teacher", element: <AcademicRecordsPage /> },
+  { path: "/teacher/report-cards", role: "teacher", element: <AcademicRecordsPage /> },
   { path: "/teacher/library", role: "teacher", element: <DigitalLibraryPage /> },
   { path: "/teacher/calendar", role: "teacher", element: <HomeworkCalendarPage /> },
   { path: "/teacher/analytics", role: "teacher", element: <StudentAnalyticsPage /> },
   { path: "/teacher/remarks", role: "teacher", element: <BulkRemarksPage /> },
-  { path: "/teacher/syllabus-pace", role: "teacher", element: <TeacherSyllabusPacePage /> },
+  { path: "/teacher/syllabus-pace", role: "teacher", element: <SyllabusPage /> },
   { path: "/teacher/timetable", role: "teacher", element: <TimetablePage /> },
   { path: "/teacher/attendance", role: "teacher", element: <AttendanceCapture /> },
   { path: "/teacher/staffing", role: "teacher", element: <StaffingPage /> },
@@ -166,8 +164,8 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/student/assignments", role: "student", element: <AssignmentsPage /> },
   { path: "/student/assignments/:classId", role: "student", element: <AssignmentsPage /> },
   { path: "/student/quizzes", role: "student", element: <QuizzesPage /> },
-  { path: "/student/gradebook", role: "student", element: <GradebookPage /> },
-  { path: "/student/report-cards", role: "student", element: <ReportCardsPage /> },
+  { path: "/student/gradebook", role: "student", element: <AcademicRecordsPage /> },
+  { path: "/student/report-cards", role: "student", element: <AcademicRecordsPage /> },
   { path: "/student/library", role: "student", element: <DigitalLibraryPage /> },
   { path: "/student/calendar", role: "student", element: <HomeworkCalendarPage /> },
   { path: "/student/analytics", role: "student", element: <StudentAnalyticsPage /> },
@@ -184,8 +182,8 @@ const ROUTE_TABLE: RouteConfig[] = [
   { path: "/parent/resources/:classId", role: "parent", element: <ResourcesPage /> },
   { path: "/parent/assignments", role: "parent", element: <AssignmentsPage /> },
   { path: "/parent/assignments/:classId", role: "parent", element: <AssignmentsPage /> },
-  { path: "/parent/gradebook", role: "parent", element: <GradebookPage /> },
-  { path: "/parent/report-cards", role: "parent", element: <ReportCardsPage /> },
+  { path: "/parent/gradebook", role: "parent", element: <AcademicRecordsPage /> },
+  { path: "/parent/report-cards", role: "parent", element: <AcademicRecordsPage /> },
   { path: "/parent/library", role: "parent", element: <DigitalLibraryPage /> },
   { path: "/parent/calendar", role: "parent", element: <HomeworkCalendarPage /> },
   { path: "/parent/analytics", role: "parent", element: <StudentAnalyticsPage /> },

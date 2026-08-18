@@ -25,7 +25,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@
 import { useTeacherBot, type TeacherAskRequest } from "@/api/hooks/useTeacherBot";
 import { useTimetableActive, useReferenceLookup } from "@/api/hooks/useTimetable";
 import { useCurrentUser } from "@/api/hooks/useAuth";
-import { useAuthStore } from "@/store/authStore";
+import { useMyUserId } from "@/hooks/useViewedStudent";
 import { DEFAULT_ACADEMIC_YEAR } from "@/lib/constants";
 import { ApiError } from "@/api/client";
 import type { Citation } from "@/api/types";
@@ -193,7 +193,7 @@ function renderBoldSpans(line: string) {
 
 export default function TeacherAssistantBot() {
   const navigate = useNavigate();
-  const { user } = useAuthStore();
+  const myUserId = useMyUserId();
   const currentUser = useCurrentUser().data;
   const schoolId = currentUser?.school_id;
   const lookup = useReferenceLookup(schoolId);
@@ -208,10 +208,13 @@ export default function TeacherAssistantBot() {
     for (const s of teacherSlots) {
       if (s.class_id) classIdsTaught.add(s.class_id);
     }
-    if (user?.id) {
-      const numericUserId = Number(user.id);
+    // `Number(user.id)` here was ALWAYS NaN - authStore.user is the Supabase auth user and
+    // its id is a UUID string - so this comparison never matched and the homeroom classes
+    // were silently never added. It failed soft (the code below falls back to a wider list),
+    // which is why it went unnoticed. See useMyUserId.
+    if (myUserId != null) {
       for (const c of lookup.data.classes) {
-        if (c.class_teacher_id === numericUserId) {
+        if (c.class_teacher_id === myUserId) {
           classIdsTaught.add(c.id);
         }
       }
@@ -223,7 +226,7 @@ export default function TeacherAssistantBot() {
       }
     }
     return Array.from(grades).sort((a, b) => a - b);
-  }, [lookup.data?.classes, teacherSlots, user?.id]);
+  }, [lookup.data?.classes, teacherSlots, myUserId]);
 
   const availableSubjects = useMemo(() => {
     if (!lookup.data?.subjects) return [];

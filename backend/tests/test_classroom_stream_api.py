@@ -312,3 +312,195 @@ def test_announcement_triggers_notification(client, seed, db_session):
     )
     assert notif is not None
     assert "Important Exam Announcement" in notif.title
+
+
+def test_post_attachment_becomes_an_indexed_grade_wide_resource(client, seed, db_session):
+    """A file posted to a classroom stream is filed in the resource library and indexed.
+
+    THE BUG THIS LOCKS DOWN: POST /classroom/{id}/upload wrote bytes to the storage bucket
+    and stopped - no `resources` row, no ingest_resource - so nothing a teacher shared with
+    their own class was ever retrievable by the Doubt Bot. Only POST /resources/upload built
+    the RAG corpus, which meant uploading the same PDF twice in two different screens.
+    """
+    from app.models.resource import Resource
+
+    _override_user("teacher", user_id=seed["teacher"].id, school_id=seed["school"].id)
+
+    res = client.post(
+        f"/classroom/{seed['classroom'].id}/post",
+        json={
+            "post_type": "material",
+            "title": "Unit 3 Practice Worksheet",
+            "content": "Attempt all questions before Friday.",
+            "attachments": [
+                {
+                    "file_name": "unit3.pdf",
+                    "file_url": "classroom/1/unit3.pdf",
+                    "file_type": "application/pdf",
+                    "file_size": 2048,
+                }
+            ],
+        },
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+
+    attachment = body["attachments"][0]
+    assert attachment["resource_id"] is not None, "attachment was never linked to a resource"
+
+    resource = db_session.query(Resource).filter(Resource.id == attachment["resource_id"]).one()
+    # GRADE-WIDE by default: class_id NULL + grade_level set is the shape bot retrieval
+    # scopes by, so a Grade 8 worksheet serves every Grade 8 section.
+    assert resource.class_id is None
+    assert resource.grade_level == 8
+    assert resource.school_id == seed["school"].id
+    assert resource.subject_id == seed["classroom"].subject_id
+    assert resource.title == "Unit 3 Practice Worksheet"
+    # The stored path is carried through, NOT re-uploaded or turned into a public URL.
+    assert resource.file_url == "classroom/1/unit3.pdf"
+
+
+def test_post_attachment_can_be_pinned_to_one_section(client, seed, db_session):
+    """share_with_grade=False narrows the library copy to the posting section."""
+    from app.models.resource import Resource
+
+    _override_user("teacher", user_id=seed["teacher"].id, school_id=seed["school"].id)
+
+    res = client.post(
+        f"/classroom/{seed['classroom'].id}/post",
+        json={
+            "post_type": "material",
+            "title": "Section-only handout",
+            "content": "For this section only.",
+            "share_with_grade": False,
+            "attachments": [
+                {
+                    "file_name": "handout.pdf",
+                    "file_url": "classroom/1/handout.pdf",
+                    "file_type": "application/pdf",
+                    "file_size": 512,
+                }
+            ],
+        },
+    )
+    assert res.status_code == 201, res.text
+    resource_id = res.json()["attachments"][0]["resource_id"]
+    resource = db_session.query(Resource).filter(Resource.id == resource_id).one()
+    assert resource.class_id == seed["classroom"].class_id
+    # grade_level stays populated either way - it is NOT NULL and bot retrieval needs it.
+    assert resource.grade_level == 8
+
+
+def test_image_attachment_is_filed_but_not_indexed(client, seed, db_session):
+    """An image becomes a library resource but is never sent through ingestion.
+
+    Images carry no extractable text, so chunking them yields nothing. Mirrors
+    routers/resources.py's own is_text_bearing rule rather than inventing a second one.
+    `needs_reindex` must be False or the nightly reindex job retries it forever.
+    """
+    from app.models.resource import Resource
+
+    _override_user("teacher", user_id=seed["teacher"].id, school_id=seed["school"].id)
+
+    res = client.post(
+        f"/classroom/{seed['classroom'].id}/post",
+        json={
+            "post_type": "material",
+            "title": "Diagram of the water cycle",
+            "content": "Copy this into your notes.",
+            "attachments": [
+                {
+                    "file_name": "diagram.png",
+                    "file_url": "classroom/1/diagram.png",
+                    "file_type": "image/png",
+                    "file_size": 4096,
+                }
+            ],
+        },
+    )
+    assert res.status_code == 201, res.text
+    resource_id = res.json()["attachments"][0]["resource_id"]
+    resource = db_session.query(Resource).filter(Resource.id == resource_id).one()
+    assert resource.indexed_at is None
+    assert resource.needs_reindex is False
+
+
+def test_multiple_attachments_get_distinguishable_resource_titles(client, seed, db_session):
+    """Several files on one post must not all become identically-named library rows.
+
+    Otherwise the bot's citations cannot be told apart.
+    """
+    from app.models.resource import Resource
+
+    _override_user("teacher", user_id=seed["teacher"].id, school_id=seed["school"].id)
+
+    res = client.post(
+        f"/classroom/{seed['classroom'].id}/post",
+        json={
+            "post_type": "material",
+            "title": "Revision pack",
+            "content": "Two files attached.",
+            "attachments": [
+                {
+                    "file_name": "part-a.pdf",
+                    "file_url": "classroom/1/part-a.pdf",
+                    "file_type": "application/pdf",
+                    "file_size": 100,
+                },
+                {
+                    "file_name": "part-b.pdf",
+                    "file_url": "classroom/1/part-b.pdf",
+                    "file_type": "application/pdf",
+                    "file_size": 200,
+                },
+            ],
+        },
+    )
+    assert res.status_code == 201, res.text
+    ids = [a["resource_id"] for a in res.json()["attachments"]]
+    assert all(i is not None for i in ids)
+    titles = {
+        db_session.query(Resource).filter(Resource.id == i).one().title for i in ids
+    }
+    assert titles == {"Revision pack - part-a.pdf", "Revision pack - part-b.pdf"}
+
+
+def test_attachment_download_rejects_legacy_fabricated_urls(client, seed, db_session):
+    """The download route refuses attachments holding a full URL rather than a path.
+
+    Rows created while the upload handler fabricated a `https://storage.eduops.local/...`
+    link on failure hold a URL, not an object path, and their bytes were never stored - so
+    they must report 410 rather than being handed to the storage client, which would fail
+    with a confusing 502.
+    """
+    post = StreamPost(
+        classroom_id=seed["classroom"].id,
+        author_id=seed["teacher"].id,
+        post_type="material",
+        title="Legacy post",
+        content="Uploaded before storage worked.",
+    )
+    db_session.add(post)
+    db_session.flush()
+    legacy = PostAttachment(
+        post_id=post.id,
+        file_name="ghost.pdf",
+        file_url="https://storage.eduops.local/classroom/1/ghost.pdf",
+        file_type="application/pdf",
+        file_size=1,
+    )
+    db_session.add(legacy)
+    db_session.commit()
+    legacy_id = legacy.id
+
+    _override_user("teacher", user_id=seed["teacher"].id, school_id=seed["school"].id)
+    res = client.get(f"/classroom/attachments/{legacy_id}/download")
+    assert res.status_code == 410
+    assert "re-upload" in res.json()["detail"].lower()
+
+    # A student not enrolled in this classroom cannot reach it at all.
+    _override_user(
+        "student", user_id=seed["student_not_enrolled"].id, school_id=seed["school"].id
+    )
+    res = client.get(f"/classroom/attachments/{legacy_id}/download")
+    assert res.status_code in (403, 404)

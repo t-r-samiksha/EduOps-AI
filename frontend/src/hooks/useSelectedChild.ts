@@ -30,8 +30,16 @@ export interface UseSelectedChild {
 
 const PARAM = "child";
 
-export function useSelectedChild(): UseSelectedChild {
-  const query = useParentChildren();
+/** `enabled: false` skips the /parent/children request entirely.
+ *
+ * Needed because the shared academic pages call useViewedStudent for EVERY role, and
+ * GET /parent/children is `require_role("parent")` - so without this a staff user would
+ * fire a guaranteed 403 on every one of those pages. `isLoading` reports false when
+ * disabled, so a staff caller is never told it is waiting on a request that will not
+ * happen. */
+export function useSelectedChild(options?: { enabled?: boolean }): UseSelectedChild {
+  const enabled = options?.enabled ?? true;
+  const query = useParentChildren({ enabled });
   const [searchParams, setSearchParams] = useSearchParams();
 
   const children = query.data?.items ?? [];
@@ -68,6 +76,6 @@ export function useSelectedChild(): UseSelectedChild {
       }),
     selectedChild: children.find((c) => c.id === selectedChildId),
     showSelector: children.length > 1,
-    isLoading: query.isLoading,
+    isLoading: enabled && query.isLoading,
   };
 }

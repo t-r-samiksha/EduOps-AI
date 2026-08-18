@@ -7,11 +7,13 @@ chronological classroom feed.
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import uuid
 from datetime import datetime
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -24,8 +26,10 @@ from app.models.subject import Subject
 from app.models.timetable import TimetableSlot
 from app.models.user import User
 from app.services.announcements import publish_announcement
+from app.services.classroom_materials import index_post_attachments
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.scoping import deny_parent
+from app.services.supabase_admin import download_resource_file
 
 router = APIRouter(tags=["classroom-stream"])
 
@@ -47,8 +51,15 @@ class AttachmentOut(BaseModel):
     post_id: int
     file_name: str
     file_url: str
+    """Object PATH inside the private `resources` bucket, NOT a link. Read the bytes via
+    GET /classroom/attachments/{id}/download - see api-contract.md's "Uploaded files:
+    NEVER return a Supabase public URL"."""
     file_type: str
     file_size: int
+    resource_id: int | None = None
+    """The library `resources` row this file was indexed as, so the UI can show that the
+    Doubt Bot can answer from it. NULL for images (no extractable text) and for
+    attachments uploaded before classroom posts fed the knowledge base."""
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -59,6 +70,14 @@ class PostCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     content: str = Field(min_length=1)
     attachments: list[AttachmentIn] = Field(default_factory=list)
+    share_with_grade: bool = True
+    """Whether this post's attachments are also filed in the resource library for the whole
+    GRADE (default) or pinned to just this class section.
+
+    Grade-wide is the default because a worksheet for Grade 3-B Math is nearly always just
+    as relevant to Grade 3-A Math, and because grade is the unit the bots' retrieval scopes
+    by. Affects only the library/RAG copy - the stream post itself is always visible to
+    this classroom alone, whatever this is set to."""
 
 
 class PostAuthorOut(BaseModel):
@@ -81,6 +100,14 @@ class StreamPostOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     attachments: list[AttachmentOut]
+    indexing_warnings: list[str] = []
+    """Per-attachment notes from adding the files to the bots' knowledge base. Empty on the
+    happy path and on reads.
+
+    Present so a failure to index is REPORTED rather than swallowed: the post itself
+    succeeded (deliberately - see services/classroom_materials.py on why an unparseable PDF
+    must not cost a teacher their post), so a 201 is correct, but the teacher still needs to
+    know the Doubt Bot cannot read that file yet."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -372,6 +399,7 @@ def create_stream_post(
     db.add(post)
     db.flush()
 
+    attachment_rows: list[PostAttachment] = []
     for att in body.attachments:
         attachment_row = PostAttachment(
             post_id=post.id,
@@ -381,6 +409,30 @@ def create_stream_post(
             file_size=att.file_size,
         )
         db.add(attachment_row)
+        attachment_rows.append(attachment_row)
+
+    # EVERY ATTACHED FILE ALSO BECOMES A LIBRARY RESOURCE, INDEXED FOR THE BOTS.
+    #
+    # This step did not exist. Posting a file here wrote bytes to storage and nothing else
+    # - no `resources` row, no ingestion - so the Doubt Bot could never answer from
+    # anything a teacher shared with their own class. `POST /resources/upload` was the only
+    # path into the RAG corpus, which meant uploading the same PDF twice, in two different
+    # screens, with nothing in either saying so. See services/classroom_materials.py.
+    #
+    # Returns warnings rather than raising: a PDF with no text layer must not cost the
+    # teacher their post. Those resources keep `indexed_at = NULL` and the periodic reindex
+    # job retries them.
+    indexing_warnings: list[str] = []
+    if attachment_rows:
+        db.flush()  # attachment ids, before they are linked to resources
+        indexing_warnings = index_post_attachments(
+            db,
+            classroom=classroom,
+            post_title=post.title,
+            attachments=attachment_rows,
+            uploader_id=user.id,
+            share_with_grade=body.share_with_grade,
+        )
 
     # A stream post of type "announcement" becomes a REAL announcement row.
     #
@@ -447,6 +499,7 @@ def create_stream_post(
         created_at=post.created_at,
         updated_at=post.updated_at,
         attachments=[AttachmentOut.model_validate(a) for a in post.attachments],
+        indexing_warnings=indexing_warnings,
     )
 
 
@@ -557,24 +610,100 @@ async def upload_classroom_attachment(
     filename = file.filename or "attachment"
     content_type = file.content_type or "application/octet-stream"
 
-    # Try storing to Supabase Storage if configured, else generate local reference
-    file_url = f"/attachments/classroom-{classroom_id}/{uuid.uuid4()}-{filename}"
-    try:
-        supabase_url = os.environ.get("SUPABASE_URL")
-        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-        if supabase_url and supabase_key and "your-" not in supabase_url:
-            from app.services.supabase_admin import upload_resource_file
+    # `file_url` is an object PATH inside the private `resources` bucket, not a URL.
+    # Read it back through GET /classroom/attachments/{id}/download.
+    #
+    # THIS USED TO RETURN A PUBLIC URL AND EVERY ATTACHMENT 404ed. The old code uploaded
+    # into `resources` - created with `public: False` (see supabase_admin.RESOURCES_BUCKET)
+    # - and then handed the browser
+    #     {SUPABASE_URL}/storage/v1/object/public/resources/{path}
+    # Supabase answers the /public/ route for a private bucket with
+    # `{"statusCode":"404","error":"Bucket not found","code":"NoSuchBucket"}`, so the link
+    # was dead the moment it was created, however well the upload itself went. Making the
+    # bucket public would "fix" the link by making every object URL-guessable and routing
+    # around this router's own view scoping - the exact tradeoff that bucket's docstring
+    # rejects. So: keep the bucket private, store the path, serve it through a scoped
+    # route. Same shape as fee payment proofs (routers/fees.py::get_payment_request_proof).
+    #
+    # AND IT NO LONGER FAKES SUCCESS. `except Exception` swallowed every storage failure
+    # and substituted an invented `https://storage.eduops.local/...` link, so a failed
+    # upload returned 200 with a URL resolving to nothing - the post was created carrying a
+    # permanently broken attachment and nothing anywhere recorded that the write had
+    # failed. An upload that did not store the bytes is an error.
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not supabase_url or not supabase_key or "your-" in supabase_url:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "File storage is not configured on this server - set SUPABASE_URL and "
+            "SUPABASE_SERVICE_ROLE_KEY to upload attachments.",
+        )
 
-            storage_path = f"classroom/{classroom_id}/{uuid.uuid4()}-{filename}"
-            upload_resource_file(path=storage_path, data=data, content_type=content_type)
-            file_url = f"{supabase_url}/storage/v1/object/public/resources/{storage_path}"
-    except Exception:
-        # Fall back to descriptive link
-        file_url = f"https://storage.eduops.local/classroom/{classroom_id}/{uuid.uuid4()}/{filename}"
+    from app.services.supabase_admin import upload_resource_file
+
+    storage_path = f"classroom/{classroom_id}/{uuid.uuid4()}-{filename}"
+    # Raises 502 on failure rather than returning a link to nothing.
+    upload_resource_file(path=storage_path, data=data, content_type=content_type)
 
     return AttachmentUploadOut(
         file_name=filename,
-        file_url=file_url,
+        file_url=storage_path,
         file_type=content_type,
         file_size=len(data),
+    )
+
+
+@router.get("/classroom/attachments/{attachment_id}/download")
+def download_classroom_attachment(
+    attachment_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Stream a post attachment back, scoped to who may view its classroom.
+
+    Exists because PostAttachment.file_url is a path into a PRIVATE bucket - there is
+    deliberately no public URL for the UI to link at, so the request has to carry the
+    caller's bearer token and be checked here. The frontend fetches this as a blob
+    (api/client.ts::apiGetBlob, same as fee payment proofs).
+
+    Attachments uploaded BEFORE this route existed hold a full `https://...` URL rather
+    than a path - those objects were never publicly readable and some were never stored
+    at all (see the upload handler's note on the invented eduops.local fallback), so they
+    are reported as gone instead of being passed to the storage client, which would fail
+    with a confusing 502.
+    """
+    attachment = (
+        db.query(PostAttachment).filter(PostAttachment.id == attachment_id).one_or_none()
+    )
+    if attachment is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+
+    post = db.query(StreamPost).filter(StreamPost.id == attachment.post_id).one_or_none()
+    if post is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+    classroom = db.query(Classroom).filter(Classroom.id == post.classroom_id).one_or_none()
+    if classroom is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+
+    # Whoever may read the stream may read its attachments - no separate rule, so the
+    # two can never drift apart.
+    _assert_can_view_classroom(db, user, classroom)
+
+    if "://" in attachment.file_url:
+        raise HTTPException(
+            status.HTTP_410_GONE,
+            "This attachment was uploaded before file storage was working and its "
+            "contents were never stored. Please re-upload it.",
+        )
+
+    data = download_resource_file(attachment.file_url)
+    media_type = attachment.file_type or mimetypes.guess_type(attachment.file_url)[0] or "application/octet-stream"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            # filename* (RFC 5987) so non-ASCII names survive; `inline` lets a PDF open
+            # in the browser's viewer rather than forcing a save.
+            "Content-Disposition": f"inline; filename*=UTF-8''{quote(attachment.file_name)}",
+        },
     )

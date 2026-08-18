@@ -175,9 +175,14 @@ export default function SyllabusPage() {
 
   return (
     <div className="flex flex-col gap-3">
+      {/* ONE SYLLABUS PAGE, NOT TWO. "Syllabus Plans" (this file) and "Syllabus Pace"
+          (TeacherSyllabusPacePage, deleted) both read GET /syllabus/summary and showed the
+          same expected-vs-actual data. This one is a strict superset - it can also create a
+          plan and filter by class, and it reports drift - so the other was removed rather
+          than merged into. */}
       <PageHeader
-        title="Syllabus Tracking"
-        description="Expected vs. actual pace per class/subject."
+        title="Syllabus Pace"
+        description="Expected vs. actual pace per class/subject, and the plans behind it."
         actions={
           schoolId != null && (
             <>

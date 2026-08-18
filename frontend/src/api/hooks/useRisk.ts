@@ -52,11 +52,29 @@ export function useResolveFlag() {
   });
 }
 
+/** The outreach history for one flag, newest first.
+ *
+ * Interventions used to be WRITE-ONLY: POST /risk/{id}/intervention saved a row and nothing
+ * in the app ever displayed it, so logging one was indistinguishable from the button not
+ * working, and the next teacher could not tell an outreach had already been made. */
+export function useFlagInterventions(flagId?: number) {
+  return useQuery<{ items: Intervention[] }>({
+    queryKey: ["risk-interventions", flagId],
+    queryFn: () => apiGet<{ items: Intervention[] }>(`/risk/${flagId}/interventions`),
+    enabled: typeof flagId === "number" && !Number.isNaN(flagId),
+  });
+}
+
 export function useLogIntervention() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ flagId, note, actionTaken }: { flagId: number; note: string; actionTaken: string }) =>
       apiPost<Intervention>(`/risk/${flagId}/intervention`, { note, action_taken: actionTaken }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["risk-flagged"] }),
+    onSuccess: (_data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["risk-flagged"] });
+      // Without this the intervention list still showed the pre-log result, which looked
+      // exactly like the save having failed.
+      queryClient.invalidateQueries({ queryKey: ["risk-interventions", variables.flagId] });
+    },
   });
 }

@@ -19,8 +19,9 @@ session + a printed summary) around the same function the real scheduler uses.
 WHAT IT DOES
 --------------
 For every student enrolled (primary enrollment) in the given school/academic_year,
-builds a real AttendanceSignal from AttendanceRecord and a RemarkSignal from
-RemarkStub (see that model's docstring - a seeded placeholder), scores them via
+builds a real AttendanceSignal from AttendanceRecord and a RemarkSignal from the
+`remarks` table, falling back to RemarkStub only for students with no real remark yet
+(see _build_remark_signal - real teacher remarks used to be ignored entirely), scores them via
 services/risk_scorer.py (including a real GradeSignal from Person B gradebook_entries),
 and:
   - low risk: no flag created; an existing OPEN flag for that student is left alone
@@ -51,6 +52,7 @@ from app.models.attendance import AttendanceRecord
 from app.models.class_ import SchoolClass
 from app.models.enrollment import Enrollment
 from app.models.parent_student import ParentStudent
+from app.models.remark import Remark
 from app.models.risk import RemarkStub, RiskFlag
 from app.models.user import User
 from app.services.attendance_stats import attendance_snapshot
@@ -95,6 +97,32 @@ def _build_grade_signal(session: Session, student_id: int, term: str = "Term 1")
 
 
 def _build_remark_signal(session: Session, student_id: int) -> RemarkSignal | None:
+    """Recent remark TEXT for this student, real remarks preferred over seeded stubs.
+
+    REAL REMARKS NOW COUNT. This read `remark_stubs` and nothing else, which was correct
+    when Person B had no remarks table - but `remarks` exists now and the Bulk Remarks
+    page writes to it, so every remark a teacher actually typed was invisible to the
+    scorer. The two features looked related in the UI and were completely disconnected
+    underneath: a teacher could log "disengaged, missed three assignments" for a whole
+    class and no risk score would move.
+
+    Real rows WIN rather than merge. Mixing them would let the synthetic demo text dilute
+    (or invent) a signal about a student a teacher has actually written about, and the
+    stubs are seeded per-student, so a union would almost always be part-fiction. The
+    fallback is kept because the Riverside demo fixtures rely on it - a student with no
+    real remarks yet still scores off the stub, which is what makes the seeded
+    healthy-vs-flagged contrast work (see CLAUDE.md on SEED_ANCHOR_DATE).
+    """
+    real = (
+        session.query(Remark)
+        .filter(Remark.student_id == student_id)
+        .order_by(Remark.created_at.desc())
+        .limit(REMARK_LOOKBACK_COUNT)
+        .all()
+    )
+    if real:
+        return RemarkSignal(student_id=student_id, remark_texts=[r.content for r in real])
+
     rows = (
         session.query(RemarkStub)
         .filter(RemarkStub.student_id == student_id)

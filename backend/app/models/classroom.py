@@ -81,4 +81,25 @@ class PostAttachment(Base):
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)  # in bytes
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    resource_id: Mapped[int | None] = mapped_column(
+        ForeignKey("resources.id", ondelete="SET NULL"), nullable=True
+    )
+    """The `resources` row this attachment was indexed as, so the Doubt Bot can answer
+    from it - NULL for an attachment that is not indexable (images) or that predates this
+    column.
+
+    WHY THIS EXISTS. Uploading a file to a classroom post used to write bytes to storage
+    and stop there: no `Resource` row, no `ingest_resource` call, so nothing a teacher
+    posted to their stream was ever retrievable by the Doubt Bot. The Resources library
+    was the only path into the RAG corpus, which meant teachers had to upload the same PDF
+    twice - once to share it with the class, once so the bot could read it - and nothing
+    in either UI said so. Now the stream post is itself an indexed resource and this
+    column is the link.
+
+    `ondelete="SET NULL"`, not CASCADE: deleting the resource from the library should not
+    silently delete the teacher's stream post along with it. The attachment keeps its own
+    `file_url`, so the download route still works; it just stops being indexed.
+    """
+
     post: Mapped["StreamPost"] = relationship(back_populates="attachments")
+    resource: Mapped["Resource | None"] = relationship()

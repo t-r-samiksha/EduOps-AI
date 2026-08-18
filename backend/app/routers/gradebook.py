@@ -19,7 +19,7 @@ from app.models.subject import Subject
 from app.models.timetable import TimetableSlot
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
-from app.services.scoping import assert_can_view_student_record
+from app.services.scoping import assert_can_view_class, assert_can_view_student_record
 from app.services.gradebook_service import (
     get_student_gradebook_summary,
     get_term_weights,
@@ -220,10 +220,17 @@ def get_class_gradebook_grid(
     db: Session = Depends(get_db),
 ):
     """Teacher views class section gradebook matrix with student rows and calculated averages."""
+    # This filtered on Enrollment.class_id and NOTHING else - no school comparison and no
+    # teacher-to-section check - so any authenticated teacher or admin could read another
+    # school's entire roster (every name, term average and GPA) by incrementing the id.
+    # One request, the whole class. Same cross-tenant shape as BLOCKER B-3 on the report
+    # card routes; the gate is shared with them now rather than copied a third time.
+    assert_can_view_class(db, user, class_id, what="class section")
+
     enrolled_students = (
         db.query(User)
         .join(Enrollment, Enrollment.student_id == User.id)
-        .filter(Enrollment.class_id == class_id)
+        .filter(Enrollment.class_id == class_id, User.school_id == user.school_id)
         .distinct()
         .all()
     )

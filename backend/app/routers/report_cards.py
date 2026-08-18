@@ -11,11 +11,10 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.class_ import SchoolClass
 from app.models.report_card import ReportCard
 from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
-from app.services.scoping import assert_can_view_student_record
+from app.services.scoping import assert_can_view_class, assert_can_view_student_record
 from app.services.report_card_service import (
     bulk_generate_class_report_cards,
     generate_single_report_card,
@@ -78,14 +77,10 @@ def bulk_generate_reports(
     db: Session = Depends(get_db),
 ):
     """High-performance batch report card generation for an entire class section."""
-    # BLOCKER B-3, same gap on the bulk path: class_id was unscoped.
-    school_class = (
-        db.query(SchoolClass)
-        .filter(SchoolClass.id == class_id, SchoolClass.school_id == user.school_id)
-        .one_or_none()
-    )
-    if school_class is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Class section not found in your school")
+    # BLOCKER B-3, same gap on the bulk path: class_id was unscoped. Now shares the
+    # class gate with the class listing below, which additionally holds a teacher to the
+    # sections they actually teach.
+    assert_can_view_class(db, user, class_id, what="class section")
 
     cards = bulk_generate_class_report_cards(db, class_id, term, academic_year)
     return {
@@ -94,6 +89,43 @@ def bulk_generate_reports(
         "count": len(cards),
         "term": term,
     }
+
+
+@router.get("/report_cards/class/{class_id}", response_model=list[ReportCardOut])
+def list_class_report_cards(
+    class_id: int,
+    term: str | None = Query(default=None),
+    academic_year: str | None = Query(default=None),
+    user: CurrentUser = Depends(require_role("teacher", "admin", "principal")),
+    db: Session = Depends(get_db),
+):
+    """List the report cards already generated for a class section.
+
+    WHY THIS EXISTS. `POST /report_cards/bulk-generate/{class_id}` could generate a whole
+    class's cards, but the only way to READ one back was per-student, so staff had no way
+    to see what they had just generated - the UI fell back to requesting student id 0 and
+    rendered a permanent "No report cards generated yet" empty state directly after a
+    successful bulk run. This is the missing read side of that write.
+
+    `term`/`academic_year` are optional filters so the page's term switcher does not have
+    to fetch every term ever generated and filter client-side.
+    """
+    assert_can_view_class(db, user, class_id, what="class section")
+
+    query = db.query(ReportCard).filter(
+        ReportCard.class_id == class_id,
+        # school_id as well as class_id: class_id is already proven to be in the caller's
+        # school by the gate above, but a report card carries its own school_id and these
+        # could in principle disagree after a class is moved. Filtering both means this
+        # can never widen beyond the tenant, whatever the row says.
+        ReportCard.school_id == user.school_id,
+    )
+    if term:
+        query = query.filter(ReportCard.term == term)
+    if academic_year:
+        query = query.filter(ReportCard.academic_year == academic_year)
+
+    return query.order_by(ReportCard.generated_at.desc()).all()
 
 
 @router.get("/report_cards/{student_id}", response_model=list[ReportCardOut])

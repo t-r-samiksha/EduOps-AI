@@ -227,7 +227,10 @@ def test_full_flag_lifecycle(client, seed):
     assert intervention_body["created_by"] == seed["teacher"].id
     assert intervention_body["action_taken"] == "called_parent"
 
-    _override_user("principal", user_id=seed["principal_user"].id)
+    # school_id passed explicitly: resolving now requires the flag's student to be in the
+    # caller's school (the cross-tenant fix), matching what GET /risk/flagged already did
+    # for this role. A principal with no school sees no flags and so can resolve none.
+    _override_user("principal", user_id=seed["principal_user"].id, school_id=seed["school"].id)
     resp = client.put(f"/risk/{flag_id}/resolve")
     assert resp.status_code == 200
     body = resp.json()
@@ -411,3 +414,228 @@ def test_early_warning_admin_never_sees_a_different_schools_flags(client, db_ses
     resp = client.get("/admin/early-warning/students")
     assert resp.status_code == 200
     assert resp.json()["items"] == []
+
+
+# --- Subject teachers, not just homeroom teachers ---
+
+
+def _make_subject_teacher_slot(db_session, seed, teacher):
+    """Give `teacher` a timetable slot in seed["class"] without making them its homeroom.
+
+    This is the shape that was broken: a real subject teacher for a section they do not own.
+    """
+    from datetime import time
+
+    from app.models.subject import Subject
+    from app.models.timetable import Room, TimetableSlot
+
+    subject = Subject(name=f"Subject-{uuid.uuid4().hex[:6]}", school_id=seed["school"].id)
+    room = Room(
+        name=f"Room-{uuid.uuid4().hex[:6]}",
+        school_id=seed["school"].id,
+        room_type="classroom",
+        capacity=30,
+    )
+    db_session.add_all([subject, room])
+    db_session.flush()
+
+    # TimetableSlot carries no school_id - it is derived through class/subject/room - and
+    # start_time/end_time are NOT NULL.
+    slot = TimetableSlot(
+        class_id=seed["class"].id,
+        subject_id=subject.id,
+        teacher_id=teacher.id,
+        room_id=room.id,
+        day_of_week=0,
+        period_number=1,
+        start_time=time(9, 0),
+        end_time=time(9, 45),
+        academic_year=ACADEMIC_YEAR,
+        is_active=True,
+    )
+    db_session.add(slot)
+    db_session.commit()
+    return slot
+
+
+def test_subject_teacher_sees_flags_for_students_they_teach(client, seed, db_session):
+    """A teacher who teaches a section but is NOT its homeroom teacher must see its flags.
+
+    THE BUG: risk scoping was homeroom-only (`SchoolClass.class_teacher_id == teacher_id`),
+    so a subject teacher's Early-Warning page was always empty - and a teacher with no
+    homeroom at all (normal) saw nothing anywhere. It rendered "No flagged students" rather
+    than an error, so a permissions gap read as good news.
+    """
+    flag = RiskFlag(
+        student_id=seed["flagged_student"].id,
+        risk_level="high",
+        score=0.8,
+        reasons=["attendance below threshold"],
+        status="open",
+    )
+    db_session.add(flag)
+    db_session.commit()
+
+    # other_teacher is homeroom of other_class, NOT of seed["class"] - so pre-fix they saw
+    # nothing here. Give them a real teaching slot in seed["class"].
+    _make_subject_teacher_slot(db_session, seed, seed["other_teacher"])
+
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+    resp = client.get("/risk/flagged")
+    assert resp.status_code == 200
+    ids = [f["student_id"] for f in resp.json()]
+    assert seed["flagged_student"].id in ids, (
+        "subject teacher cannot see a flag for a student they teach"
+    )
+
+
+def test_teacher_who_neither_owns_nor_teaches_the_class_sees_nothing(client, seed, db_session):
+    """The widened scope must not become 'every teacher sees everything'."""
+    flag = RiskFlag(
+        student_id=seed["flagged_student"].id,
+        risk_level="high",
+        score=0.8,
+        reasons=["attendance below threshold"],
+        status="open",
+    )
+    db_session.add(flag)
+    db_session.commit()
+
+    # No homeroom in seed["class"], and no timetable slot there either.
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+    resp = client.get("/risk/flagged")
+    assert resp.status_code == 200
+    assert [f["student_id"] for f in resp.json()] == []
+
+
+def test_subject_teacher_can_act_on_the_flag_they_can_see(client, seed, db_session):
+    """Seeing a flag and acting on it must use the same rule, or the page shows dead buttons."""
+    flag = RiskFlag(
+        student_id=seed["flagged_student"].id,
+        risk_level="medium",
+        score=0.5,
+        reasons=["grades dipping"],
+        status="open",
+    )
+    db_session.add(flag)
+    db_session.commit()
+    flag_id = flag.id
+
+    _make_subject_teacher_slot(db_session, seed, seed["other_teacher"])
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+
+    assert client.put(f"/risk/{flag_id}/acknowledge").status_code == 200
+    resp = client.post(
+        f"/risk/{flag_id}/intervention",
+        json={"note": "Spoke to the student after class.", "action_taken": "teacher meeting"},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+# --- Interventions are readable, and scoped ---
+
+
+def test_logged_intervention_can_be_read_back(client, seed, db_session):
+    """POST /risk/{id}/intervention had NO read counterpart - it was write-only.
+
+    A teacher could log "called parent", the row saved, and nothing in the app ever showed
+    it, so the feature was indistinguishable from broken and the next teacher could not tell
+    an outreach had already been made.
+    """
+    flag = RiskFlag(
+        student_id=seed["flagged_student"].id,
+        risk_level="high",
+        score=0.8,
+        reasons=["attendance"],
+        status="open",
+    )
+    db_session.add(flag)
+    db_session.commit()
+    flag_id = flag.id
+
+    _override_user("teacher", user_id=seed["teacher"].id, school_id=seed["school"].id)
+    created = client.post(
+        f"/risk/{flag_id}/intervention",
+        json={"note": "Left a voicemail with the guardian.", "action_taken": "called parent"},
+    )
+    assert created.status_code == 200, created.text
+
+    resp = client.get(f"/risk/{flag_id}/interventions")
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["action_taken"] == "called parent"
+    assert items[0]["note"] == "Left a voicemail with the guardian."
+    # Resolved server-side so the UI can name the actor without a lookup per row.
+    assert items[0]["created_by_name"] == "teacher"
+
+
+def test_intervention_list_is_ordered_newest_first(client, seed, db_session):
+    flag = RiskFlag(
+        student_id=seed["flagged_student"].id, risk_level="low", score=0.2, reasons=["x"], status="open"
+    )
+    db_session.add(flag)
+    db_session.commit()
+    flag_id = flag.id
+
+    _override_user("teacher", user_id=seed["teacher"].id, school_id=seed["school"].id)
+    for action in ("called parent", "counselor referral"):
+        assert (
+            client.post(
+                f"/risk/{flag_id}/intervention",
+                json={"note": f"note for {action}", "action_taken": action},
+            ).status_code
+            == 200
+        )
+
+    items = client.get(f"/risk/{flag_id}/interventions").json()["items"]
+    assert [i["action_taken"] for i in items] == ["counselor referral", "called parent"]
+
+
+def test_teacher_cannot_act_on_a_flag_for_a_student_they_do_not_teach(client, seed, db_session):
+    """The acknowledge/intervention/resolve routes had NO ownership check at all.
+
+    Each looked the flag up by id alone, so any authenticated teacher or admin could
+    acknowledge, intervene on, or resolve a flag for a student in ANOTHER SCHOOL by
+    incrementing the id - and log_intervention would write their name into that school's
+    history. The read path was scoped from the start, which is why it went unnoticed.
+    """
+    flag = RiskFlag(
+        student_id=seed["flagged_student"].id, risk_level="high", score=0.8, reasons=["x"], status="open"
+    )
+    db_session.add(flag)
+    db_session.commit()
+    flag_id = flag.id
+
+    # other_teacher neither owns nor teaches seed["class"].
+    _override_user("teacher", user_id=seed["other_teacher"].id, school_id=seed["school"].id)
+    assert client.put(f"/risk/{flag_id}/acknowledge").status_code == 403
+    assert (
+        client.post(
+            f"/risk/{flag_id}/intervention",
+            json={"note": "n", "action_taken": "a"},
+        ).status_code
+        == 403
+    )
+    assert client.get(f"/risk/{flag_id}/interventions").status_code == 403
+
+
+def test_admin_from_another_school_cannot_touch_the_flag(client, seed, db_session):
+    """404, not 403, so flag ids in other tenants cannot be probed by status code."""
+    flag = RiskFlag(
+        student_id=seed["flagged_student"].id, risk_level="high", score=0.8, reasons=["x"], status="open"
+    )
+    db_session.add(flag)
+
+    outsider_school = School(name="Outsider School")
+    db_session.add(outsider_school)
+    db_session.flush()
+    admin_role = db_session.query(Role).filter(Role.name == "admin").one()
+    outsider_admin = _make_user(db_session, admin_role, "outsider-admin", outsider_school)
+    db_session.commit()
+    flag_id = flag.id
+
+    _override_user("admin", user_id=outsider_admin.id, school_id=outsider_school.id)
+    assert client.put(f"/risk/{flag_id}/acknowledge").status_code == 404
+    assert client.put(f"/risk/{flag_id}/resolve").status_code == 404
+    assert client.get(f"/risk/{flag_id}/interventions").status_code == 404

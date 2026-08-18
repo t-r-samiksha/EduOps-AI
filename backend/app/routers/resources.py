@@ -12,8 +12,9 @@ import os
 import re
 import unicodedata
 from datetime import datetime, timezone
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -30,7 +31,7 @@ from app.models.user import User
 from app.services.auth import CurrentUser, get_current_user, require_role
 from app.services.ingestion import ingest_resource
 from app.services.scoping import teacher_class_ids
-from app.services.supabase_admin import upload_resource_file
+from app.services.supabase_admin import download_resource_file, upload_resource_file
 
 router = APIRouter(tags=["resources"])
 
@@ -294,14 +295,18 @@ async def upload_resource(
     scope_folder = f"class-{resolved_class_id}" if resolved_class_id else f"grade-{resolved_grade}"
     storage_path = f"{user.school_id}/{scope_folder}/{resource.id}-{_slugify(title)}{extension or '.bin'}"
 
-    try:
-        resource.file_url = upload_resource_file(
-            path=storage_path,
-            data=data,
-            content_type=resolved_mime,
-        )
-    except Exception:
-        resource.file_url = f"https://storage.eduops.local/resources/{storage_path}"
+    # NOT wrapped in `except Exception` with an invented `https://storage.eduops.local/...`
+    # fallback, which is what this did. That URL resolves to nothing, so a storage failure
+    # produced a 201 Created carrying a permanently dead download link, and the teacher was
+    # never told the bytes had not been stored. Exactly the failure the ingestion block
+    # below already argues against - a resource that exists but cannot be read is worse
+    # than a failed upload. upload_resource_file raises 502 on failure; this request's
+    # transaction then rolls the resource row back with it.
+    resource.file_url = upload_resource_file(
+        path=storage_path,
+        data=data,
+        content_type=resolved_mime,
+    )
     db.flush()
 
     # Inline ingestion for text/PDF files.
@@ -352,6 +357,99 @@ async def upload_resource(
 
     formatted = _format_resource(resource, db)
     return ResourceUploadOut(**formatted.model_dump(), chunk_count=chunk_count)
+
+
+def _assert_can_view_resource(db: Session, user: CurrentUser, resource: Resource) -> None:
+    """Whoever may LIST a resource may download it.
+
+    Factored out of get_class_resources' inline role branching so the two can never
+    disagree - a download route with its own copy of these rules would be one refactor
+    away from being more permissive than the listing it appears beside.
+
+    A resource is either class-specific (`class_id`) or grade-wide (`grade_level`), and
+    the listing surfaces both, so this accepts a match on either.
+    """
+    if resource.school_id != user.school_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
+
+    if user.role in ("admin", "principal"):
+        return
+
+    if user.role == "teacher":
+        if resource.class_id is not None and resource.class_id in _classes_taught_by(db, user.id):
+            return
+        if resource.grade_level is not None and resource.grade_level in _grades_taught_by(db, user.id):
+            return
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You do not teach this class section")
+
+    if user.role == "student":
+        student_ids = [user.id]
+    elif user.role == "parent":
+        student_ids = [
+            row.student_id
+            for row in db.query(ParentStudent.student_id).filter(ParentStudent.parent_id == user.id).all()
+        ]
+    else:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized to view this resource")
+
+    if not student_ids:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized to view this resource")
+
+    enrolled_class_ids = {
+        row.class_id
+        for row in db.query(Enrollment.class_id).filter(Enrollment.student_id.in_(student_ids))
+    }
+    if resource.class_id is not None and resource.class_id in enrolled_class_ids:
+        return
+    if resource.grade_level is not None and enrolled_class_ids:
+        grades = {
+            row.grade_level
+            for row in db.query(SchoolClass.grade_level).filter(SchoolClass.id.in_(enrolled_class_ids))
+        }
+        if resource.grade_level in grades:
+            return
+
+    raise HTTPException(status.HTTP_403_FORBIDDEN, "Not authorized to view this resource")
+
+
+@router.get("/resources/{resource_id}/download")
+def download_resource(
+    resource_id: int,
+    user: CurrentUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Stream a stored resource file back to an authorized caller.
+
+    WHY THIS EXISTS. `Resource.file_url` is an object PATH inside the PRIVATE `resources`
+    bucket (see that column's docstring), and there was no route to read it - the
+    Resources page linked `<a href={r.file_url}>` straight at the raw path, so every
+    download resolved against the frontend origin and 404ed. The same defect on the
+    classroom stream produced the `NoSuchBucket` error that surfaced this. Private bucket,
+    scoped route, streamed bytes - same shape as fee payment proofs.
+    """
+    resource = db.query(Resource).filter(Resource.id == resource_id).one_or_none()
+    if resource is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Resource not found")
+
+    _assert_can_view_resource(db, user, resource)
+
+    # Rows written while the upload handler faked a URL on failure hold a full
+    # `https://storage.eduops.local/...` string and no bytes were ever stored; say so
+    # instead of handing a URL to the storage client and surfacing a confusing 502.
+    if "://" in resource.file_url:
+        raise HTTPException(
+            status.HTTP_410_GONE,
+            "This file was uploaded before file storage was working and its contents "
+            "were never stored. Please re-upload it.",
+        )
+
+    data = download_resource_file(resource.file_url)
+    filename = resource.file_url.rsplit("/", 1)[-1]
+    return Response(
+        content=data,
+        media_type=resource.mime_type or "application/octet-stream",
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}"},
+    )
 
 
 @router.get("/resources/units", response_model=UnitsListResponse)

@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, time
+from datetime import date, time, timedelta
 
 import pytest
 
@@ -693,13 +693,32 @@ def test_my_substitute_duties_403_for_admin_role(client):
     assert resp.status_code == 403
 
 
+def _next_future_monday() -> str:
+    """The next Monday strictly after today, as an ISO date string.
+
+    Matches the seed timetable slot's `day_of_week=0`. COMPUTED, NOT HARDCODED: this was
+    the literal "2026-08-17" with a comment saying the date "must stay in the future
+    relative to whenever this suite runs" - which it stopped doing on 2026-08-18, one day
+    later. GET /staff/my-substitute-duties only returns UPCOMING duties, so the past date
+    made it return [] and the test failed with no code change behind it.
+
+    The other dates in this file are deliberately left hardcoded - they are past-or-any
+    dates whose assertions do not depend on being in the future (one test needs a PAST date
+    on purpose).
+    """
+    today = date.today()
+    # 0 = Monday. `or 7` so today-is-Monday advances a week instead of returning today,
+    # which would not be strictly in the future.
+    return (today + timedelta(days=(7 - today.weekday()) % 7 or 7)).isoformat()
+
+
 def test_my_substitute_duties_returns_the_confirmed_assignment(client, seed):
-    # A future Monday (matches the seed slot's day_of_week=0) - must stay in
-    # the future relative to whenever this suite runs, unlike the OTHER new
-    # test below which deliberately uses a past date.
+    # A future Monday (matches the seed slot's day_of_week=0), computed rather than
+    # written down - unlike the OTHER new test below, which deliberately uses a past date.
+    leave_day = _next_future_monday()
     _override_user("teacher", user_id=seed["original_teacher"].id)
     resp = client.post(
-        "/staff/request_leave", json={"start_date": "2026-08-17", "end_date": "2026-08-17", "reason": "sick"}
+        "/staff/request_leave", json={"start_date": leave_day, "end_date": leave_day, "reason": "sick"}
     )
     leave_id = resp.json()["id"]
 
@@ -721,8 +740,8 @@ def test_my_substitute_duties_returns_the_confirmed_assignment(client, seed):
     assert duty["subject_id"] == seed["subject"].id
     assert duty["class_id"] == seed["class"].id
     assert duty["status"] == "confirmed"
-    assert duty["leave_start_date"] == "2026-08-17"
-    assert duty["leave_end_date"] == "2026-08-17"
+    assert duty["leave_start_date"] == leave_day
+    assert duty["leave_end_date"] == leave_day
 
 
 def test_my_substitute_duties_empty_for_a_teacher_not_assigned_as_anyones_substitute(client, seed):

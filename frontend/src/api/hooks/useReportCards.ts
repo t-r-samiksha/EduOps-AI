@@ -57,6 +57,28 @@ export function useStudentReportCards(studentId?: number) {
   });
 }
 
+/** Report cards already generated for a class section.
+ *
+ * The read side of `useBulkGenerateReports`, which had none: staff could generate a whole
+ * class's cards and then had no way to see them, because the only listing endpoint was
+ * per-student. The page fell back to requesting student id 0 and showed a permanent
+ * "No report cards generated yet" even immediately after a successful bulk run. */
+export function useClassReportCards(
+  classId?: number,
+  term?: string,
+  academicYear?: string,
+) {
+  return useQuery<ReportCard[]>({
+    queryKey: ["class-report-cards", classId, term, academicYear],
+    queryFn: () =>
+      apiGet<ReportCard[]>(`/report_cards/class/${classId}`, {
+        term,
+        academic_year: academicYear,
+      }),
+    enabled: typeof classId === "number" && !Number.isNaN(classId),
+  });
+}
+
 export function useReportCardDetail(reportCardId?: number) {
   return useQuery<ReportCard>({
     queryKey: ["report-card-detail", reportCardId],
@@ -84,6 +106,7 @@ export function useGenerateReportCard() {
       ),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ["report-cards", variables.studentId] });
+      queryClient.invalidateQueries({ queryKey: ["class-report-cards"] });
     },
   });
 }
@@ -107,6 +130,8 @@ export function useBulkGenerateReports() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["report-cards"] });
+      // Without this the class listing kept showing the pre-generation result.
+      queryClient.invalidateQueries({ queryKey: ["class-report-cards"] });
     },
   });
 }

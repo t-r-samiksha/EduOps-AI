@@ -163,3 +163,47 @@ def students_in_classes(db: Session, class_ids: list[int]) -> set[int]:
             Enrollment.class_id.in_(class_ids), Enrollment.is_primary.is_(True)
         )
     }
+
+
+def assert_can_view_class(db: Session, user, class_id: int, *, what: str = "class") -> SchoolClass:
+    """Ownership gate for any per-CLASS roster read - class gradebook, a class's report
+    cards, a class's remarks.
+
+    The per-student sibling of this (assert_can_view_student_record) already existed, but
+    nothing guarded the class-level endpoints, which are strictly more sensitive: one
+    request returns the whole roster. `GET /gradebook/class/{class_id}` filtered on
+    `Enrollment.class_id == class_id` and NOTHING else, so any authenticated teacher or
+    admin could read another school's entire class - every student's name, term average
+    and GPA - by incrementing the id. Same cross-tenant shape as the report-card and
+    notification gaps before it.
+
+    - admin / principal: any class in their own school.
+    - teacher: only classes they are responsible for (homeroom UNION timetable-taught,
+      matching classes_taught_by - homeroom alone would cut real teachers off their own
+      sections, see that function's docstring).
+    - student / parent: denied. A roster is not per-child information; a parent reads
+      their own child through the per-student endpoints.
+
+    Returns the SchoolClass so callers that need its name/grade don't re-query. 404
+    rather than 403 for the wrong school, so class ids in other tenants cannot be probed
+    by status code - same convention as report_cards.py's student check.
+    """
+    if user.role in ("student", "parent"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Not authorized to view a whole {what} roster"
+        )
+
+    school_class = (
+        db.query(SchoolClass)
+        .filter(SchoolClass.id == class_id, SchoolClass.school_id == user.school_id)
+        .one_or_none()
+    )
+    if school_class is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Class section not found in your school")
+
+    if user.role == "teacher" and class_id not in classes_taught_by(db, user.id):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, f"Not authorized to view this {what}"
+        )
+
+    return school_class
