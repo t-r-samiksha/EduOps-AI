@@ -3010,20 +3010,97 @@ See the ⚠️ note under `POST /bots/student/ask` about the join that makes thi
 
 ### Announcements
 
-#### `POST /announcements`
-Create an announcement.
-- **Roles:** admin, principal, teacher
-- **Request:** `{ "title": "Sports day", "body": "...", "target": "class", "target_id": 2, "roles": null }`
-- **Response:** `{ "id": 5, "created_at": "2026-08-09T06:00:00Z" }`
+**✅ BUILT.** Backed by `announcements` + `announcement_acknowledgments`
+(`backend/app/models/announcement.py`, migration `d41f8a2c95b7`), audience resolution in
+`backend/app/services/announcements.py`.
 
-#### `GET /announcements`
-Fetch announcements targeted at the current user.
-- **Roles:** any authenticated
-- **Query:** `?since=&page=`
+> **THE ONE ARCHITECTURAL RULE: announcements are a SOURCE that routes through the
+> existing notification dispatch, not a second delivery system.** Posting resolves the
+> audience and then calls `services/notify.py`'s `dispatch_bulk` with
+> `source_type="announcement"` — recipients get it in the bell they already have. The
+> feed page is a richer *view* of the same content (category, scope, priority, author,
+> acknowledgment), not a parallel inbox. Get this wrong and the project has two
+> notification systems and no answer for why; get it right and it is one write path
+> with seven sources.
+
+**Reconciliation with the stubs this replaces:**
+
+| Stub | Built | Why |
+| --- | --- | --- |
+| `target` + `target_id` + `roles` | `scope_type` + `scope_grade_level` + `scope_class_id` | `target_id` was polymorphic with no way to tell a class id from a grade level. Separate typed columns plus a CHECK constraint make a half-populated scope unrepresentable. |
+| `roles: null` (filter by role) | dropped | Audience is derived from scope, not from a role list. "Grade 3" already means its students, their parents and its teachers; a role filter on top was a second, conflicting way to say the same thing. |
+| `GET /announcements` with `?since=&page=` | `GET /announcements/feed` | Renamed because the semantics are *the caller's own feed*, auto-filtered with **no `user_id` param**. A plain `GET /announcements` reads like a list-all that a client could widen. |
+| — | `/acknowledge`, `/ack-status` | Not in the stub. Ack-status is the operations beat: "27 of 40 parents have read this". |
+
+**Permission matrix — enforced server-side, one test per cell:**
+
+| Role | school | grade | class |
+| --- | --- | --- | --- |
+| principal | ✅ | ✅ | ✅ |
+| admin | ✅ | ✅ | ✅ |
+| teacher | ❌ | ✅ *own grades only* | ✅ *own classes only* |
+| student | ❌ | ❌ | ❌ |
+| parent | ❌ | ❌ | ❌ |
+
+"Own grades/classes" = homeroom **or** ≥1 active `TimetableSlot` for the class — the same
+wider rule the doubt-thread *membership* gate uses, deliberately **not** the
+homeroom-only rule that gates thread *verification*. A teacher's postable grades are the
+grade levels of the classes they teach, so a teacher who teaches Grade 1-A Math may post
+to Grade 1 as well as Grade 3 — the rule is "grades you actually teach", not "your
+homeroom's grade".
+
+`school_id` always comes from the caller's token, **never the request body**.
+
+#### `POST /announcements`
+- **Roles:** admin, principal, teacher (per the matrix)
+- **Request:** `{ "scope_type": "grade", "scope_grade_level": 3, "scope_class_id": null, "title": "Science fair on the 28th", "body": "...", "category": "event", "priority": "important" }`
+- `category`: `event` | `academic` | `fee` | `general`. `priority`: `normal` | `important` | `urgent`.
+- **Response:** `{ "announcement": {...}, "recipients": 9, "kb_note": null }` — `recipients` is the number of notifications actually dispatched, so the author sees the reach immediately.
+- Resolves the audience, dispatches through `dispatch_bulk` (`priority` passed straight through, so `urgent` arrives urgent), writes an audit row `create_announcement` on `announcements`.
+- **Errors:** `400` scope columns inconsistent with `scope_type`, blank title/body, unknown category/priority; `403` role not permitted for that scope, or a teacher naming a grade/class they don't teach; `404` unknown class, or a class outside the caller's school.
+
+#### `GET /announcements/feed`
+**The caller's own feed, auto-filtered. There is no `user_id` parameter** — the audience
+a caller belongs to is derived from their own identity, so no client can widen it.
+- **Roles:** all five
+- **Query:** `?scope=` (`school` | `grade` | `class`) optional filter, `?limit=`
+- Visibility: **student** — school-wide + their grade + their class. **parent** — the union across *all* linked children, deduplicated, no child selection required. **teacher** — school-wide + grades and classes they teach. **admin/principal** — everything in their school.
+- **Ordering: `urgent` first, then `important`, then newest.** Priority pinning is part of the contract, not a UI detail.
 - **Response:**
 ```json
-{ "items": [ { "id": 5, "title": "Sports day", "body": "...", "created_at": "2026-08-09T06:00:00Z" } ], "total": 1, "page": 1, "page_size": 20 }
+{ "items": [
+  { "id": 12, "title": "School closed Friday", "body": "...", "category": "general",
+    "priority": "urgent", "scope_type": "school", "scope_grade_level": null,
+    "scope_class_id": null, "scope_label": "School",
+    "author_id": 21354, "author_name": "Priya Nair", "created_at": "...",
+    "acknowledged": false, "acknowledged_at": null,
+    "related_children": [] } ],
+  "unacknowledged_count": 3 }
 ```
+- **`related_children`** is populated for a parent only: which of *their* children the item relates to, as a list — a parent with two children in Grade 3 gets **one** deduplicated item naming both, not two copies. Empty for a school-wide item (it relates to everyone) and for non-parent roles.
+- **`scope_label`** is resolved server-side (`School` / `Grade 3` / `Grade 3 - A`) so the UI badge needs no second lookup.
+
+#### `GET /announcements/{id}`
+Single item, same visibility rules as the feed.
+- **Errors:** `403` not in the audience; `404` unknown, or outside the caller's school.
+
+#### `PUT /announcements/{id}/acknowledge`
+- **Roles:** any user **actually in the announcement's audience** — acknowledging something you were never sent is meaningless, and would corrupt the ack-status denominator.
+- Idempotent: acknowledging twice keeps the first `acknowledged_at` (unique on `(announcement_id, user_id)`).
+- **Errors:** `403` not in the audience; `404` unknown announcement.
+
+#### `GET /announcements/{id}/ack-status`
+Who has read it and who hasn't — the operations view.
+- **Roles:** the **author**, plus admin/principal of the same school. Not the general audience: "who else has read this" is not every recipient's business.
+- **Response:**
+```json
+{ "announcement_id": 12, "audience_size": 9, "acknowledged_count": 4,
+  "acknowledged_pct": 44.4,
+  "acknowledged": [ { "user_id": 21533, "name": "Aarav Kumar", "role": "student", "acknowledged_at": "..." } ],
+  "outstanding": [ { "user_id": 21565, "name": "Rohan Kumar", "role": "parent" } ] }
+```
+- `audience_size` is **re-resolved live**, not stored at post time: a student who enrolled after the announcement went out is genuinely part of its audience now, and a stored count would drift.
+- **Errors:** `403` not the author and not admin/principal; `404` unknown or out-of-school.
 
 ### Notification center
 
