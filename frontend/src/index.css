@@ -4,6 +4,10 @@
 
 @layer base {
   :root {
+    /* Tells the browser to render native UI - form controls, and any scrollbar the OS
+       draws in overlay mode - in light colours. Without this, dark mode below inherited
+       LIGHT-GREY scrollbars and dropdown chrome on dark panels. */
+    color-scheme: light;
     /* Light theme — matches the reference's blue/white/off-white system exactly
        (hexes given directly, not reinterpreted): #0056D2 accent, #F4F6F9 page,
        #FFFFFF surface. Panel == card in fill; they're distinguished by shadow/
@@ -55,6 +59,7 @@
   }
 
   .dark {
+    color-scheme: dark;
     /* Dark theme — a deep desaturated navy (hue-matched to the blue accent
        family, not neutral gray), with the same accent brightened for legibility
        and cards distinctly lighter than the page via real lightness steps. */
@@ -128,9 +133,65 @@
       scroll-behavior: auto !important;
     }
   }
+
+  /* SCROLLBARS ARE HIDDEN, SCROLLING IS NOT.
+     ------------------------------------------------------------------------------
+     Every one of the ~30 scroll containers in this app previously rendered the raw OS
+     scrollbar, and two were visible at once on most screens: the page body, plus the
+     sidebar nav's own (Layout.tsx's `overflow-y-auto` rail). On Windows that is a ~15px
+     light-grey bar - and inside the collapsed 80px rail it consumed nearly a fifth of the
+     width, sitting directly against the nav icons.
+
+     `width: 0` / `scrollbar-width: none` hide the bar WITHOUT touching overflow, so wheel,
+     trackpad, touch, keyboard (arrows/PgUp/PgDn/Home/End) and programmatic scrollIntoView
+     all keep working exactly as before. This is not `overflow: hidden` - nothing becomes
+     unreachable.
+
+     THE TRADE-OFF, on the record: a hidden scrollbar also removes the visual cue that
+     content continues past the fold, and the thumb you could drag. Mouse-and-wheel and
+     keyboard users are unaffected; someone who scrolls by dragging the bar is. If a
+     specific container ever needs its bar back - a wide table where "there is more to the
+     right" is not otherwise obvious is the likely case - add `.show-scrollbar` to it
+     rather than reverting this. */
+  * {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* legacy Edge/IE */
+  }
+
+  *::-webkit-scrollbar {
+    /* Both axes: height covers horizontal scrollers (the transcript and gradebook
+       tables), width the vertical ones. */
+    width: 0;
+    height: 0;
+  }
 }
 
 @layer utilities {
+  /* Escape hatch: restores a thin, theme-aware scrollbar on one container. Drawn from the
+     design tokens rather than the OS default, so it fits even where it is visible. */
+  .show-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border-strong)) transparent;
+  }
+
+  .show-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .show-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .show-scrollbar::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border-strong));
+    border-radius: 9999px;
+  }
+
+  .show-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: hsl(var(--ink-faint, var(--border-strong)));
+  }
+
   .tabular-nums {
     font-variant-numeric: tabular-nums;
   }

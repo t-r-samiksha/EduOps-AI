@@ -167,6 +167,34 @@ That migration's docstring records the whole edit, and is the template to copy.
   The manual CLI scripts (`python -m scripts.run_nightly_risk_scoring --school-id ...
   --academic-year ...`, etc.) still work unchanged for on-demand/single-school runs.
 - Backend deps: `pip install -r requirements.txt --break-system-packages` (or use a venv)
+### The test suite shares the app's database — deliberately
+
+`tests/conftest.py` builds its engine from `DATABASE_URL`, so `pytest` talks to the **same
+Supabase Postgres the app and demo use**, through the connection pooler. Isolation is one
+savepoint per test, rolled back in the fixture.
+
+**This is a decision, not an oversight** (2026-08-18). A separate test database was set up and
+verified working, then deliberately dropped in favour of the simpler single-project setup for
+the hackathon. `TEST_DATABASE_URL` is still honoured if anyone sets it, and switching later
+costs nothing in code — point it at another Postgres and run `alembic upgrade head` against
+that. Three things follow from sharing, and none of them needs re-investigating:
+
+1. **One unreproducible failure in a full run is expected, and is not a bug.** The savepoint
+   needs to hold one pooled connection for a whole test; over a ~13-minute, ~1290-test run,
+   pgbouncer recycling a connection breaks that for one test and the fixture cannot tell it
+   apart from a real failure. Seen once:
+   `test_person_b_authz.py::test_teacher_can_still_create_remarks` failed in a full run, then
+   passed 8/8 alone, passed with its whole file, and passed in a clean full run of 1287.
+   Nothing on its path can fail intermittently on its own merits — the endpoint has no
+   read-then-write, and `notifications` has no unique constraint for an insert to collide with.
+   **Triage in this order before debugging: the one test, then its file, then the full suite.
+   Green on all three means it was the connection.**
+2. **Do not run the suite during a demo.** It competes with the live app for the same pooled
+   connections for ~13 minutes.
+3. **Sequences advance on real tables.** Rows roll back; Postgres sequences do not. A full run
+   pushes the id counters on `users`/`remarks`/`notifications` forward by a few thousand.
+   Harmless, but it explains why demo ids jump.
+
 - **Always run backend tooling through the venv interpreter, not a bare command.**
   There is a venv at `backend/venv`, and the project's deps are installed only there.
   A bare `alembic ...` / `pytest ...` / `python ...` on this machine resolves to the
